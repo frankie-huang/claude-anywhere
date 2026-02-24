@@ -109,6 +109,8 @@ CALLBACK_SERVER_URL=http://localhost:8080
   },
   "tool_use_id": "toolu_abc123..."
 }
+
+> 注: `tool_use_id` 是测试脚本生成的模拟字段，目前 PermissionRequest 不提供此字段（未来可能支持）。
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [INFO] 执行 permission-notify.sh...
 ...

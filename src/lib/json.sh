@@ -111,8 +111,10 @@ try:
             break
     if result is None:
         result = ''
+    elif isinstance(result, bool):
+        result = 'true' if result else 'false'
     print(str(result))
-except:
+except Exception:
     print('')
 " "$field_path" 2>/dev/null
             ;;
@@ -193,8 +195,12 @@ for f in sys.argv[1:]:
             else:
                 result = ''
                 break
-        print(str(result) if result is not None else '')
-    except:
+        if result is None:
+            result = ''
+        elif isinstance(result, bool):
+            result = 'true' if result else 'false'
+        print(str(result))
+    except Exception:
         print('')
 " "${fields[@]}" 2>/dev/null
             ;;
@@ -259,7 +265,7 @@ try:
             result = {}
             break
     print(json.dumps(result))
-except:
+except Exception:
     print('{}')
 " "$field_path" 2>/dev/null
             ;;
@@ -359,7 +365,10 @@ json_get_array_value() {
     case "$JSON_PARSER" in
         jq)
             # jq 解析：遍历数组，过滤 type，提取 value_field
-            echo "$json" | jq -r ".$array_path[]? | select(.type==\"$type_filter\") | .$value_field" 2>/dev/null | tr '\n' '∂'
+            # 注意：不要用 tr '\n' '∂' 拼接，会在末尾多出一个分隔符
+            # 旧写法（有尾部分隔符 bug）：
+            #   echo "$json" | jq -r ".$array_path[]? | select(.type==\"$type_filter\") | .$value_field" 2>/dev/null | tr '\n' '∂'
+            echo "$json" | jq -r "[.$array_path[]? | select(.type==\"$type_filter\") | .$value_field] | join(\"∂\")" 2>/dev/null
             ;;
         python3)
             # Python3 解析
@@ -377,9 +386,15 @@ try:
             obj = []
             break
     if isinstance(obj, list):
-        values = [item.get(val_field, '') for item in obj if item.get('type') == type_filter]
+        values = []
+        for item in obj:
+            if item.get('type') == type_filter:
+                v = item.get(val_field, '')
+                if isinstance(v, bool):
+                    v = 'true' if v else 'false'
+                values.append(str(v) if v is not None else '')
         print('∂'.join(values))
-except:
+except Exception:
     print('')
 " "$array_path" "$type_filter" "$value_field" 2>/dev/null
             ;;
@@ -437,7 +452,7 @@ try:
             result = None
             break
     print('1' if result is not None else '')
-except:
+except Exception:
     print('')
 " "$field_path" 2>/dev/null)
             [ -n "$value" ]

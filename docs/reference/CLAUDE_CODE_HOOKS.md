@@ -139,6 +139,9 @@ Claude Code 支持 **11 种 hook 事件**：
   - 修改工具输入后自动批准
   - 显示确认对话（ask）
 - **输入 JSON 示例**:
+
+  > **注意**: PermissionRequest 的输入 JSON schema 尚未官方文档化（参见 [GitHub Issue #11891](https://github.com/anthropics/claude-code/issues/11891)）。在实际测试确认的字段中，目前不包含 `tool_use_id`（未来可能支持）。
+
   ```json
   {
     "session_id": "abc123",

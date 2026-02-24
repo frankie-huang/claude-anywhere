@@ -39,7 +39,8 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 
-# 生成 tool_use_id
+# 生成 tool_use_id（模拟字段，实际 PermissionRequest 输入中暂未提供此字段）
+# 注意: Claude Code 的 PermissionRequest hook 不提供 tool_use_id，这里仅用于测试标识
 generate_tool_use_id() {
     echo "toolu_$(openssl rand -hex 12 2>/dev/null || echo "01ABC123DEF456")"
 }
@@ -243,7 +244,8 @@ ${YELLOW}环境变量:${NC}
 ${YELLOW}JSON 格式说明:${NC}
   输出符合 Claude Code PermissionRequest hook 标准格式：
   - session_id, transcript_path, cwd, permission_mode
-  - hook_event_name, tool_name, tool_input (嵌套), tool_use_id
+  - hook_event_name, tool_name, tool_input (嵌套)
+  - tool_use_id (模拟字段，目前 PermissionRequest 不提供，未来可能支持)
 
 EOF
 }

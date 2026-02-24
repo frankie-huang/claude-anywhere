@@ -4,6 +4,8 @@ import logging
 import threading
 import urllib.request
 
+from typing import Tuple
+
 from config import CALLBACK_PAGE_CLOSE_DELAY
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,62 @@ def post_json(url, data, auth_token=None, timeout=10):
     opener = urllib.request.build_opener(no_proxy_handler)
     with opener.open(req, timeout=timeout) as response:
         return json.loads(response.read().decode('utf-8'))
+
+
+def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
+    """从 Callback 侧发送文本消息到飞书（兼容单机和分离部署）
+
+    优先使用 FeishuAPIService 直接发送（单机模式），
+    不可用时通过网关 /gw/feishu/send 转发（分离部署模式）。
+
+    Args:
+        chat_id: 飞书群聊 ID
+        text: 消息文本
+
+    Returns:
+        (success, message_id or error)
+    """
+    # 方式 1：直接通过 FeishuAPIService 发送（单机模式）
+    try:
+        from services.feishu_api import FeishuAPIService
+        service = FeishuAPIService.get_instance()
+        if service and service.enabled:
+            success, result = service.send_text(
+                text,
+                receive_id=chat_id,
+                receive_id_type='chat_id'
+            )
+            return (success, result)
+    except Exception as e:
+        logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+
+    # 方式 2：通过网关转发（分离部署模式）
+    try:
+        from config import FEISHU_GATEWAY_URL, FEISHU_OWNER_ID
+        from services.auth_token_store import AuthTokenStore
+
+        if not FEISHU_GATEWAY_URL:
+            return (False, 'no feishu service available')
+
+        store = AuthTokenStore.get_instance()
+        auth_token = store.get() if store else ''
+        if not auth_token:
+            return (False, 'no auth_token available')
+
+        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/send'
+        data = {
+            'msg_type': 'text',
+            'content': text,
+            'owner_id': FEISHU_OWNER_ID,
+            'chat_id': chat_id
+        }
+        resp = post_json(api_url, data, auth_token=auth_token)
+        if resp.get('success'):
+            return (True, resp.get('data', {}).get('message_id', ''))
+        else:
+            return (False, resp.get('error', 'unknown'))
+    except Exception as e:
+        return (False, str(e))
 
 
 def send_json(handler, status, data):

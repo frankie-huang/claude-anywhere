@@ -292,30 +292,18 @@ def _wait_for_completion(proc: subprocess.Popen, session_id: str, chat_id: str =
 def _send_error_notification(chat_id: str, error_msg: str):
     """发送错误通知到飞书
 
-    Note: 延迟导入 FeishuAPIService 以避免循环依赖
-
     Args:
         chat_id: 群聊 ID
         error_msg: 错误消息
     """
-    try:
-        from services.feishu_api import FeishuAPIService
+    from handlers.utils import send_feishu_text
 
-        service = FeishuAPIService.get_instance()
-        if service and service.enabled:
-            success, result = service.send_text(
-                f"❌ Claude 执行异常:\n{error_msg}",
-                receive_id=chat_id,
-                receive_id_type='chat_id'
-            )
-            if success:
-                logger.info(f"[claude] Sent error notification to {chat_id}")
-            else:
-                logger.error(f"[claude] Failed to send error notification: {result}")
-        else:
-            logger.warning("[claude] FeishuAPIService not available for error notification")
-    except Exception as e:
-        logger.error(f"[claude] Failed to send error notification: {e}")
+    text = "❌ Claude 执行异常:\n%s" % error_msg
+    success, result = send_feishu_text(chat_id, text)
+    if success:
+        logger.info("[claude] Sent error notification to %s", chat_id)
+    else:
+        logger.error("[claude] Failed to send error notification: %s", result)
 
 
 def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
