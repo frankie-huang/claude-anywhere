@@ -537,18 +537,42 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
     sent_message_id = ''
 
     if status == 'processing':
-        # 正在处理
+        # processing 通知策略：
+        #
+        # | 场景               | 行为                                      | sent_message_id           |
+        # |-------------------|-------------------------------------------|---------------------------|
+        # | 新建会话           | 发送文本消息(会话信息)，并给该消息加 Typing 表情 | 新发送的通知消息 ID         |
+        # | 继续会话           | 给用户消息添加 Typing 表情(轻量，避免刷屏)      | reply_to(用户发送的消息 ID) |
+        # | 继续会话(表情失败时) | 回退发送 ⏳ 文本消息                         | 新发送的通知消息 ID          |
         if is_new:
+            # 新建会话 - 发送文本消息，展示会话信息
             message = f"🆕 Claude 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
             if claude_command:
                 message += f"\n🔧 命令: `{claude_command}`"
             if session_id:
                 message += f"\n🔑 Session: `{session_id}`"
+            success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
+                                                           reply_in_thread=reply_in_thread)
+            # 给发出的通知消息添加 Typing 表情，表示正在处理中
+            if success and sent_message_id:
+                service.add_reaction(sent_message_id, 'Typing')
         else:
-            message = "⏳ Claude 正在处理您的问题，请稍候..."
+            # 继续会话 - 用表情回应代替文本通知，更轻量避免刷屏
+            if reply_to:
+                reaction_ok, _ = service.add_reaction(reply_to, 'Typing')
+                if reaction_ok:
+                    logger.info(f"[feishu] Added 'Typing' reaction to message {reply_to}")
+                    # 将用户发送的消息作为 last_message_id，维护链式回复
+                    sent_message_id = reply_to
+                    success = True
+                else:
+                    logger.warning(f"[feishu] Failed to add reaction, fallback to text notification")
 
-        success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
-                                                       reply_in_thread=reply_in_thread)
+            # 表情回应失败或无 reply_to 时，回退为文本消息
+            if not success:
+                message = "⏳ Claude 正在处理您的问题，请稍候..."
+                success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
+                                                               reply_in_thread=reply_in_thread)
 
     elif status == 'completed':
         # 快速完成
@@ -2230,6 +2254,11 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
         return True, {'success': False, 'error': 'Feishu API service not enabled'}
 
     reply_in_thread = binding.get('reply_in_thread', False)
+
+    # 尝试清除 reply_to 消息上的 Typing 表情（新建/继续会话的 processing 阶段可能添加了该表情）
+    # 多数场景下消息上并无此表情，remove_reaction 查询到空列表后会直接返回，无副作用
+    if reply_to_message_id:
+        service.remove_reaction(reply_to_message_id, 'Typing')
 
     success = False
     sent_message_id = ''

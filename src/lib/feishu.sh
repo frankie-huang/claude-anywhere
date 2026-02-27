@@ -157,7 +157,7 @@ render_template() {
                         sed $'s/\t/\\\\t/g' | \
                         sed 's/$/\\n/g' | tr -d '\n' | sed 's/\\n$//')
                 fi
-            elif [[ "$key" == "response_content" ]] || [[ "$key" == "thinking_content" ]]; then
+            elif [[ "$key" == "response_content" ]] || [[ "$key" == "thinking_content" ]] || [[ "$key" == "plan_content" ]]; then
                 # response_content: 飞书 Markdown 代码块必须在行首
                 # 1. 删除代码块标记前的空格（如 "   ```bash" → "```bash"）
                 # 2. 用 python3 json.dumps 处理 JSON 转义
@@ -254,6 +254,9 @@ render_sub_template() {
             ;;
         "thinking")
             template_file="${template_dir}/thinking-element.json"
+            ;;
+        "plan-content")
+            template_file="${template_dir}/plan-content.json"
             ;;
         *)
             log_error "Unknown sub template type: $sub_type"
@@ -487,6 +490,9 @@ build_permission_card() {
             ;;
         "Edit"|"Write"|"Read")
             command_element=$(render_sub_template "command-file" "file_path=$command_arg")
+            ;;
+        "ExitPlanMode")
+            command_element=$(render_sub_template "plan-content" "plan_content=$command_arg")
             ;;
         *)
             # 未知工具类型,默认使用 Bash 模板

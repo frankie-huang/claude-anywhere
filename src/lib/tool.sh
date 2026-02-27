@@ -39,7 +39,7 @@ _builtin_tool_color() {
         Bash) echo "orange" ;;
         Edit|Write) echo "yellow" ;;
         Read|Glob|Grep) echo "blue" ;;
-        AskUserQuestion) echo "blue" ;;
+        AskUserQuestion|ExitPlanMode) echo "blue" ;;
         Skill) echo "green" ;;
         WebSearch|WebFetch|mcp__4_5v_mcp__analyze_image|mcp__web_reader__webReader) echo "purple" ;;
         *) echo "grey" ;;
@@ -54,6 +54,7 @@ _builtin_tool_field() {
         WebSearch) echo "query" ;;
         WebFetch) echo "url" ;;
         AskUserQuestion) echo "questions" ;;
+        ExitPlanMode) echo "plan" ;;
         Skill) echo "skill" ;;
         *) echo "" ;;
     esac
@@ -241,6 +242,15 @@ extract_tool_detail() {
                 "Skill")
                     EXTRACTED_COMMAND=$(format_skill_call "$json_input")
                     ;;
+                "ExitPlanMode")
+                    local plan_content
+                    plan_content=$(json_get "$json_input" "tool_input.plan")
+                    if [ -n "$plan_content" ]; then
+                        EXTRACTED_COMMAND="$plan_content"
+                    else
+                        EXTRACTED_COMMAND="ExitPlanMode"
+                    fi
+                    ;;
                 *)
                     # 未知自定义格式，使用工具名
                     EXTRACTED_COMMAND="$tool_name"
@@ -310,6 +320,15 @@ extract_tool_detail() {
                 ;;
             "Skill")
                 EXTRACTED_COMMAND=$(format_skill_call "$json_input")
+                ;;
+            "ExitPlanMode")
+                local plan_content
+                plan_content=$(json_get "$json_input" "tool_input.plan")
+                if [ -n "$plan_content" ]; then
+                    EXTRACTED_COMMAND="$plan_content"
+                else
+                    EXTRACTED_COMMAND="ExitPlanMode"
+                fi
                 ;;
             *)
                 EXTRACTED_COMMAND="$tool_name"

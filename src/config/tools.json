@@ -114,6 +114,16 @@
       "detail_template": "",
       "rule_template": "Skill({skill})",
       "custom_format": true
+    },
+    "ExitPlanMode": {
+      "name": "ExitPlanMode",
+      "display_name": "方案审批",
+      "color": "blue",
+      "icon": "plan",
+      "input_field": "plan",
+      "detail_template": "",
+      "rule_template": "ExitPlanMode",
+      "custom_format": true
     }
   },
   "_defaults": {

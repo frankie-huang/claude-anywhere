@@ -115,6 +115,14 @@
 }
 ```
 
+#### plan-content.json
+**用途**: 方案内容元素（ExitPlanMode 工具）
+
+**变量**:
+- `{{plan_content}}` - 方案内容（Markdown 格式）
+
+**结构**: 包含两个元素——**方案：** 标签 + 灰底背景（`grey-50`）的 Markdown 内容区域
+
 #### buttons.json
 **用途**: 权限请求卡片的交互按钮（Webhook 模式）
 
@@ -200,7 +208,9 @@ export FEISHU_TEMPLATE_PATH=/path/to/custom/templates
 ├── buttons-openapi.json           # 子模板:交互按钮（OpenAPI 模式，callback）
 ├── command-detail-bash.json       # 子模板:Bash命令详情
 ├── command-detail-file.json       # 子模板:文件操作详情
-└── description-element.json       # 子模板:描述元素
+├── description-element.json       # 子模板:描述元素
+├── plan-content.json              # 子模板:方案内容（ExitPlanMode 工具）
+└── thinking-element.json          # 子模板:思考过程元素
 ```
 
 ## 模板变量替换规则

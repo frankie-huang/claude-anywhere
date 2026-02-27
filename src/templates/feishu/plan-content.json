@@ -1,0 +1,34 @@
+{
+  "tag": "markdown",
+  "content": "**方案：**",
+  "text_align": "left",
+  "text_size": "normal_v2",
+  "margin": "0px 0px 0px 0px"
+},
+{
+  "tag": "column_set",
+  "flex_mode": "stretch",
+  "horizontal_spacing": "8px",
+  "horizontal_align": "left",
+  "columns": [
+    {
+      "tag": "column",
+      "width": "weighted",
+      "background_style": "grey-50",
+      "elements": [
+        {
+          "tag": "markdown",
+          "content": "{{plan_content}}",
+          "text_align": "left",
+          "text_size": "normal_v2"
+        }
+      ],
+      "padding": "12px 12px 12px 12px",
+      "vertical_spacing": "8px",
+      "horizontal_align": "left",
+      "vertical_align": "top",
+      "weight": 1
+    }
+  ],
+  "margin": "0px 0px 0px 0px"
+}

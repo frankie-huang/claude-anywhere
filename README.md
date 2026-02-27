@@ -233,7 +233,7 @@ vim .env
 - **可交互权限控制**: 用户可直接在飞书消息中点击按钮批准/拒绝权限请求
 - **四种操作模式**: 批准运行、始终允许、拒绝运行、拒绝并中断
 - **权限持久化**: 支持"始终允许"选项，自动写入项目权限规则
-- **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch 等 Claude Code 工具
+- **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch、ExitPlanMode 等 Claude Code 工具
 
 ### 会话继续（OpenAPI 模式）
 - **飞书回复继续会话**: 用户可回复飞书消息在对应的 Claude session 中继续提问

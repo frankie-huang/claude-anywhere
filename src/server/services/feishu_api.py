@@ -12,7 +12,7 @@ import json
 import logging
 import threading
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, List, Any
 
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import URLError, HTTPError
@@ -467,6 +467,187 @@ class MessageSender:
         logger.info(f"[feishu-api] Text replied: {new_message_id}, parent_id={message_id}, in_thread={reply_in_thread}")
         return True, new_message_id
 
+    def add_reaction(
+        self,
+        message_id: str,
+        emoji_type: str
+    ) -> Tuple[bool, str]:
+        """给消息添加表情回应
+
+        飞书 API: POST /open-apis/im/v1/messages/:message_id/reactions
+        所需权限: im:message.reactions:write_only
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 表情类型，如 "OK"、"THUMBSUP" 等
+                        完整列表见 https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+
+        Returns:
+            (success, reaction_id or error)
+        """
+        if not message_id:
+            return False, "No message_id specified"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f"{FEISHU_API_BASE}/im/v1/messages/{message_id}/reactions"
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Authorization': f'Bearer {token}'
+        }
+
+        payload = {
+            'reaction_type': {
+                'emoji_type': emoji_type
+            }
+        }
+
+        success, resp = _http_request(
+            url,
+            method='POST',
+            headers=headers,
+            data=json.dumps(payload).encode('utf-8')
+        )
+
+        if not success:
+            return False, str(resp.get('error', 'Unknown error'))
+
+        code = resp.get('code', -1)
+        if code != 0:
+            error_msg = resp.get('msg', 'Unknown error')
+            logger.error(f"[feishu-api] Add reaction failed: code={code}, msg={error_msg}")
+            return False, f"API error: {error_msg}"
+
+        reaction_id = resp.get('data', {}).get('reaction_id', '')
+        logger.info(f"[feishu-api] Reaction added: {reaction_id}, message_id={message_id}, emoji={emoji_type}")
+        return True, reaction_id
+
+    def get_reactions(
+        self,
+        message_id: str,
+        emoji_type: str = ''
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        """查询消息的表情回应列表
+
+        飞书 API: GET /open-apis/im/v1/messages/:message_id/reactions
+        所需权限: im:message.reactions:read
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 表情类型过滤，为空则返回所有表情
+
+        Returns:
+            (success, reactions_list)，失败时返回空列表
+            reactions_list 中每项包含 reaction_id、reaction_type.emoji_type 等
+        """
+        if not message_id:
+            return False, []
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, []
+
+        url = f"{FEISHU_API_BASE}/im/v1/messages/{message_id}/reactions"
+        if emoji_type:
+            from urllib.parse import quote
+            url += f"?reaction_type={quote(emoji_type)}"
+        headers = {
+            'Authorization': f'Bearer {token}'
+        }
+
+        success, resp = _http_request(url, method='GET', headers=headers)
+
+        if not success:
+            return False, []
+
+        code = resp.get('code', -1)
+        if code != 0:
+            error_msg = resp.get('msg', 'Unknown error')
+            logger.error(f"[feishu-api] Get reactions failed: code={code}, msg={error_msg}")
+            return False, []
+
+        items = resp.get('data', {}).get('items', [])
+        return True, items
+
+    def delete_reaction(
+        self,
+        message_id: str,
+        reaction_id: str
+    ) -> Tuple[bool, str]:
+        """删除消息的表情回应
+
+        飞书 API: DELETE /open-apis/im/v1/messages/:message_id/reactions/:reaction_id
+        所需权限: im:message.reactions:write_only（只能删除自己添加的表情）
+
+        Args:
+            message_id: 消息 ID
+            reaction_id: 表情回应 ID
+
+        Returns:
+            (success, error_msg)
+        """
+        if not message_id or not reaction_id:
+            return False, "Missing message_id or reaction_id"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f"{FEISHU_API_BASE}/im/v1/messages/{message_id}/reactions/{reaction_id}"
+        headers = {
+            'Authorization': f'Bearer {token}'
+        }
+
+        success, resp = _http_request(url, method='DELETE', headers=headers)
+
+        if not success:
+            return False, str(resp.get('error', 'Unknown error'))
+
+        code = resp.get('code', -1)
+        if code != 0:
+            error_msg = resp.get('msg', 'Unknown error')
+            logger.error(f"[feishu-api] Delete reaction failed: code={code}, msg={error_msg}")
+            return False, f"API error: {error_msg}"
+
+        logger.info(f"[feishu-api] Reaction deleted: {reaction_id}, message_id={message_id}")
+        return True, ''
+
+    def remove_reaction(
+        self,
+        message_id: str,
+        emoji_type: str
+    ) -> Tuple[bool, int]:
+        """查询并删除消息上指定类型的表情回应（便捷方法）
+
+        先查询消息上的表情列表，过滤出指定类型，再逐个删除。
+        只能删除机器人自己添加的表情（飞书 API 限制）。
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 要删除的表情类型，如 "Typing"
+
+        Returns:
+            (success, deleted_count)
+        """
+        if not message_id:
+            return False, 0
+
+        ok, items = self.get_reactions(message_id, emoji_type)
+        if not ok or not items:
+            return False, 0
+
+        deleted = 0
+        for item in items:
+            rid = item.get('reaction_id', '')
+            if rid:
+                success, _ = self.delete_reaction(message_id, rid)
+                if success:
+                    deleted += 1
+
+        return deleted > 0, deleted
+
 
 # =============================================================================
 # FeishuAPIService
@@ -622,3 +803,45 @@ class FeishuAPIService:
             return False, "Feishu API service not enabled"
 
         return self._message_sender.reply_text(text, message_id, reply_in_thread)
+
+    def add_reaction(
+        self,
+        message_id: str,
+        emoji_type: str
+    ) -> Tuple[bool, str]:
+        """给消息添加表情回应
+
+        飞书 API: POST /open-apis/im/v1/messages/:message_id/reactions
+        所需权限: im:message.reactions:write_only
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 表情类型，如 "OK"、"THUMBSUP" 等
+                        完整列表见 https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+
+        Returns:
+            (success, reaction_id or error)
+        """
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+
+        return self._message_sender.add_reaction(message_id, emoji_type)
+
+    def remove_reaction(
+        self,
+        message_id: str,
+        emoji_type: str
+    ) -> Tuple[bool, int]:
+        """查询并删除消息上指定类型的表情回应
+
+        Args:
+            message_id: 消息 ID
+            emoji_type: 要删除的表情类型，如 "Typing"
+
+        Returns:
+            (success, deleted_count)
+        """
+        if not self._enabled:
+            return False, 0
+
+        return self._message_sender.remove_reaction(message_id, emoji_type)
