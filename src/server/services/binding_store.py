@@ -151,10 +151,17 @@ class BindingStore:
                 # - 传入非空值且与旧值相同：保留两者
                 # - 传入非空值且与旧值不同：更新目录，清除旧 session_id（已失效）
                 # - 传入空值：清除两者
+                # - callback_url 改变时（更换设备），即使目录相同也清除 session_id
                 if default_chat_dir:
                     binding_data['default_chat_dir'] = default_chat_dir
                     old_dir = existing.get('default_chat_dir', '') if existing else ''
-                    if default_chat_dir == old_dir and existing and 'default_chat_session_id' in existing:
+                    old_callback = existing.get('callback_url', '') if existing else ''
+                    # 注意：old_dir 为空时，os.path.realpath('') 会返回 cwd，导致错误比较
+                    # 更换设备（callback_url 改变）时，session_id 已失效，需要清除
+                    callback_unchanged = old_callback == callback_url
+                    if (old_dir and os.path.realpath(default_chat_dir) == os.path.realpath(old_dir)
+                            and existing and 'default_chat_session_id' in existing
+                            and callback_unchanged):
                         binding_data['default_chat_session_id'] = existing['default_chat_session_id']
                 data[owner_id] = binding_data
                 result = self._save(data)

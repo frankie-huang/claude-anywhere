@@ -42,7 +42,9 @@ TOKEN_REFRESH_BUFFER = 300  # 5 分钟
 HTTP_TIMEOUT = 10
 
 # 飞书敏感信息拦截错误码
-SENSITIVE_CONTENT_CODE = 230022
+# 230022: 消息内容包含敏感信息
+# 230028: 消息DLP审查未通过（明文电话号码、邮箱等）
+SENSITIVE_CONTENT_CODES = frozenset({230022, 230028})
 
 
 # =============================================================================
@@ -353,19 +355,17 @@ class MessageSender:
             headers=headers,
             data=json.dumps(payload).encode('utf-8')
         )
-
-        if not success:
-            return False, str(resp.get('error', 'Unknown error'))
-
         code = resp.get('code', -1)
-        if code == 0:
+
+        # 第一次发送成功，直接返回
+        if success and code == 0:
             message_id = resp.get('data', {}).get('message_id', '')
             logger.info(f"[feishu-api] {log_prefix} sent: {message_id}")
             return True, message_id
 
-        # 如果是敏感信息拦截错误，脱敏后重试
-        if code == SENSITIVE_CONTENT_CODE:
-            logger.info(f"[feishu-api] Sensitive content detected ({msg_type}), sanitizing and retrying...")
+        # 如果是敏感信息拦截错误，脱敏后重试一次
+        if code in SENSITIVE_CONTENT_CODES:
+            logger.info(f"[feishu-api] Sensitive content detected (code={code}, {msg_type}), sanitizing and retrying...")
             sanitized = _sanitize_content(content)
             content_str = json.dumps(sanitized, ensure_ascii=False)
             if content != sanitized:
@@ -379,16 +379,17 @@ class MessageSender:
                 headers=headers,
                 data=json.dumps(payload).encode('utf-8')
             )
-
-            if not success:
-                return False, str(resp.get('error', 'Unknown error'))
-
             code = resp.get('code', -1)
-            if code == 0:
-                message_id = resp.get('data', {}).get('message_id', '')
-                logger.info(f"[feishu-api] {log_prefix} sent after sanitization: {message_id}")
-                return True, message_id
 
+        if not success:
+            return False, str(resp.get('error', 'Unknown error'))
+
+        if code == 0:
+            message_id = resp.get('data', {}).get('message_id', '')
+            logger.info(f"[feishu-api] {log_prefix} sent after sanitization: {message_id}")
+            return True, message_id
+
+        # 返回失败信息
         error_msg = resp.get('msg', 'Unknown error')
         logger.error(f"[feishu-api] {log_prefix} send failed: code={code}, msg={error_msg}")
         return False, f"API error: {error_msg}"

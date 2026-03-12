@@ -119,7 +119,7 @@ def _should_reply_in_thread(binding: Dict[str, Any], project_dir: str) -> bool:
         是否回复到话题
     """
     default_chat_dir = binding.get('default_chat_dir', '')
-    if project_dir and default_chat_dir and project_dir == default_chat_dir:
+    if project_dir and default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
         return False
     return binding.get('reply_in_thread', False)
 
@@ -2322,7 +2322,7 @@ def _handle_new_command(data: dict, args: str):
 
     # 在后台线程中转发到 Callback 后端
     # 如果使用的是默认聊天目录，同时更新活跃默认会话
-    if default_chat_dir and project_dir == default_chat_dir:
+    if default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
         _run_in_background(_forward_new_request_for_default_dir, (binding, project_dir, prompt, chat_id, message_id, claude_command))
     else:
         _run_in_background(_forward_new_request, (binding, project_dir, prompt, chat_id, message_id, claude_command))
@@ -2449,10 +2449,19 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
         if reply_to_message_id:
             success, sent_message_id = service.reply_card(card_json, reply_to_message_id, reply_in_thread)
             if not success:
-                logger.warning(f"[feishu] /gw/feishu/send: reply_card failed, fallback to send: {sent_message_id}")
-                success, sent_message_id = service.send_card(card_json, receive_id, receive_id_type)
+                # 卡片发送失败，降级发送文本错误提示到话题中
+                error_msg = sent_message_id
+                logger.warning(f"[feishu] /gw/feishu/send: reply_card failed: {error_msg}, fallback to text")
+                fallback_text = f"⚠️ 卡片消息发送失败: {error_msg}"
+                success, sent_message_id = service.reply_text(fallback_text, reply_to_message_id, reply_in_thread)
         else:
             success, sent_message_id = service.send_card(card_json, receive_id, receive_id_type)
+            if not success:
+                # 卡片发送失败，降级发送文本错误提示
+                error_msg = sent_message_id
+                logger.warning(f"[feishu] /gw/feishu/send: send_card failed: {error_msg}, fallback to text")
+                fallback_text = f"⚠️ 卡片消息发送失败: {error_msg}"
+                success, sent_message_id = service.send_text(fallback_text, receive_id, receive_id_type)
 
     elif msg_type == 'text':
         text = content if isinstance(content, str) else content.get('text', '')
@@ -2462,9 +2471,6 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
 
         if reply_to_message_id:
             success, sent_message_id = service.reply_text(text, reply_to_message_id, reply_in_thread)
-            if not success:
-                logger.warning(f"[feishu] /gw/feishu/send: reply_text failed, fallback to send: {sent_message_id}")
-                success, sent_message_id = service.send_text(text, receive_id, receive_id_type)
         else:
             success, sent_message_id = service.send_text(text, receive_id, receive_id_type)
 

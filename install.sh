@@ -135,6 +135,94 @@ check_dependencies() {
 }
 
 # =============================================================================
+# 检测超时配置
+# =============================================================================
+
+check_timeout_config() {
+    print_section "检测超时配置"
+
+    local env_file="${SCRIPT_DIR}/.env"
+    local server_timeout=600  # 默认值
+    local hook_timeout=0
+
+    # 读取 .env 中的 PERMISSION_REQUEST_TIMEOUT
+    if [ -f "$env_file" ]; then
+        local env_timeout
+        env_timeout=$(grep -E "^PERMISSION_REQUEST_TIMEOUT=" "$env_file" 2>/dev/null | cut -d'=' -f2)
+        if [ -n "$env_timeout" ]; then
+            server_timeout="$env_timeout"
+        fi
+    fi
+
+    # 读取 settings.json 中的 PermissionRequest hook timeout
+    if [ -f "$SETTINGS_FILE" ]; then
+        hook_timeout=$(SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" python3 << 'PYTHON_SCRIPT' 2>/dev/null
+import json
+import os
+
+settings_file = os.environ.get('SETTINGS_FILE', '')
+hook_path = os.environ.get('HOOK_PATH', '')
+
+try:
+    with open(settings_file, 'r') as f:
+        config = json.load(f)
+except:
+    print(0)
+    exit(0)
+
+hooks = config.get('hooks', {})
+perm_hooks = hooks.get('PermissionRequest', [])
+max_timeout = 0
+for entry in perm_hooks:
+    for hook in entry.get('hooks', []):
+        if hook.get('command') == hook_path:
+            t = hook.get('timeout', 0)
+            if t > max_timeout:
+                max_timeout = t
+print(max_timeout)
+PYTHON_SCRIPT
+        )
+    fi
+
+    # 显示配置信息
+    echo "  服务端超时 (PERMISSION_REQUEST_TIMEOUT): ${server_timeout}s"
+    echo "  Hook 超时 (settings.json): ${hook_timeout}s"
+    echo ""
+
+    # 检查配置是否合理
+    # 服务端超时为 0 表示禁用，此时无需检查
+    if [ "$server_timeout" -eq 0 ]; then
+        print_info "服务端超时已禁用 (PERMISSION_REQUEST_TIMEOUT=0)"
+        print_info "Hook 超时将由 Claude Code 默认值控制"
+        return 0
+    fi
+
+    # Hook 超时为 0 表示未配置或使用默认值
+    if [ "$hook_timeout" -eq 0 ]; then
+        print_warning "未找到 Hook 超时配置"
+        print_info "建议在 settings.json 中配置 PermissionRequest hook timeout"
+        print_info "推荐值: $((server_timeout + 60))s (服务端超时 + 60s)"
+        return 0
+    fi
+
+    # 检查大小关系（相等也有竞态风险）
+    if [ "$hook_timeout" -le "$server_timeout" ]; then
+        if [ "$hook_timeout" -eq "$server_timeout" ]; then
+            print_warning "Hook 超时 == 服务端超时 (${hook_timeout}s)，存在竞态风险"
+        else
+            print_warning "Hook 超时 (${hook_timeout}s) < 服务端超时 (${server_timeout}s)"
+        fi
+        echo ""
+        print_info "Hook 可能被 Claude Code 强制终止，导致服务端超时响应无法发送"
+        print_info "建议修改 settings.json 中的 PermissionRequest timeout 为 $((server_timeout + 60))s 或更大"
+        return 0
+    fi
+
+    print_success "超时配置合理: Hook 超时 > 服务端超时"
+    return 0
+}
+
+# =============================================================================
 # 配置 Hook
 # =============================================================================
 
@@ -398,6 +486,7 @@ main() {
             print_header
             print_dim "仅检测环境依赖，不做任何写入操作"
             check_dependencies
+            check_timeout_config
             ;;
         --uninstall)
             print_header
