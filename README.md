@@ -28,6 +28,7 @@
 5. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
 6. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
 7. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
+8. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
 
 ## 项目结构
 
@@ -75,6 +76,7 @@ claude-notify/
 │   │       ├── feishu.py       # 飞书事件处理器（OpenAPI 网关）
 │   │       ├── claude.py       # Claude 会话继续处理器
 │   │       ├── register.py     # 网关注册处理器
+│   │       ├── permission_mcp.py # MCP 权限审批服务（headless 模式）
 │   │       └── utils.py        # 处理器通用工具函数
 │   ├── config/                 # 配置文件
 │   │   └── tools.json          # 工具类型配置
@@ -292,6 +294,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 9. **自动注册与双向认证**: OpenAPI 模式下 Callback 服务启动时自动向网关注册，通过 `auth_token` 实现双向认证（详见 `docs/design/GATEWAY_AUTH.md`）
 10. **WS 隧道模式**: 分离部署时推荐使用 WebSocket 长连接，Callback 主动接入网关，无需公网可达，支持自动重连
 11. **飞书长连接事件接收**: 支持 `longpoll` 模式通过 lark-oapi SDK 的 WebSocket 长连接接收飞书事件推送，网关无需公网端点
+12. **Headless 权限审批**: 通过 `--permission-prompt-tool` MCP 方案，在 `claude -p` headless 模式下桥接权限请求到飞书审批系统（详见 `docs/design/PERMISSION_PROMPT_TOOL.md`）
 
 ## 功能特性
 
@@ -417,6 +420,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `feishu.py` | 飞书事件处理器（OpenAPI 网关） | `/gw/feishu/*` |
 | `claude.py` | Claude 会话继续处理器 | `/cb/claude/continue` |
 | `register.py` | 网关注册处理器 | `/gw/register` |
+| `permission_mcp.py` | MCP 权限审批服务（headless 模式） | MCP stdio |
 | `utils.py` | 处理器通用工具函数 | - |
 
 ## VSCode SSH 远程开发代理
@@ -806,6 +810,8 @@ brew install python3 curl jq socat
 - [飞书消息回复继续会话方案](docs/design/FEISHU_SESSION_CONTINUE.md) - 飞书回复继续 Claude 会话的设计与实现
 - [飞书话题内回复模式](docs/design/FEISHU_THREAD_REPLY.md) - 同一会话消息收敛到话题流的链式回复设计
 - [交互式 Claude 会话调研](docs/design/INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) - 交互式 CLI 会话方案调研报告
+- [Headless 权限审批 MCP 方案](docs/design/PERMISSION_PROMPT_TOOL.md) - `--permission-prompt-tool` MCP 权限审批设计
+- [ACP Oneshot Client 方案（已废弃）](docs/design/ACP_ONESHOT_CLIENT.md) - 基于 ACP 的早期调研方案
 - [通信鉴权与安全分析](docs/design/SECURITY_ANALYSIS.md) - 通信安全风险评估与加固建议
 - [Socket 通信协议](src/shared/protocol.md) - Unix Socket 通信规范
 

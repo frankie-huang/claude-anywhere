@@ -4,15 +4,17 @@
 以及通过 /new 指令发起新的 Claude 会话。
 """
 
+import json
 import logging
 import os
 import shlex
 import subprocess
+import sys
 import uuid
 from typing import Tuple, Dict, Any
 
 from services.session_chat_store import SessionChatStore
-from handlers.utils import run_in_background as _run_in_background
+from handlers.utils import build_shell_cmd, run_in_background as _run_in_background
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,9 @@ TIMEOUT_SECONDS = 600  # 后台等待超时时间（秒）
 STARTUP_CHECK_SECONDS = 2  # 启动检查等待时间（秒）
 MAX_LOG_LENGTH = 500  # 日志最大长度
 MAX_NOTIFICATION_LENGTH = 500  # 通知消息最大长度
+
+# MCP 配置
+MCP_TOOL_NAME = "mcp__approver__permission_request"
 
 
 class Response:
@@ -143,6 +148,44 @@ def _get_shell() -> str:
     return os.environ.get('SHELL', '/bin/bash')
 
 
+def _get_mcp_args(project_dir: str, session_id: str) -> str:
+    """
+    获取 MCP 审批相关的命令行参数
+
+    动态构建 MCP 配置 JSON 字符串，不依赖外部配置文件。
+    通过 args 参数将 project_dir 和 session_id 传递给 MCP server。
+
+    Args:
+        project_dir: 项目工作目录，传递给 MCP server 用于权限审批上下文
+        session_id: Claude 会话 ID，传递给 MCP server 用于权限审批上下文
+
+    Returns:
+        MCP 相关参数字符串
+        如果 MCP 脚本不存在则返回空字符串
+    """
+    # 动态定位 MCP 脚本路径（与 claude.py 同目录）
+    mcp_script = os.path.join(os.path.dirname(__file__), "permission_mcp.py")
+
+    if not os.path.exists(mcp_script):
+        logger.debug(f"[mcp] MCP script not found: {mcp_script}")
+        return ""
+
+    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
+    python_cmd = sys.executable or "python3"
+    mcp_config = {
+        "mcpServers": {
+            "approver": {
+                "command": python_cmd,
+                "args": [mcp_script, "--cwd", project_dir, "--session-id", session_id]
+            }
+        }
+    }
+
+    config_json = json.dumps(mcp_config)
+    logger.info(f"[mcp] Using MCP config: script={mcp_script}, session={session_id}, cwd={project_dir}")
+    return f"--permission-prompt-tool {MCP_TOOL_NAME} --mcp-config {shlex.quote(config_json)}"
+
+
 def _get_claude_command(claude_command: str = '') -> str:
     """获取 Claude 命令
 
@@ -179,7 +222,6 @@ def _execute_and_check(session_id: str, project_dir: str, prompt: str, chat_id: 
         (success, response)
     """
     shell = _get_shell()
-    shell_name = os.path.basename(shell)
     claude_cmd = _get_claude_command(claude_command)
     # 使用 shlex.quote 安全处理 prompt 中的特殊字符
     safe_prompt = shlex.quote(prompt)
@@ -188,34 +230,22 @@ def _execute_and_check(session_id: str, project_dir: str, prompt: str, chat_id: 
     # 根据会话模式选择参数
     if session_mode == 'new':
         cmd_str = f'{claude_cmd} -p {safe_prompt} --session-id {safe_session}'
+        log_cmd = f"{claude_cmd} -p '<prompt>' --session-id {safe_session}"
         log_prefix = '[claude-new]'
-        session_arg = f'--session-id {session_id}'
     else:
         cmd_str = f'{claude_cmd} -p {safe_prompt} --resume {safe_session}'
+        log_cmd = f"{claude_cmd} -p '<prompt>' --resume {safe_session}"
         log_prefix = '[claude-continue]'
-        session_arg = f'--resume {session_id}'
 
-    # 根据不同 shell 构建启动参数，确保能加载配置文件中的别名和环境变量
-    # ┌──────────────┬───────┬─────────────────────────────────┐
-    # │ Shell        │ 参数  │ 配置文件                        │
-    # ├──────────────┼───────┼─────────────────────────────────┤
-    # │ zsh          │ -ic   │ ~/.zshrc                        │
-    # │ fish         │ -c    │ ~/.config/fish/config.fish      │
-    # │ bash         │ -lc   │ ~/.bashrc                       │
-    # │ dash         │ -lc   │ ~/.profile                      │
-    # │ 其他 POSIX   │ -lc   │ 对应 shell 的登录配置文件       │
-    # ├──────────────┼───────┼─────────────────────────────────┤
-    # │ ❌ pwsh      │ N/A   │ 需用 -NoProfile -Command        │
-    # │ ❌ csh/tcsh  │ N/A   │ 语法完全不同，暂不支持           │
-    # └──────────────┴───────┴─────────────────────────────────┘
-    if shell_name == 'zsh':
-        cmd = [shell, '-ic', cmd_str]
-    elif shell_name == 'fish':
-        cmd = [shell, '-c', cmd_str]
-    else:
-        cmd = [shell, '-lc', cmd_str]
+    mcp_args = _get_mcp_args(project_dir, session_id).strip()
+    if mcp_args:
+        cmd_str += ' ' + mcp_args
+        log_cmd += ' ' + mcp_args
 
-    logger.info(f"{log_prefix} Executing: cd {project_dir} && {claude_cmd} -p '<prompt>' {session_arg}")
+    cmd = build_shell_cmd(shell, cmd_str)
+
+    # 打印命令（log_cmd 隐藏了 prompt 内容）
+    logger.info(f"{log_prefix} Executing: cd {project_dir} && {log_cmd}")
 
     # 清除 CLAUDECODE 环境变量，避免嵌套会话检测阻止子会话启动
     # 参考：https://code.claude.com/docs/en/headless

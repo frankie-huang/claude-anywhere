@@ -43,6 +43,12 @@ CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
 NOTIFY_DELAY=$(get_config "PERMISSION_NOTIFY_DELAY" "60")
 OWNER_ID=$(get_config "FEISHU_OWNER_ID" "")
 
+# MCP 模式下跳过延迟等待（用户无法在终端操作）
+if [ "${MCP_MODE:-}" = "1" ]; then
+    NOTIFY_DELAY=0
+    log "MCP mode detected, skipping notification delay"
+fi
+
 # 时间戳
 TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 

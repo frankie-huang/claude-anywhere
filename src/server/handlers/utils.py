@@ -1,10 +1,11 @@
 import html
 import json
 import logging
+import os
 import threading
 import urllib.request
 
-from typing import Tuple
+from typing import List, Tuple
 
 from config import CALLBACK_PAGE_CLOSE_DELAY
 
@@ -111,6 +112,38 @@ def send_json(handler, status, data):
     handler.send_header('Content-Type', 'application/json')
     handler.end_headers()
     handler.wfile.write(json.dumps(data).encode())
+
+
+def build_shell_cmd(shell: str, cmd_str: str) -> List[str]:
+    """根据 shell 类型构建命令参数列表，确保能加载配置文件中的别名和环境变量
+
+    ┌──────────────┬───────┬─────────────────────────────────┐
+    │ Shell        │ 参数  │ 配置文件                        │
+    ├──────────────┼───────┼─────────────────────────────────┤
+    │ zsh          │ -ic   │ ~/.zshrc                        │
+    │ fish         │ -c    │ ~/.config/fish/config.fish      │
+    │ bash         │ -lc   │ ~/.bashrc                       │
+    │ dash         │ -lc   │ ~/.profile                      │
+    │ 其他 POSIX   │ -lc   │ 对应 shell 的登录配置文件       │
+    ├──────────────┼───────┼─────────────────────────────────┤
+    │ ❌ pwsh      │ N/A   │ 需用 -NoProfile -Command        │
+    │ ❌ csh/tcsh  │ N/A   │ 语法完全不同，暂不支持           │
+    └──────────────┴───────┴─────────────────────────────────┘
+
+    Args:
+        shell: shell 路径，如 '/bin/bash'
+        cmd_str: 要执行的命令字符串
+
+    Returns:
+        命令参数列表，如 ['/bin/bash', '-lc', 'echo hello']
+    """
+    shell_name = os.path.basename(shell)
+    if shell_name == 'zsh':
+        return [shell, '-ic', cmd_str]
+    elif shell_name == 'fish':
+        return [shell, '-c', cmd_str]
+    else:
+        return [shell, '-lc', cmd_str]
 
 
 def run_in_background(func, args=()):
