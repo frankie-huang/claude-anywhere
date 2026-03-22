@@ -140,13 +140,13 @@ def verify_auth_token(
 # HTTP 请求鉴权辅助函数（供 callback.py 等模块复用）
 # ============================================================================
 
-def check_global_auth_token(headers: Dict[str, str], endpoint_name: str) -> bool:
+def check_global_auth_token(headers: Any, endpoint_name: str) -> bool:
     """纯鉴权检查，返回是否通过
 
     从 AuthTokenStore 获取存储的 token，与 headers 中的 X-Auth-Token 进行比对。
 
     Args:
-        headers: 请求头字典
+        headers: 请求头（支持 dict 或 HTTPMessage 等 dict-like 对象）
         endpoint_name: 端点名称（用于日志记录）
 
     Returns:

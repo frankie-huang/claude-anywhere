@@ -375,18 +375,18 @@ FEISHU_OWNER_ID=ou_user_a  # 此实例的消息接收者（user_id 格式）
 
 ```bash
 # 已有 lark-oapi（长连接模式，推荐）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 未安装 lark-oapi（HTTP 回调模式）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --verification-token=xxx --owner-id=<用户ID>
 ```
 
 **分离模式**（Callback 服务）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -478,7 +478,7 @@ claude
 
 ```bash
 # 在网关服务器上
-git clone ... && cd claude-notify
+git clone ... && cd claude-anywhere
 ./install.sh
 
 # 配置
@@ -503,7 +503,7 @@ EOF
 
 ```bash
 # 在本地电脑上
-git clone ... && cd claude-notify
+git clone ... && cd claude-anywhere
 ./install.sh
 
 # 配置
@@ -523,7 +523,7 @@ EOF
 
 ```bash
 # 在实例机器上
-git clone ... && cd claude-notify
+git clone ... && cd claude-anywhere
 ./install.sh
 
 # 配置

@@ -73,6 +73,25 @@ def handle_decision(
     }
 
     # 检查 hook 进程是否存活
+    #
+    # Claude Code 行为细节（实验观察）：
+    # - 用户在终端点 "no"（拒绝）时，Claude Code 会立即 kill hook 进程
+    # - 用户在终端点 "yes"（批准）时，hook 进程可能不会立即被 kill
+    #   （可能是因为 Claude Code 需要先启动工具执行）
+    # - 服务端的 cleanup_disconnected 线程每 5 秒检测一次连接状态
+    #   如果检测到连接断开会标记为 STATUS_DISCONNECTED
+    #
+    # 因此：
+    # - 如果用户已在终端处理，hook 进程可能已退出（点 no）或还活着（点 yes）
+    # - pid 检查只能作为参考，不能完全依赖它来判断用户是否已在终端处理
+    # - 更可靠的判断是检查请求状态（STATUS_RESOLVED/STATUS_DISCONNECTED）
+    #
+    # 未来优化方向：
+    # - 如果 Claude Code 在 PermissionRequest hook 输入中提供 tool_use_id，
+    #   可以通过检查 transcript 文件中是否存在对应的 tool_result 来精准判断
+    #   用户是否已在终端处理（参考 permission.sh 中的 check_tool_result_exists）
+    # - 目前非 MCP 模式下 hook 输入中没有 tool_use_id，无法实现精准检测
+    #
     hook_pid = req_data.get('hook_pid')
     if hook_pid:
         try:

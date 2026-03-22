@@ -1,7 +1,7 @@
 # Spec: 项目结构规范
 
 ## Purpose
-定义 claude-notify 项目的目录结构组织规范，确保跨语言组件（Shell 和 Python）的代码组织清晰、易于维护。
+定义 claude-anywhere 项目的目录结构组织规范，确保跨语言组件（Shell 和 Python）的代码组织清晰、易于维护。
 
 ## Requirements
 
@@ -159,7 +159,7 @@ Socket 通信协议 MUST 有明确的文档说明。
 ## 目录结构参考
 
 ```
-claude-notify/
+claude-anywhere/
 ├── README.md
 ├── CHANGELOG.md
 ├── LICENSE

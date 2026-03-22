@@ -25,7 +25,7 @@
 | `/always` | GET | 始终允许并写入规则 | 中* | 无 |
 | `/deny` | GET | 拒绝权限请求 | 低 | 无 |
 | `/interrupt` | GET | 拒绝并中断 | 低 | 无 |
-| `/status` | GET | 查看服务状态 | 低 | 无 |
+| `/status` | GET | 查看服务状态 | 低 | ✅ X-Auth-Token |
 | `/cb/decision` | POST | 纯决策接口（网关调用） | **高** | 无 |
 | `/gw/feishu/send` | POST | 发送飞书消息 | **高** | 无 |
 | `/cb/claude/continue` | POST | 继续 Claude 会话 | **高** | 无 |

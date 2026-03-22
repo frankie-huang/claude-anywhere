@@ -221,19 +221,21 @@ def _execute_and_check(session_id: str, project_dir: str, prompt: str, chat_id: 
     safe_session = shlex.quote(session_id)
 
     # 根据会话模式选择参数
+    # 先收集所有 flag 参数，最后用 -- 分隔符追加 prompt
+    # 确保 prompt 中的 --flag 不会被 CLI 误解析为参数
     if session_mode == 'new':
-        cmd_str = f'{claude_cmd} -p {safe_prompt} --session-id {safe_session}'
-        log_cmd = f"{claude_cmd} -p '<prompt>' --session-id {safe_session}"
+        flags = f'{claude_cmd} -p --session-id {safe_session}'
         log_prefix = '[claude-new]'
     else:
-        cmd_str = f'{claude_cmd} -p {safe_prompt} --resume {safe_session}'
-        log_cmd = f"{claude_cmd} -p '<prompt>' --resume {safe_session}"
+        flags = f'{claude_cmd} -p --resume {safe_session}'
         log_prefix = '[claude-continue]'
 
     mcp_args = _get_mcp_args(project_dir, session_id).strip()
     if mcp_args:
-        cmd_str += ' ' + mcp_args
-        log_cmd += ' ' + mcp_args
+        flags += ' ' + mcp_args
+
+    cmd_str = f'{flags} -- {safe_prompt}'
+    log_cmd = f"{flags} -- '<prompt>'"
 
     cmd = build_shell_cmd(shell, cmd_str)
 

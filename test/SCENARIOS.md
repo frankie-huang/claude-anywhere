@@ -1,6 +1,6 @@
-# 测试文档 - claude-notify
+# 测试文档 - claude-anywhere
 
-本文档描述 claude-notify 项目的各种测试场景和预期行为。
+本文档描述 claude-anywhere 项目的各种测试场景和预期行为。
 
 ## 测试环境准备
 
@@ -30,7 +30,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "bash /root/claude/claude-notify/src/hook-router.sh"
+            "command": "bash /root/claude/claude-anywhere/src/hook-router.sh"
           }
         ]
       }
@@ -110,7 +110,7 @@ ls -l /tmp/claude-permission.sock
 lsof -i :8080 | grep LISTEN
 
 # 查看 HTTP 状态
-curl http://localhost:8080/status
+curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool
 ```
 
 3. 触发一个权限请求
@@ -318,7 +318,7 @@ export PERMISSION_REQUEST_TIMEOUT=0
 
 2. 验证配置：
 ```bash
-curl http://localhost:8080/status
+curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool
 # 预期输出包含: "mode": "socket-based (no server-side timeout)"
 ```
 
@@ -555,7 +555,7 @@ grep "Failed to send Feishu card" log/permission_$(date +%Y%m%d).log
 
 ```bash
 # 查看服务状态
-curl http://localhost:8080/status
+curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool
 
 # 预期输出包含多个 pending 请求：
 {

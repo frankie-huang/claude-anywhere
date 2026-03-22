@@ -65,6 +65,11 @@ ACTION_HTML_RESPONSES = {
 
 def handle_status(handler):
     """获取服务状态统计信息"""
+    # 验证 X-Auth-Token（仅支持 Header，避免 URL 泄露）
+    if not check_global_auth_token(handler.headers, '/status'):
+        send_json(handler, 401, {'error': 'Unauthorized'})
+        return
+
     stats = RequestManager.get_instance().get_stats()
     result = {
         'status': 'ok',
@@ -417,3 +422,9 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/claude/recent-dirs': handle_recent_dirs,
     '/cb/claude/browse-dirs': handle_browse_dirs,
 }
+
+# =============================================
+# 遥测路由（从 telemetry.handler 导入）
+# =============================================
+from telemetry.handler import TELEMETRY_ROUTES  # noqa: E402
+BACKEND_ROUTES.update(TELEMETRY_ROUTES)

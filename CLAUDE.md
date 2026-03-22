@@ -110,7 +110,7 @@ PORT = get_config_int('CALLBACK_SERVER_PORT', 8080)
 ### 重启后端服务
 
 ```bash
-./src/start-server.sh restart
+./setup.sh restart
 ```
 
 用于重启 Python 后端服务（callback server），修改代码后需要执行此命令使更改生效。

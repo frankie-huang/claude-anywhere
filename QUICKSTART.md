@@ -1,6 +1,6 @@
 # QuickStart - 5 分钟快速上手
 
-本指南帮助你以最快速度跑通 claude-notify，让 Claude Code 的权限请求和任务通知发送到飞书。
+本指南帮助你以最快速度跑通 claude-anywhere，让 Claude Code 的权限请求和任务通知发送到飞书。
 
 ---
 
@@ -18,11 +18,11 @@
 
 ```bash
 # 单机模式
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 分离模式（连接远程网关）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -133,7 +133,7 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook地
 ```bash
 ./install.sh --check                                              # 检查环境
 cat ~/.claude/settings.json | python3 -m json.tool | grep hook-router  # 确认 Hook 注册
-curl -s http://localhost:8080/status                              # 确认服务运行
+curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool  # 确认服务运行
 ```
 
 ### 常见问题

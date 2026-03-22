@@ -1,7 +1,7 @@
 # Project Context
 
 ## Purpose
-claude-notify 是一个为 Claude Code 提供飞书通知机制的工具，支持可交互权限控制。当 Claude Code 发起权限请求时，通过飞书 Webhook 发送通知卡片，用户可以直接在飞书中点击按钮批准或拒绝请求，无需返回终端操作。
+claude-anywhere 是一个为 Claude Code 提供飞书通知机制的工具，支持可交互权限控制。当 Claude Code 发起权限请求时，通过飞书 Webhook 发送通知卡片，用户可以直接在飞书中点击按钮批准或拒绝请求，无需返回终端操作。
 
 ## Tech Stack
 - **Shell Script**: Hook 脚本（Bash）

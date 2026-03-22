@@ -49,25 +49,36 @@ class HttpRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.info("%s - %s", self.address_string(), format % args)
 
+    # 可信代理 IP 列表：只有来自这些地址的请求才信任 X-Forwarded-For
+    # 对应部署架构：Nginx (127.0.0.1/::1) → Python Server
+    #
+    # Nginx 必须用 $remote_addr 覆写（非追加），防止客户端伪造：
+    #   proxy_set_header X-Forwarded-For $remote_addr;
+    # 注意：不要用 $proxy_add_x_forwarded_for，它会保留客户端传入的伪造值
+    _TRUSTED_PROXIES = frozenset(['127.0.0.1', '::1'])
+
     def get_client_ip(self) -> str:
         """获取真实客户端 IP
 
-        优先从 X-Forwarded-For header 获取，格式为 "client, proxy1, proxy2"，
-        取第一个 IP。如果没有该 header，则使用 socket 连接地址。
+        安全策略：仅当请求来自可信代理时才信任 X-Forwarded-For，
+        防止外部客户端直连公网端口时伪造该头绕过 IP 限流。
 
         Returns:
             客户端 IP 地址
         """
-        # 优先检查 X-Forwarded-For header
-        forwarded_for = self.headers.get('X-Forwarded-For', '')
-        if forwarded_for:
-            # 格式: "client, proxy1, proxy2"，取第一个（真实客户端）
-            client_ip = forwarded_for.split(',')[0].strip()
-            if client_ip:
-                return client_ip
+        socket_ip = self.client_address[0] if self.client_address else ''
 
-        # 回退到 socket 连接地址
-        return self.client_address[0] if self.client_address else ''
+        # 仅信任来自本机代理（Nginx）的 X-Forwarded-For
+        if socket_ip in self._TRUSTED_PROXIES:
+            forwarded_for = self.headers.get('X-Forwarded-For', '')
+            if forwarded_for:
+                # 取第一个 IP（Nginx 应配置为 $remote_addr 覆写，不是追加）
+                client_ip = forwarded_for.split(',')[0].strip()
+                if client_ip:
+                    return client_ip
+
+        # 非可信代理 或 无 X-Forwarded-For：直接用 socket 地址（不可伪造）
+        return socket_ip
 
     # GET 路由: action → 路由处理函数
     ACTION_ROUTES = frozenset(['allow', 'always', 'deny', 'interrupt'])
@@ -143,6 +154,8 @@ class HttpRequestHandler(BaseHTTPRequestHandler):
         if route_handler:
             # 将 HTTPMessage 转为纯字符串字典，确保类型安全
             headers = {k: str(v) for k, v in self.headers.items()}
+            # 注入真实客户端 IP（供遥测等需要 IP 的路由使用）
+            headers['X-Real-IP'] = self.get_client_ip()
             status, response = route_handler(data, headers)
             send_json(self, status, response)
             return

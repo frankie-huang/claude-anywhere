@@ -97,8 +97,8 @@
     },
     "AskUserQuestion": {
       "name": "AskUserQuestion",
-      "display_name": "用户提问",
-      "color": "blue",
+      "display_name": "问题咨询",
+      "color": "indigo",
       "icon": "question",
       "input_field": "questions",
       "detail_template": "",
@@ -108,7 +108,7 @@
     "Skill": {
       "name": "Skill",
       "display_name": "技能调用",
-      "color": "green",
+      "color": "purple",
       "icon": "skill",
       "input_field": "skill",
       "detail_template": "",

@@ -859,7 +859,7 @@ if assistant_messages:
       "hooks": [
         {
           "type": "command",
-          "command": "/path/to/claude-notify/src/hook-router.sh",
+          "command": "/path/to/claude-anywhere/src/hook-router.sh",
           "timeout": 660
         }
       ]
@@ -879,7 +879,7 @@ if assistant_messages:
       "hooks": [
         {
           "type": "command",
-          "command": "/path/to/claude-notify/src/hook-router.sh"
+          "command": "/path/to/claude-anywhere/src/hook-router.sh"
         }
       ]
     }

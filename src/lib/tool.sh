@@ -39,8 +39,9 @@ _builtin_tool_color() {
         Bash) echo "orange" ;;
         Edit|Write) echo "yellow" ;;
         Read|Glob|Grep) echo "blue" ;;
-        AskUserQuestion|ExitPlanMode) echo "blue" ;;
-        Skill) echo "green" ;;
+        AskUserQuestion) echo "indigo" ;;
+        ExitPlanMode) echo "blue" ;;
+        Skill) echo "purple" ;;
         WebSearch|WebFetch|mcp__4_5v_mcp__analyze_image|mcp__web_reader__webReader) echo "purple" ;;
         *) echo "grey" ;;
     esac

@@ -45,6 +45,7 @@ from config import (
     FEISHU_EVENT_MODE
 )
 from services.request_manager import RequestManager
+from services.card_cache import CardCache
 from services.feishu_api import FeishuAPIService
 from services.message_session_store import MessageSessionStore
 from services.dir_history_store import DirHistoryStore
@@ -387,6 +388,9 @@ def main():
     # 初始化 RequestManager（权限请求管理）
     RequestManager.initialize()
 
+    # 初始化 CardCache（用于卡片回调后更新状态）
+    CardCache.initialize()
+
     # 初始化 MessageSessionStore（用于继续会话功能）
     runtime_dir = os.path.join(project_root, 'runtime')
     MessageSessionStore.initialize(runtime_dir)
@@ -477,6 +481,24 @@ def main():
             logger.info("Auto-registration disabled")
     else:
         logger.info("Gateway registration disabled (missing FEISHU_GATEWAY_URL or FEISHU_OWNER_ID)")
+
+    # 启动遥测服务（后台线程定期上报心跳）
+    from telemetry.client import TelemetryService
+    from telemetry.client_id import is_first_run
+    # 注意：is_first_run() 必须在 get_client_id() 之前调用（后者会创建 client_id 文件）
+    first_run = is_first_run()
+    telemetry = TelemetryService.initialize()
+    if telemetry.enabled:
+        if first_run:
+            logger.info("=" * 60)
+            logger.info("NOTICE: Telemetry is enabled by default.")
+            logger.info("Data collected: anonymous client ID, version, OS, repo URL.")
+            logger.info("To opt out, set TELEMETRY_ENABLED=false in .env")
+            logger.info("=" * 60)
+        telemetry.start_in_background()
+        logger.info("Telemetry service started")
+    else:
+        logger.info("Telemetry service disabled")
 
     try:
         server.serve_forever()

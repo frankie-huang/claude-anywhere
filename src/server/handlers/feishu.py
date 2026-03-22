@@ -13,6 +13,7 @@ WebSocket 隧道支持：
 """
 
 import base64
+import copy
 import hmac
 import json
 import logging
@@ -342,7 +343,7 @@ def _handle_message_event(data: dict):
         hint = "您（用户 ID：`%s`）尚未注册，无法使用此功能。" % user_id
         if gateway_ws_url:
             hint += "\n\n请在部署了 Claude Code 的系统终端上执行以下命令完成注册：\n" \
-                    "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
+                    "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
                     "\n如果网关地址（`--gateway-url`）非公网可达，请联系管理员获取对外可用的网关地址。" \
                     "\n\n注意：执行命令前，请先申请当前应用的使用权限，否则将无法接收到注册绑定卡片。如未申请，请先申请权限后再执行命令。" % (gateway_ws_url, user_id)
         _run_in_background(_send_reject_message, (chat_id, hint, message_id))
@@ -1888,10 +1889,12 @@ def _handle_card_action(data: dict) -> Tuple[bool, dict]:
 
     # AskUserQuestion 表单提交（action=answer）
     if action_type == 'answer':
-        return _handle_ask_question_answer(request_id, form_value, data, card_message_id)
+        return _handle_ask_question_answer(request_id, form_value, data,
+                                           card_message_id=card_message_id)
 
     # 调用 callback_url 的决策接口（callback_url 从 BindingStore 获取）
-    return _forward_permission_request(request_id, data, action_type, card_message_id)
+    return _forward_permission_request(request_id, data, action_type,
+                                       card_message_id=card_message_id)
 
 
 def _add_typing_reaction(card_message_id: str):
@@ -1978,6 +1981,9 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             }
         }
 
+    # 浅拷贝 form_value，避免修改调用方传入的原始数据
+    form_value = dict(form_value)
+
     # 从 form_value 中提取答案
     answers = {}
     overridden_questions = []  # 记录自定义内容覆盖了选项的单选题
@@ -2000,6 +2006,7 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             # 单选：自定义输入优先（因为下拉选中后无法清空）
             if custom_value and select_value:
                 overridden_questions.append((i + 1, select_value))
+                form_value.pop(select_name, None)  # 清除下拉值，确保卡片更新时只显示自定义选项
             answer = custom_value if custom_value else (select_value or '')
 
         answers[question_text] = answer
@@ -2036,6 +2043,7 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
         decision = response_data.get('decision')
         message = response_data.get('message', '')
 
+        response_body = {}
         if success and decision:
             toast_type = TOAST_SUCCESS
             toast_content = message or '已提交回答'
@@ -2044,19 +2052,27 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
                 nums = '、'.join(f'第{qnum}题' for qnum, _ in overridden_questions)
                 toast_content += f'（{nums}的自定义内容已覆盖选项）'
             logger.info("[feishu] AskUserQuestion succeeded: decision=%s, elapsed=%.0fms", decision, elapsed)
-            # 决策成功后，给卡片消息添加 Typing 表情，表示 Claude 正在处理
+            # 决策成功后，异步添加 Typing 表情
             _run_in_background(_add_typing_reaction, (card_message_id,))
+
+            # 尝试在回调响应中返回更新后的卡片
+            updated_card = _get_updated_card_for_response(request_id, 'answer', form_value=form_value)
+            if updated_card:
+                response_body['card'] = {
+                    'type': 'raw',
+                    'data': updated_card
+                }
+                logger.debug("[feishu] Returning updated card in response for AskUserQuestion: %s", request_id)
         else:
             toast_type = TOAST_ERROR
             toast_content = message or '提交失败'
             logger.warning("[feishu] AskUserQuestion failed: message=%s, elapsed=%.0fms", toast_content, elapsed)
 
-        return True, {
-            'toast': {
-                'type': toast_type,
-                'content': toast_content
-            }
+        response_body['toast'] = {
+            'type': toast_type,
+            'content': toast_content
         }
+        return True, response_body
 
     except Exception as e:
         logger.error("[feishu] AskUserQuestion error: %s", e)
@@ -2142,6 +2158,7 @@ def _forward_permission_request(request_id: str, original_data: dict, action_typ
         message = response_data.get('message', '')
 
         # 根据决策结果生成 toast
+        response_body = {}
         if success and decision:
             if decision == 'allow':
                 toast_type = TOAST_SUCCESS
@@ -2149,19 +2166,27 @@ def _forward_permission_request(request_id: str, original_data: dict, action_typ
                 toast_type = TOAST_WARNING
             toast_content = message or ('已批准运行' if decision == 'allow' else '已拒绝运行')
             logger.info(f"[feishu] Decision succeeded: decision={decision}, message={message}, elapsed={elapsed:.0f}ms")
-            # 决策成功后，给卡片消息添加 Typing 表情，表示 Claude 正在处理
+            # 决策成功后，异步添加 Typing 表情
             _run_in_background(_add_typing_reaction, (card_message_id,))
+
+            # 尝试在回调响应中返回更新后的卡片（移除按钮，更新状态）
+            updated_card = _get_updated_card_for_response(request_id, action_type)
+            if updated_card:
+                response_body['card'] = {
+                    'type': 'raw',
+                    'data': updated_card
+                }
+                logger.debug(f"[feishu] Returning updated card in response for request: {request_id}")
         else:
             toast_type = TOAST_ERROR
             toast_content = message or '处理失败'
             logger.warning(f"[feishu] Decision failed: message={toast_content}, elapsed={elapsed:.0f}ms")
 
-        return True, {
-            'toast': {
-                'type': toast_type,
-                'content': toast_content
-            }
+        response_body['toast'] = {
+            'type': toast_type,
+            'content': toast_content
         }
+        return True, response_body
 
     except urllib.error.HTTPError as e:
         logger.error(f"[feishu] Forward HTTP error: {e.code} {e.reason}")
@@ -2661,24 +2686,35 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
             logger.warning("[feishu] /gw/feishu/send: missing card content")
             return True, {'success': False, 'error': 'Missing card content'}
 
-        # 如果是 dict 类型，转为 JSON 字符串
-        card_json = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        if isinstance(content, dict):
+            card_json = json.dumps(content, ensure_ascii=False)
+        else:  # content 是 str（当前调用方不会传入，防御性逻辑；若传入则不缓存避免 parse + dump）
+            card_json = content
 
         if reply_to_message_id:
             success, sent_message_id = service.reply_card(card_json, reply_to_message_id, reply_in_thread)
-            if not success:
-                # 卡片发送失败，降级发送文本错误提示到话题中
-                error_msg = sent_message_id
-                logger.warning(f"[feishu] /gw/feishu/send: reply_card failed: {error_msg}, fallback to text")
-                fallback_text = f"⚠️ 卡片消息发送失败: {error_msg}"
-                success, sent_message_id = service.reply_text(fallback_text, reply_to_message_id, reply_in_thread)
         else:
             success, sent_message_id = service.send_card(card_json, receive_id, receive_id_type)
-            if not success:
-                # 卡片发送失败，降级发送文本错误提示
-                error_msg = sent_message_id
-                logger.warning(f"[feishu] /gw/feishu/send: send_card failed: {error_msg}, fallback to text")
-                fallback_text = f"⚠️ 卡片消息发送失败: {error_msg}"
+
+        # 仅在卡片实际发送成功后缓存，避免降级为文本消息时误缓存卡片
+        # Best-effort 预筛选：通过字符串匹配快速跳过不含回调按钮的通知类卡片
+        # 可能误匹配文本中恰好包含 "request_id" 的卡片，但只会多缓存，不影响正确性
+        if success and isinstance(content, dict) and '"request_id"' in card_json:
+            cached_request_id = _extract_request_id_from_card(content)
+            if cached_request_id:
+                from services.card_cache import CardCache
+                cache = CardCache.get_instance()
+                if cache:
+                    cache.set(cached_request_id, card_json)
+                    logger.debug("[feishu] Cached card for request_id=%s after send", cached_request_id)
+        elif not success:
+            # 卡片发送失败，降级发送文本错误提示
+            error_msg = sent_message_id
+            logger.warning(f"[feishu] /gw/feishu/send: send_card failed: {error_msg}, fallback to text")
+            fallback_text = f"⚠️ 卡片消息发送失败: {error_msg}"
+            if reply_to_message_id:
+                success, sent_message_id = service.reply_text(fallback_text, reply_to_message_id, reply_in_thread)
+            else:
                 success, sent_message_id = service.send_text(fallback_text, receive_id, receive_id_type)
 
     elif msg_type == 'text':
@@ -2716,6 +2752,206 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
             _set_last_message_id_to_callback(binding, session_id, sent_message_id)
 
     return True, {'success': True, 'message_id': sent_message_id}
+
+
+# 卡片状态更新时的 header 配置
+_CARD_STATUS_CONFIG = {
+    'allow': {'template': 'green', 'title_suffix': ' - 已批准'},
+    'always': {'template': 'green', 'title_suffix': ' - 已批准（始终允许）'},
+    'deny': {'template': 'red', 'title_suffix': ' - 已拒绝'},
+    'interrupt': {'template': 'red', 'title_suffix': ' - 已拒绝并中断'},
+    'answer': {'template': 'green', 'title_suffix': ' - 已回答'},
+}
+
+
+def _extract_request_id_from_card(card_content: dict) -> Optional[str]:
+    """从卡片中提取第一个 callback value.request_id
+
+    用于在卡片发送成功后定位缓存 key。
+    同一张审批/问答卡中的回调按钮通常共享同一个 request_id，
+    因此取第一个命中的 request_id 即可。
+    """
+    def _extract_from_element(elem: dict) -> Optional[str]:
+        if not isinstance(elem, dict):
+            return None
+
+        # 先检查当前元素自身是否挂了 callback behavior
+        behaviors = elem.get('behaviors', [])
+        if isinstance(behaviors, list):
+            for behavior in behaviors:
+                if isinstance(behavior, dict) and behavior.get('type') == 'callback':
+                    value = behavior.get('value', {})
+                    if isinstance(value, dict) and value.get('request_id'):
+                        return value['request_id']
+
+        # 递归遍历常见容器节点，查找嵌套按钮上的 callback value.request_id
+        for key in ['elements', 'columns']:
+            children = elem.get(key, [])
+            if isinstance(children, list):
+                for child in children:
+                    request_id = _extract_from_element(child)
+                    if request_id:
+                        return request_id
+
+        return None
+
+    body = card_content.get('body', {})
+    elements = body.get('elements', [])
+    for elem in elements:
+        request_id = _extract_from_element(elem)
+        if request_id:
+            return request_id
+    return None
+
+
+def _get_updated_card_for_response(request_id: str, action_type: str,
+                                   form_value: Optional[dict] = None) -> Optional[dict]:
+    """获取更新后的卡片 JSON（用于回调响应中返回）
+
+    Args:
+        request_id: 请求 ID（用作卡片缓存 key）
+        action_type: 动作类型 (allow/always/deny/interrupt/answer)
+        form_value: 表单提交的值（用于回填 AskUserQuestion 卡片的选项和输入）
+
+    Returns:
+        更新后的卡片 JSON dict，失败返回 None
+    """
+    from services.card_cache import CardCache
+
+    cache = CardCache.get_instance()
+    if not cache:
+        return None
+
+    card_json_str = cache.get(request_id)
+    if not card_json_str:
+        logger.info("[feishu] Card cache miss for request_id=%s", request_id)
+        return None
+
+    try:
+        card_info = json.loads(card_json_str)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("[feishu] Failed to parse cached card for request_id=%s", request_id)
+        return None
+
+    updated_card = _build_updated_card(card_info, action_type, form_value=form_value)
+    if updated_card:
+        cache.delete(request_id)
+    return updated_card
+
+
+def _build_updated_card(card_content: dict, action_type: str, form_value: Optional[dict] = None) -> Optional[dict]:
+    """构建更新后的卡片（禁用按钮，更新 header，回填表单值）
+
+    Args:
+        card_content: 原始卡片内容 dict
+        action_type: 动作类型 (allow/always/deny/interrupt/answer)
+        form_value: 表单提交的值（用于回填选项和输入框）
+
+    Returns:
+        更新后的卡片 dict，失败返回 None
+    """
+    try:
+        card = copy.deepcopy(card_content)
+
+        # 更新 header
+        config = _CARD_STATUS_CONFIG.get(action_type, {})
+        header = card.get('header', {})
+        if config.get('template'):
+            header['template'] = config['template']
+        title = header.get('title', {})
+        if title.get('content') and config.get('title_suffix'):
+            title['content'] = title['content'] + config['title_suffix']
+
+        # 禁用卡片中的所有按钮，回填表单值
+        elements = card.get('body', {}).get('elements', [])
+        for elem in elements:
+            _apply_submitted_form_state_to_element(elem, form_value)
+        return card
+
+    except Exception as e:
+        logger.error("[feishu] Failed to build updated card: %s", e)
+        return None
+
+
+def _apply_submitted_form_state_to_element(elem: dict, form_value: Optional[dict] = None):
+    """递归更新元素：禁用按钮，将下拉选择和输入框转换为已禁用的 checker 勾选器
+
+    Args:
+        elem: 卡片元素 dict
+        form_value: 表单提交的值（用于回填选项和输入框）
+
+    支持的表单元素转换：
+    - select_static / multi_select_static: 转换为 checker 列表（选中项勾选，全部禁用）
+    - input: 有值时转换为已勾选的 checker（"自定义 - xxx"），无值时隐藏
+    """
+    # 禁用按钮
+    if elem.get('tag') == 'button':
+        elem['disabled'] = True
+
+    # 回填表单值
+    if form_value:
+        tag = elem.get('tag', '')
+        name = elem.get('name', '')
+
+        if tag in ('select_static', 'multi_select_static') and name:
+            value = form_value.get(name, '' if tag == 'select_static' else [])
+            options = elem.get('options', [])
+            # 确定选中的值集合
+            if isinstance(value, list):
+                selected_set = set(value)
+            else:
+                selected_set = {value} if value else set()
+            # 将 select 替换为 checker 列表容器
+            checkers = []
+            for opt in options:
+                opt_value = opt.get('value', '')
+                opt_text = opt.get('text', {}).get('content', opt_value)
+                checkers.append({
+                    'tag': 'checker',
+                    'name': f'{name}_opt_{opt_value}',
+                    'checked': opt_value in selected_set,
+                    'disabled': True,
+                    'text': {'tag': 'plain_text', 'content': opt_text},
+                    'overall_checkable': True,
+                    'margin': '4px 0px 0px 0px',
+                    'checked_style': {'show_strikethrough': False}
+                })
+            # 用 column_set 包装 checker 列表替换原 select 元素
+            elem.clear()
+            elem['tag'] = 'column_set'
+            elem['flex_mode'] = 'none'
+            elem['columns'] = [{
+                'tag': 'column',
+                'width': 'weighted',
+                'weight': 1,
+                'elements': checkers
+            }]
+        elif tag == 'input' and name:
+            value = form_value.get(name, '')
+            if value:
+                # 有自定义输入：将 input 替换为已勾选的 checker
+                elem.clear()
+                elem['tag'] = 'checker'
+                elem['name'] = name
+                elem['checked'] = True
+                elem['disabled'] = True
+                elem['text'] = {'tag': 'plain_text', 'content': f'自定义 - {value}'}
+                elem['overall_checkable'] = True
+                elem['margin'] = '4px 0px 0px 0px'
+                elem['checked_style'] = {'show_strikethrough': False}
+            else:
+                # 无自定义输入：隐藏输入框（清空为空 div）
+                elem.clear()
+                elem['tag'] = 'div'
+                elem['text'] = {'tag': 'plain_text', 'content': ''}
+
+    # 递归处理子元素
+    for key in ['elements', 'columns']:
+        children = elem.get(key)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _apply_submitted_form_state_to_element(child, form_value)
 
 
 def _handle_reply_command(data: dict, args: str):

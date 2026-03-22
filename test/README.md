@@ -90,7 +90,7 @@ CALLBACK_SERVER_URL=http://localhost:8080
 [INFO] 测试配置
   工具类型: bash
   命令/路径: rm -rf /tmp/test
-  项目目录: /root/claude/claude-notify
+  项目目录: /root/claude/claude-anywhere
   Session ID: test-session-1737812345
   时间: 2025-01-25 10:10:45
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -98,7 +98,7 @@ CALLBACK_SERVER_URL=http://localhost:8080
 {
   "session_id": "test-session-1737812345",
   "transcript_path": "/tmp/claude-transcript.jsonl",
-  "cwd": "/root/claude/claude-notify",
+  "cwd": "/root/claude/claude-anywhere",
   "permission_mode": "default",
   "hook_event_name": "PermissionRequest",
   "tool_name": "Bash",

@@ -220,7 +220,7 @@ ${YELLOW}支持的工具类型:${NC}
   read    - 文件读取
   glob    - 文件模式匹配
   grep    - 内容搜索
-  ask     - AskUserQuestion 用户提问
+  ask     - AskUserQuestion 问题咨询
   skill   - Skill 技能调用
 
 ${YELLOW}示例:${NC}

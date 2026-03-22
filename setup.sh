@@ -281,8 +281,8 @@ if is_valid_source_dir "$SETUP_DIR"; then
     SOURCE_DIR="$SETUP_DIR"
 else
     # 需要下载源码
-    REPO_URL="https://github.com/frankie-huang/claude-notify.git"
-    TARGET_DIR="${SETUP_DIR}/claude-notify"
+    REPO_URL="https://github.com/frankie-huang/claude-anywhere.git"
+    TARGET_DIR="${SETUP_DIR}/claude-anywhere"
 
     # 检查目标目录是否已存在
     if [ -d "$TARGET_DIR" ]; then
@@ -307,23 +307,23 @@ else
                 exit 1
             fi
         elif command -v curl &>/dev/null; then
-            TARBALL_URL="https://github.com/frankie-huang/claude-notify/archive/refs/heads/main.tar.gz"
+            TARBALL_URL="https://github.com/frankie-huang/claude-anywhere/archive/refs/heads/main.tar.gz"
             # 检测 tarball 解压的中间目录是否残留
-            if [ -d "${SETUP_DIR}/claude-notify-main" ]; then
-                echo "错误: 检测到上次下载残留目录 ${SETUP_DIR}/claude-notify-main"
-                echo "请先删除后重试：rm -rf ${SETUP_DIR}/claude-notify-main"
+            if [ -d "${SETUP_DIR}/claude-anywhere-main" ]; then
+                echo "错误: 检测到上次下载残留目录 ${SETUP_DIR}/claude-anywhere-main"
+                echo "请先删除后重试：rm -rf ${SETUP_DIR}/claude-anywhere-main"
                 exit 1
             fi
             # 下载并解压（使用管道避免二进制数据存储在变量中）
             if ! curl -fsSL --connect-timeout 30 "$TARBALL_URL" | tar xz -C "$SETUP_DIR" 2>&1; then
                 echo "下载或解压源码失败"
                 # 清理可能残留的不完整目录
-                rm -rf "${SETUP_DIR}/claude-notify-main" 2>/dev/null
+                rm -rf "${SETUP_DIR}/claude-anywhere-main" 2>/dev/null
                 exit 1
             fi
-            # tar 解压后目录名为 claude-notify-main
-            if [ -d "${SETUP_DIR}/claude-notify-main" ]; then
-                mv "${SETUP_DIR}/claude-notify-main" "$TARGET_DIR"
+            # tar 解压后目录名为 claude-anywhere-main
+            if [ -d "${SETUP_DIR}/claude-anywhere-main" ]; then
+                mv "${SETUP_DIR}/claude-anywhere-main" "$TARGET_DIR"
             fi
         else
             echo "错误: 需要 git 或 curl 来下载源码"

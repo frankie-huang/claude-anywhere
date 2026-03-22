@@ -15,10 +15,10 @@
       }
     },
     "header": {
-      "template": "blue",
+      "template": "indigo",
       "title": {
         "tag": "lark_md",
-        "content": "{{at_user}}🔵 用户提问 · AskUserQuestion"
+        "content": "{{at_user}}🤔 请回答以下问题"
       },
       "padding": "12px 8px 12px 8px"
     },

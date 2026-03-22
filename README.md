@@ -1,4 +1,4 @@
-# claude-notify
+# claude-anywhere
 
 用于实现 Claude Code 的飞书通知机制，支持可交互权限控制、会话继续和远程决策。
 
@@ -33,7 +33,7 @@
 ## 项目结构
 
 ```
-claude-notify/
+claude-anywhere/
 ├── setup.sh                    # 一键安装脚本（推荐）
 ├── install.sh                  # 安装配置脚本（手动安装）
 ├── .env.example                # 环境变量模板
@@ -117,11 +117,11 @@ claude-notify/
 
 ```bash
 # 单机模式
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 分离模式（连接远程网关）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-notify/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -492,7 +492,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-notify/src/hook-router.sh",
+            "command": "/path/to/claude-anywhere/src/hook-router.sh",
             "timeout": 660
           }
         ]
@@ -503,7 +503,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-notify/src/hook-router.sh"
+            "command": "/path/to/claude-anywhere/src/hook-router.sh"
           }
         ]
       }
