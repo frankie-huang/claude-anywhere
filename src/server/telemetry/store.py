@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from telemetry.utils import get_project_root
+
 logger = logging.getLogger(__name__)
 
 # client_id 速率限制间隔（秒）
@@ -40,9 +42,10 @@ CLEANUP_INTERVAL = 3600  # 1 小时
 # 持久化刷盘间隔（秒），避免每次心跳都写磁盘
 SAVE_INTERVAL = 60  # 1 分钟
 
-# 持久化文件路径（与 store.py 同目录）
-_DATA_DIR = os.path.dirname(os.path.abspath(__file__))
-_DATA_FILE = os.path.join(_DATA_DIR, 'telemetry_clients.json')
+# 运行时目录
+_RUNTIME_DIR = os.path.join(get_project_root(), 'runtime')
+# 持久化文件路径
+_DATA_FILE = os.path.join(_RUNTIME_DIR, 'telemetry_clients.json')
 
 
 class TelemetryStore:
@@ -125,7 +128,8 @@ class TelemetryStore:
         """原子写入客户端数据到文件"""
         tmp_path = None
         try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=_DATA_DIR, suffix='.tmp')
+            os.makedirs(_RUNTIME_DIR, exist_ok=True)
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=_RUNTIME_DIR, suffix='.tmp')
             with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
                 json.dump(self._clients, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, _DATA_FILE)

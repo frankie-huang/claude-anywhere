@@ -2166,8 +2166,9 @@ def _forward_permission_request(request_id: str, original_data: dict, action_typ
                 toast_type = TOAST_WARNING
             toast_content = message or ('已批准运行' if decision == 'allow' else '已拒绝运行')
             logger.info(f"[feishu] Decision succeeded: decision={decision}, message={message}, elapsed={elapsed:.0f}ms")
-            # 决策成功后，异步添加 Typing 表情
-            _run_in_background(_add_typing_reaction, (card_message_id,))
+            # 决策成功后，异步添加 Typing 表情（拒绝并中断时不需要，因为预期任务会停止）
+            if action_type != 'interrupt':
+                _run_in_background(_add_typing_reaction, (card_message_id,))
 
             # 尝试在回调响应中返回更新后的卡片（移除按钮，更新状态）
             updated_card = _get_updated_card_for_response(request_id, action_type)

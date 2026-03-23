@@ -2,7 +2,7 @@
 
 生成并持久化唯一的客户端标识符，用于遥测统计。
 
-存储位置：src/server/telemetry/client_id
+存储位置：runtime/client_id
 格式：UUID v4
 """
 
@@ -11,10 +11,12 @@ import os
 import uuid
 from typing import Optional
 
+from telemetry.utils import get_project_root
+
 logger = logging.getLogger(__name__)
 
-# client_id 文件路径（与本文件同目录）
-_CLIENT_ID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'client_id')
+# client_id 文件路径
+_CLIENT_ID_FILE = os.path.join(get_project_root(), 'runtime', 'client_id')
 
 # 缓存的客户端 ID
 _cached_client_id: Optional[str] = None
@@ -52,6 +54,7 @@ def get_client_id() -> str:
 
     # 持久化到文件
     try:
+        os.makedirs(os.path.dirname(client_id_file), exist_ok=True)
         with open(client_id_file, 'w') as f:
             f.write(client_id)
         logger.info("[telemetry] Generated and saved client_id: %s", client_id)

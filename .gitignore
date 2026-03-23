@@ -7,6 +7,7 @@ __pycache__/
 *.so
 .Python
 build/
+dashboard/
 develop-eggs/
 dist/
 downloads/
@@ -81,8 +82,6 @@ coverage.xml
 # =============================================================================
 nohup.out
 *.pid
-src/server/telemetry/client_id
-src/server/telemetry/telemetry_clients.json
 
 # =============================================================================
 # 环境配置文件

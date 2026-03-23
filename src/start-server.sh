@@ -20,14 +20,16 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVER_DIR="${PROJECT_ROOT}/src/server"
-PID_FILE="${SERVER_DIR}/server.pid"
+RUNTIME_DIR="${PROJECT_ROOT}/runtime"
+PID_FILE="${RUNTIME_DIR}/server.pid"
 LOG_DIR="${PROJECT_ROOT}/log"
 
 # 引入配置模块 (优先级: .env > 环境变量 > 默认值)
 source "${SCRIPT_DIR}/lib/core.sh"
 
-# 确保日志目录存在
+# 确保目录存在
 mkdir -p "$LOG_DIR"
+mkdir -p "$RUNTIME_DIR"
 
 # 检查 Python 3
 if ! command -v python3 &> /dev/null; then
