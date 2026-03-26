@@ -373,7 +373,8 @@ def _handle_message_event(data: dict):
             return
 
         # 已注册但未配置默认目录：发送使用提示
-        supported = _get_supported_commands()
+        owner_id = binding.get('_owner_id', '')
+        supported = _get_supported_commands(owner_id)
         hint = "💡 我还不能直接对话哦，请通过以下方式使用：\n\n" \
                "**发起新会话：**\n" \
                "发送 `/new` 指令创建 Claude 会话\n\n" \
@@ -383,13 +384,23 @@ def _handle_message_event(data: dict):
         _run_in_background(_send_reject_message, (chat_id, hint, message_id))
 
 
-def _get_supported_commands() -> str:
+def _get_supported_commands(owner_id: str = '') -> str:
     """获取支持的命令列表（用于帮助提示）
+
+    Args:
+        owner_id: 当前请求的用户 ID，用于过滤管理员专属指令
 
     Returns:
         命令列表字符串
     """
-    items = [f"- `/{cmd}`: {info}" for cmd, (_, info) in _COMMANDS.items()]
+    from config import FEISHU_OWNER_ID as gateway_owner_id
+
+    is_admin = owner_id and owner_id == gateway_owner_id
+    items = []
+    for cmd, (_, admin_only, info) in _COMMANDS.items():
+        if admin_only and not is_admin:
+            continue
+        items.append(f"- `/{cmd}`: {info}")
     return '\n'.join(items)
 
 
@@ -431,19 +442,30 @@ def _handle_command(data: dict, command: str, args: str):
         command: 命令名（如 'new'）
         args: 参数部分
     """
-    handler = _COMMANDS.get(command)
-    if handler:
-        handler_func, _ = handler
+    from config import FEISHU_OWNER_ID as gateway_owner_id
+
+    # 统一获取事件信息
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+    binding = _get_binding_from_event(event)
+    owner_id = binding.get('_owner_id', '') if binding else ''
+
+    handler_info = _COMMANDS.get(command)
+    if handler_info:
+        handler_func, admin_only, _ = handler_info
+        # 管理员专属指令需要权限检查
+        if admin_only and owner_id != gateway_owner_id:
+            if chat_id:
+                _run_in_background(_send_reject_message, (chat_id, "此指令仅限管理员使用", message_id))
+            return
         handler_func(data, args)
     else:
         logger.info(f"[feishu] Unknown command: /{command}")
         # 发送未知指令提示
-        event = data.get('event', {})
-        message = event.get('message', {})
-        chat_id = message.get('chat_id', '')
-        message_id = message.get('message_id', '')
         if chat_id:
-            supported = _get_supported_commands()
+            supported = _get_supported_commands(owner_id)
             _run_in_background(_send_reject_message, (chat_id, f"未知指令：`/{command}`\n\n支持的指令：\n{supported}", message_id))
 
 
@@ -3024,12 +3046,162 @@ def _handle_reply_command(data: dict, args: str):
     _run_in_background(_forward_continue_request, (binding, mapping['session_id'], mapping['project_dir'], prompt, chat_id, message_id, claude_command))
 
 
+def _handle_users_command(data: dict, args: str):
+    """处理 /users 指令，查看已注册用户和在线状态
+
+    Args:
+        data: 飞书事件数据
+        args: 参数部分（不含 /users，当前未使用）
+    """
+    from config import FEISHU_OWNER_ID as gateway_owner_id
+    from services.binding_store import BindingStore
+    from services.ws_registry import WebSocketRegistry
+
+    event = data.get('event', {})
+    message = event.get('message', {})
+    message_id = message.get('message_id', '')
+    chat_id = message.get('chat_id', '')
+
+    # 获取数据
+    binding_store = BindingStore.get_instance()
+    ws_registry = WebSocketRegistry.get_instance()
+
+    bindings = binding_store.get_all() if binding_store else {}
+    ws_status = ws_registry.get_status() if ws_registry else {}
+
+    # 构建并发送卡片
+    card = _build_user_status_card(bindings, ws_status, gateway_owner_id)
+    _run_in_background(_send_users_status_card, (chat_id, card, message_id))
+
+
+def _build_user_status_card(bindings: dict, ws_status: dict, admin_id: str) -> dict:
+    """构建用户状态卡片
+
+    Args:
+        bindings: 所有绑定信息
+        ws_status: WebSocket 连接状态
+        admin_id: 管理员 owner_id
+
+    Returns:
+        飞书卡片 JSON 结构
+    """
+    elements = []
+
+    # 在线用户（已认证连接）
+    online_ids = set(ws_status.get('authenticated_owner_ids', []))
+    if online_ids:
+        content_lines = []
+        for oid in sorted(online_ids):
+            at_tag = f'<at id="{oid}"></at>'
+            marker = " (你)" if oid == admin_id else ""
+            content_lines.append(f"• {at_tag}{marker}")
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**🟢 在线**\n" + "\n".join(content_lines)}
+        })
+
+    # 等待授权（pending 连接）
+    pending = ws_status.get('pending', [])
+    if pending:
+        content_lines = []
+        for p in pending:
+            oid = p.get('owner_id', '')
+            at_tag = f'<at id="{oid}"></at>'
+            ip = p.get('client_ip', '-')
+            wait_sec = p.get('waiting_seconds', 0)
+            content_lines.append(f"• {at_tag} - {ip} (等待 {wait_sec}s)")
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**🟡 等待授权**\n" + "\n".join(content_lines)}
+        })
+
+    # 离线用户（已注册但未在线）
+    all_registered = set(bindings.keys())
+    offline = all_registered - online_ids
+    if offline:
+        content_lines = []
+        for oid in sorted(offline):
+            info = bindings.get(oid, {})
+            ts = info.get('updated_at', 0)
+            if ts:
+                now = int(time.time())
+                diff = now - ts
+                if diff < 60:
+                    time_str = f" ({diff}s 前)"
+                elif diff < 3600:
+                    time_str = f" ({diff // 60} 分钟前)"
+                elif diff < 86400:
+                    time_str = f" ({diff // 3600} 小时前)"
+                else:
+                    time_str = f" ({diff // 86400} 天前)"
+            else:
+                time_str = ""
+            at_tag = f'<at id="{oid}"></at>'
+            content_lines.append(f"• {at_tag}{time_str}")
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "**⚫ 离线**\n" + "\n".join(content_lines)}
+        })
+
+    # 统计信息
+    total_registered = len(bindings)
+    total_online = len(online_ids)
+    total_pending = len(pending)
+
+    elements.append({
+        "tag": "hr"
+    })
+    elements.append({
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": f"总计: 已注册 {total_registered} 人 | 在线 {total_online} 人 | 等待授权 {total_pending} 人"}
+    })
+
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "📊 已注册用户和在线状态"},
+            "template": "blue"
+        },
+        "body": {
+            "direction": "vertical",
+            "elements": elements
+        }
+    }
+
+
+def _send_users_status_card(chat_id: str, card: dict, reply_to: str):
+    """发送用户状态卡片（后台线程调用）
+
+    Args:
+        chat_id: 群聊 ID
+        card: 卡片 JSON 结构
+        reply_to: 要回复的消息 ID
+    """
+    from services.feishu_api import FeishuAPIService
+
+    service = FeishuAPIService.get_instance()
+    if not service or not service.enabled:
+        return
+
+    card_json = json.dumps(card, ensure_ascii=False)
+    if reply_to:
+        success, _ = service.reply_card(card_json, reply_to)
+    else:
+        success, _ = service.send_card(card_json, receive_id=chat_id, receive_id_type='chat_id')
+
+    if not success:
+        logger.warning(f"[feishu] Failed to send user status card to {chat_id}")
+
+
 # =============================================================================
 # 命令映射（放在文件末尾，避免函数未定义的问题）
 # =============================================================================
 
-# 支持的命令映射：命令名 -> (处理函数, 帮助文本)
+# 支持的命令映射：命令名 -> (处理函数, 是否管理员专属, 帮助文本)
+# admin_only 为 True 时，仅管理员可见和执行
 _COMMANDS = {
-    'new': (_handle_new_command, "发起新的 Claude 会话\n格式：`/new --dir=/path/to/project [--cmd=0] prompt` 或回复消息时 `/new prompt`"),
-    'reply': (_handle_reply_command, "回复消息时指定 Claude Command 继续会话\n格式：`/reply [--cmd=0] prompt`\n仅支持在回复消息时使用"),
+    'new': (_handle_new_command, False, "发起新的 Claude 会话\n格式：`/new --dir=/path/to/project [--cmd=0] prompt` 或回复消息时 `/new prompt`"),
+    'reply': (_handle_reply_command, False, "回复消息时指定 Claude Command 继续会话\n格式：`/reply [--cmd=0] prompt`\n仅支持在回复消息时使用"),
+    'users': (_handle_users_command, True, "查看已注册用户和在线状态"),
 }

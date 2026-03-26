@@ -239,6 +239,19 @@ class BindingStore:
                 logger.error(f"[binding-store] Failed to delete binding: {e}")
                 return False
 
+    def get_all(self) -> Dict[str, Any]:
+        """获取所有绑定信息（用于管理员查看）
+
+        Returns:
+            所有绑定数据字典的副本
+        """
+        with self._file_lock:
+            try:
+                return dict(self._load())
+            except Exception as e:
+                logger.error(f"[binding-store] Failed to get all bindings: {e}")
+                return {}
+
     def _load(self) -> Dict[str, Any]:
         """加载绑定数据
 

@@ -2,9 +2,493 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [Released]
+
+### Changed - 2026-03-26
+
+#### 默认聊天目录话题跟随配置 (default-chat-follow-thread)
+
+- 新增 `DEFAULT_CHAT_FOLLOW_THREAD` 配置项（默认 `true`）
+- **行为变更**：默认聊天目录的回复现在默认跟随 `FEISHU_REPLY_IN_THREAD` 全局配置
+  - 旧版：default chat dir 回复始终在主界面显示（不收敛进话题）
+  - 新版（默认）：跟随全局配置，若 `FEISHU_REPLY_IN_THREAD=true` 则收敛进话题
+- 设置 `DEFAULT_CHAT_FOLLOW_THREAD=false` 可恢复旧版行为（始终在主界面显示）
+
+#### update 子命令优化
+
+- 改进输出格式，更清晰地展示配置差异
+- 增强错误处理，更新失败时提供明确提示
+
+### Changed - 2026-03-25
+
+#### 网关连接逻辑重构
+
+- 添加部署模式标识，区分单机/分离模式
+- 优化网关连接错误提示
+
+### Changed - 2026-03-24
+
+#### 运行时文件统一迁移
+
+- 将运行时文件（日志、绑定数据、遥测数据等）统一迁移到 `runtime/` 目录
+- 简化项目结构，便于管理和备份
+
+### Added - 2026-03-23
+
+#### 遥测功能
+
+- 新增遥测模块，包含客户端和服务端
+- 客户端定期上报心跳（默认每小时），统计活跃用户
+- 支持版本更新检测
+- 新增 `/api/telemetry/heartbeat` 和 `/api/telemetry/stats` 端点
+- 速率限制（client_id + IP 双重限流）
+- 支持 `TELEMETRY_ENABLED=false` 关闭
+
+### Fixed - 2026-03-23
+
+- 拒绝并中断时不再添加 Typing 表情（中断操作后任务会停止，不需要显示"正在处理"状态）
+
+### Changed - 2026-03-22
+
+#### 项目重命名
+
+- 项目从 `claude-notify` 重命名为 `claude-anywhere`
+
+#### 安全增强
+
+- `/status` 端点添加 `X-Auth-Token` 认证
+- 使用 `--` 分隔符防止 prompt 中的参数被 CLI 误解析
+
+#### UI 优化
+
+- 优化 AskUserQuestion 卡片显示样式
+
+### Added - 2026-03-21
+
+#### 审批/回答回调响应优化
+
+- 审批/回答成功后直接返回更新后的卡片
+- 自动禁用按钮、回填表单、更新状态
+
+### Changed - 2026-03-21
+
+- 使用内存缓存替代按钮回调传递卡片 JSON，优化内存占用
+
+### Added - 2026-03-20
+
+#### 权限审批卡片增强
+
+- 权限审批卡片和 AskUserQuestion 卡片底部显示 `claude --resume` 命令
+- 卡片审批/回答成功后添加 Typing 表情反馈
+
+#### AskUserQuestion 飞书表单提交
+
+- 支持 AskUserQuestion 通过飞书表单提交回答
+- 支持单选、多选、自定义输入远程审批
+- 新增 `ask-question-card.json` 模板
+
+### Fixed - 2026-03-17
+
+#### 卡片表格超限处理
+
+- 修正卡片表格超限错误码识别
+- 飞书卡片表格超限时自动降级，markdown 表格转代码块重试
+
+#### 安装与绑定逻辑修复
+
+- 安装时检查 claude 命令可用性
+- 修复 WS 隧道模式绑定清理逻辑
+- claude 会话后台监控改为 30 秒启动检查，超时后 detach 而非 kill
+
+#### 目录使用记录优化
+
+- 将目录使用记录从会话启动时改为通知发送成功后触发，减少无效记录
+- 添加公共 `json_escape` 函数，支持 JSON 规范转义
+- `get_recent_dirs` 添加 `min_count` 参数过滤低频目录（默认≥2次）
+- 常用目录 limit 增加到 20，移除 MAX_DIRS 硬限制
+
+### Added - 2026-03-16
+
+#### 未注册用户提示
+
+- 未注册用户发送消息时提示注册命令
+- 改进用户体验
+
+#### MCP 权限审批服务
+
+- 添加 MCP 权限审批服务，支持 headless 模式下飞书权限审批
+- 通过 `--permission-prompt-tool` MCP 方案桥接到现有飞书审批系统
+- 适用于远程/CI 场景的权限控制
+
+### Added - 2026-03-15
+
+#### 注册通知
+
+- 用户注册/换绑时发送通知给网关管理员
+
+### Added - 2026-03-14
+
+#### 单机模式 WS 隧道
+
+- 单机模式统一使用 WS 隧道通信
+- 修复进程管理与异常处理的潜在问题
+
+### Added - 2026-03-13
+
+#### 安装检查与消息发送稳定性
+
+- `install.sh`: 新增超时配置检测，提示 Hook 超时应大于服务端超时
+- `feishu.py`: 卡片发送失败时降级发送文本错误提示
+- `binding_store.py`: 修复换绑设备时 session_id 未清除的问题
+- `feishu_api.py`: 支持更多敏感信息错误码 (230028 DLP审查)
+
+### Fixed - 2026-03-12
+
+- 使用 `os.path.realpath` 规范化 `default_chat_dir` 路径比较
+
+### Added - 2026-03-11
+
+#### 敏感信息脱敏重试
+
+- 消息发送支持敏感信息自动脱敏重试
+- 新增脱敏正则：身份证、手机号、座机号、邮箱
+- 敏感内容被拦截后自动脱敏重试
+
+#### 一键安装脚本
+
+- 新增 `setup.sh` 支持单机模式和分离模式的自动化安装
+- 更新 README 和 QUICKSTART 文档
+
+### Fixed - 2026-03-11
+
+- 修复换绑 HTTP 后仍被旧 WS 连接拦截的问题
+
+### Added - 2026-03-08
+
+#### 飞书 WebSocket 长连接模式
+
+- 新增 `FEISHU_EVENT_MODE` 配置（auto/http/longpoll）
+- 新增 `feishu_longpoll.py` 长连接服务
+- 通过 lark-oapi SDK 的 ws.Client 建立长连接接收飞书事件推送
+- 网关无需公网端点和 HTTPS 证书，适用于本地开发和内网部署场景
+
+#### auth_token 安全增强
+
+- auth_token 生成改用 `FEISHU_APP_SECRET` 作为签名密钥
+
+### Added - 2026-03-07
+
+#### WebSocket 隧道功能
+
+- 添加 WebSocket 隧道功能，支持本地 Claude Code 直连网关
+- 本地开发无需公网 IP，通过 WS 隧道与网关通信
+- POST 路由处理函数改为纯函数签名，WS 隧道直接调用后端路由
+
+### Added - 2026-03-02
+
+#### 默认聊天目录回复优化
+
+- 默认聊天目录消息直接回复群聊，不回复到话题
+- 提升即时通讯场景的用户体验
+
+### Added - 2026-03-01
+
+#### 默认聊天目录功能
+
+- 支持默认聊天目录，普通消息自动创建/继续 Claude 会话
+- 新增 `DEFAULT_CHAT_DIR` 配置项
+- 精简飞书卡片结构，@ 提醒移至 header
+- 精简 `install.sh` 安装脚本，自动生成 `.env` 配置
+
+### Added - 2026-02-28
+
+#### ExitPlanMode 卡片展示
+
+- ExitPlanMode 工具支持方案内容卡片展示
+- 灰底 Markdown 格式呈现，保留交互按钮
+
+#### Typing 表情反馈
+
+- processing 通知使用 Typing 表情替代文本消息
+- 任务完成自动清除，更轻量的状态反馈
+
+### Added - 2026-02-27
+
+#### 多用户命令列表修复
+
+- 将 `claude_commands` 从全局配置改为 per-user binding 存储
+- 修复多用户命令列表混用问题
+
+#### 常用目录显示优化
+
+- 常用目录下拉选项优化显示格式，优先展示文件夹名
+
+#### 日志系统重构
+
+- 统一日志配置，引入 `DailyRotatingFileHandler` 按天自动轮转
+
+### Added - 2026-02-26
+
+#### 飞书通知增强
+
+- 飞书通知完整显示 `session_id`、`prompt` 和 `claude_command`
+
+#### macOS 兼容性修复
+
+- 修复 macOS 兼容性问题
+
+### Added - 2026-02-24
+
+#### 权限延迟检测增强
+
+- 增强权限延迟检测，支持 `transcript tool_result` 精确检测用户决策
+
+### Fixed - 2026-02-23
+
+- 修复 `json.sh` Python 解析器布尔值序列化与异常捕获问题
+- 封装 `send_feishu_text()` 修复分离部署模式下飞书消息发送
+
+### Added - 2026-02-22
+
+#### 飞书话题内回复模式
+
+- 新增 `FEISHU_REPLY_IN_THREAD` 配置
+- 支持将回复消息收敛到话题详情，不刷群聊主界面
+
+#### 飞书话题流链式回复
+
+- 实现飞书话题流链式回复功能，同一会话的消息在同一话题内回复
+
+### Changed - 2026-02-22
+
+#### 代码重构
+
+- 规范化 API 路由路径，按职责分层命名
+- `RequestManager` 改为单例模式，`send_html_response` 移至 utils
+
+### Fixed - 2026-02-22
+
+- 修复文档一致性与代码注释问题
+- 清理 Python 代码的 PEP 8 合规问题（无用导入、类型注解风格、函数签名缩进与参数命名）
+
+### Added - 2026-02-21
+
+#### 错误信息透传
+
+- 卡片发送失败时透传具体错误信息到降级通知
+
+#### Stop 通知增强
+
+- 提升 Stop 通知内容长度限制至 10000 字符
+
+### Changed - 2026-02-21
+
+- 拆分 `CallbackHandler` 为 `HttpRequestHandler` + 纯函数路由模块
+
+### Fixed - 2026-02-20
+
+- 健康检查改用 ping/pong 协议，消除服务端空连接 WARNING 日志
+
+### Fixed - 2026-02-19
+
+- 修复 Bash 5.2+ 模板替换中 `&` 和 `\` 被特殊解释的问题
+
+### Added - 2026-02-18
+
+#### 普通消息使用提示
+
+- 为普通消息增加使用提示
+- 记录未处理请求日志
+
+### Added - 2026-02-17
+
+#### Skill 和 AskUserQuestion 工具支持
+
+- 新增 Skill 工具支持及权限规则空值通配符处理
+- 支持 AskUserQuestion 工具的飞书通知
+
+#### 注册授权卡片增强
+
+- 注册授权卡片增加完整权限说明和安全风险提示
+
+### Changed - 2026-02-17
+
+- 移除按钮和消息映射中的 `callback_url`，统一从 `BindingStore` 获取
+- 修复分离部署模式下 `callback_url` 获取问题
+
+### Added - 2026-02-16
+
+- 注册接口支持 `X-Forwarded-For` 获取真实客户端 IP
+- Stop 通知卡片显示 `--resume` 指令，标题包含 session-id 便于搜索
+- `FEISHU_OWNER_ID` 限制为 user_id 格式，避免换应用后认证失败
+- 新建用户使用指南，集中说明飞书端交互方式
+
+### Fixed - 2026-02-16
+
+- MCP 工具权限规则移除参数后缀，匹配 Claude Code 实际格式
+- 修复 Bash 兼容性、TOCTOU 竞态，提取公共工具函数
 
 ### Changed - 2026-02-16
+
+- 拆分部署文档，修复文档错误和过时引用
+- 将文档按用途归类到 deploy/design/reference 子目录
+
+### Fixed - 2026-02-15
+
+- 修复多个安全问题（命令注入、XSS、时序攻击）及兼容性问题
+- 优化安全性与健壮性：curl headers 使用数组避免注入、socket 权限收紧
+- 修复 `handle_socket_client` 多个异常处理和变量管理问题
+
+### Changed - 2026-02-15
+
+- 将 `AuthTokenStore` 和 `SessionChatStore` 拆分到独立 services 模块
+- 重命名 Store 类与文件使命名更准确
+- 重命名 Python 文件为符合 PEP 8 规范
+
+### Performance - 2026-02-15
+
+- 优化 JSON 解析性能，新增 `json_get_multi` 批量获取字段
+- python3 解析器安全处理中间键不存在
+
+### Added - 2026-02-14
+
+#### Stop 事件通知优化
+
+- 优化 Stop 事件通知，聚合多轮回复并展示思考过程
+
+#### 多命令配置
+
+- 支持 `CLAUDE_COMMAND` 多命令配置
+- 新增 `/reply` 指令切换命令继续会话
+
+### Added - 2026-02-12
+
+- `/new` 指令常用目录旁新增浏览按钮
+- 移除目录浏览 limit 限制
+- 目录历史自动过滤不存在的路径
+
+### Added - 2026-02-11
+
+#### /new 指令卡片优化
+
+- 优化 `/new` 指令卡片布局与交互
+- 标签与输入控件同行对齐
+- 提示词支持多行输入
+- 创建会话卡片显示所选目录和提示词
+
+#### FEISHU_AT_USER 优化
+
+- 空值时默认 @ `FEISHU_OWNER_ID`
+- 支持 `off` 禁用
+
+### Fixed - 2026-02-11
+
+- 将 AutoRegister 注册移到 HTTP 服务启动后，修复单机部署竞态条件
+
+### Added - 2026-02-10
+
+- 增强 `/new` 指令目录选择卡片：支持自定义路径输入和动态目录浏览
+
+### Added - 2026-02-09
+
+- vscode-ssh-proxy 添加彩色输出和 autossh 自动重连支持
+- 为 `/new` 指令添加工作目录选择卡片，支持从历史目录快速选择
+
+### Added - 2026-02-07
+
+#### 飞书注册卡片升级
+
+- 飞书注册卡片升级 schema 2.0
+- 支持点击按钮后动态更新卡片状态
+- 新增解绑功能
+
+#### 飞书消息回复能力
+
+- 新增 `reply_text`/`reply_card` API
+- 所有通知消息支持回复模式
+
+#### /new 指令
+
+- 添加 `/new` 指令支持飞书发起新 Claude 会话
+
+### Added - 2026-02-06
+
+#### 消息路由机制
+
+- 实现基于 `chat_id` 的消息路由机制
+- 支持 `session_id` 与群聊的映射存储和查询
+
+#### 安全增强
+
+- 添加卡片操作者身份验证，确保只有本人才能点击权限按钮
+- 增强飞书网关权限验证
+
+#### Shell 兼容性
+
+- 增强 shell 兼容性，支持 zsh、fish 等主流终端的别名加载
+
+### Changed - 2026-02-06
+
+- 使用 `owner_id` 替代 `receive_id` 配置，简化飞书网关鉴权流程
+
+### Added - 2026-02-05
+
+#### 飞书网关双向认证
+
+- 实现飞书网关注册与双向认证机制
+- 实现 OpenAPI 模式下前端调用 `/feishu/send` 的双向认证
+
+### Fixed - 2026-02-04
+
+- 新增安全分析与部署模式文档
+- 优化 `request_id` 生成降低可预测性
+
+### Added - 2026-02-03
+
+- 新增 `CLAUDE_COMMAND` 环境变量支持自定义 Claude 命令和别名
+- 飞书相关网络请求添加无代理配置，避免系统代理干扰
+
+### Changed - 2026-02-03
+
+- 支持飞书 post 类型消息解析，统一提取纯文本并清理 @提及
+
+### Added - 2026-02-02
+
+#### 会话继续功能
+
+- 支持飞书回复继续 Claude 会话
+- 会话继续新增飞书错误通知
+
+### Changed - 2026-02-02
+
+- 新增日志脱敏并国际化错误提示
+- 统一响应格式并优化代码结构
+
+### Added - 2026-02-01
+
+#### OpenAPI 分离部署
+
+- 支持 OpenAPI 模式下飞书网关与 Callback 服务分离部署
+
+### Fixed - 2026-02-01
+
+- 修复 `send_feishu_text` 函数 JSON 格式错误和返回值缺失
+
+### Changed - 2026-02-01
+
+- 简化飞书日志调用并新增卡片发送日志记录
+
+### Added - 2026-01-31
+
+#### 飞书 OpenAPI 消息发送模式
+
+- 新增飞书 OpenAPI 消息发送模式
+- 支持 `webhook`/`openapi`/`both` 三种方式
+
+### Changed - 2026-01-31
+
+- 移除 both 模式，重构飞书发送逻辑抽取公共函数
+- 将 `session_slug` 重命名为 `session_id`，统一使用 session_id 前8位作为会话标识
 
 #### 配置项重命名与默认值调整 (config-rename-and-defaults)
 
@@ -17,19 +501,22 @@ All notable changes to this project will be documented in this file.
 - 重组 `.env.example` 配置分类，新增配置速查表
 - 同步更新 `install.sh`、`README.md`、`QUICKSTART.md` 等文档
 
-### Added - 2026-01-31
+### Changed - 2026-01-30
 
-#### 飞书卡片回传交互 (card-callback-handler)
+- stop hook 支持从子代理目录提取 assistant 消息
 
-- 新增飞书卡片按钮回传交互支持，用户点击按钮后飞书内直接显示 toast 提示
-- 新增 `buttons-openapi.json` 模板，使用 `callback` 类型按钮
-- `build_permission_buttons()` 根据 `FEISHU_SEND_MODE` 自动选择按钮类型
-  - `webhook` 模式：使用 `open_url` 类型按钮（点击跳转浏览器）
-  - `openapi` 模式：使用 `callback` 类型按钮（飞书内直接响应）
-- 新增 `src/server/services/decision_handler.py` 统一决策处理逻辑
-- `RequestManager.resolve()` 返回值增加错误码，避免字符串匹配判断
-- 新增飞书事件 `card.action.trigger` 处理支持
-- 配置文档补充飞书事件订阅配置步骤
+### Added - 2026-01-29
+
+- `FEISHU_AT_ALL` 重构为 `FEISHU_AT_USER`，支持 @ 指定用户
+
+### Changed - 2026-01-29
+
+- 调整 Stop 消息长度默认值为 5000
+- 统一飞书 HTTP 超时常量
+
+### Fixed - 2026-01-28
+
+- hook 进程不存在时返回 410 错误，明确告知决策无法送达
 
 ### Added - 2026-01-27
 
@@ -38,14 +525,11 @@ All notable changes to this project will be documented in this file.
 - 权限请求卡片新增会话信息显示
 - 显示 session_id 前 8 位，便于区分不同会话的权限请求
 - 更新 `permission-card.json` 和 `permission-card-static.json` 模板
+- 注册 hook PID 实时检测终端响应，移除冗余的 socket 存活检查
 
-### Fixed - 2026-01-26
+### Changed - 2026-01-27
 
-#### 用户响应时连接状态检测 (socket-state-realtime-check)
-
-- 修复用户点击按钮响应时可能因清理线程延迟而导致响应失败的问题
-- 用户点击按钮时实时检测 socket 连接状态，不再依赖后台清理线程的延迟检测
-- 确保用户响应时能立即获得准确的连接状态
+- 优化安装脚本输出格式，补充文档配置说明
 
 ### Added - 2026-01-26
 
@@ -73,6 +557,33 @@ All notable changes to this project will be documented in this file.
 - 延迟期间每秒检测父进程状态，父进程退出时跳过发送
 - 用途：避免快速连续请求时的消息轰炸
 
+#### VSCode SSH 远程开发代理
+
+- 新增 VSCode SSH 远程开发代理
+- 支持通过反向 SSH 隧道自动唤起本地 VSCode 窗口
+- VSCode SSH 代理新增 `--ssh-port` 参数
+
+#### session_id 追踪
+
+- 为前后端通信添加 `session_id` 追踪
+
+### Fixed - 2026-01-26
+
+#### 用户响应时连接状态检测 (socket-state-realtime-check)
+
+- 修复用户点击按钮响应时可能因清理线程延迟而导致响应失败的问题
+- 用户点击按钮时实时检测 socket 连接状态，不再依赖后台清理线程的延迟检测
+- 确保用户响应时能立即获得准确的连接状态
+- 修复 VSCode 代理 HOME 软链接路径不匹配及健康检查正则问题
+
+### Changed - 2026-01-26
+
+- 重构目录结构，统一将源代码迁移至 `src` 目录
+
+### Added - 2026-01-25
+
+- 重组测试文档到 `test/` 目录，新增权限请求测试脚本
+
 ### Added - 2026-01-23
 
 #### VSCode 自动跳转 (add-vscode-redirect)
@@ -85,53 +596,62 @@ All notable changes to this project will be documented in this file.
 - 响应页面增强:
   - 显示"正在跳转到 VSCode..."提示
   - 跳转失败时显示手动打开链接和 VSCode 设置提示
-  - 根据本地/远程自动显示对应的配置项（`security.promptForLocalFileProtocolHandling` / `security.promptForRemoteFileProtocolHandling`）
-- 未配置 `VSCODE_URI_PREFIX` 时保持原有行为（不跳转）
+  - 根据本地/远程自动显示对应的配置项
+
+#### 统一配置读取
+
+- 新增统一配置读取模块，支持自动从 `.env` 文件加载配置
+
+### Fixed - 2026-01-23
+
+- 修复倒计时显示和工具配置路径问题
+
+### Changed - 2026-01-23
+
+- 抽取项目路径管理逻辑到统一的 `project.sh` 库
+
+### Added - 2026-01-22
+
+- 添加权限请求 command 日志功能，按日期和会话 ID 保存命令历史
+
+### Fixed - 2026-01-22
+
+- 修复命令中 `&` 符号在飞书卡片显示异常的问题
+
+### Added - 2026-01-21
+
+- 权限请求卡片支持 @所有人 以触发消息横幅
 
 ### Added - 2026-01-20
 
-#### 飞书卡片子模板抽象化 (飞书卡片模板化增强)
+#### 飞书卡片回传交互 (card-callback-handler)
 
-- 新增子模板系统,支持模块化的卡片元素组合:
-  - `command-detail-bash.json` - Bash 命令详情元素模板
-  - `command-detail-file.json` - 文件操作详情元素模板 (Edit/Write/Read)
-  - `description-element.json` - 操作描述元素模板
-- 新增 `render_sub_template()` 函数,支持渲染独立子模板
-- 重构 `build_permission_card()` 函数:
-  - 根据工具类型自动选择对应的子模板
-  - 支持 Bash、Edit、Write、Read 等不同工具类型
-  - 动态组合命令详情和描述元素
-- 统一配置管理:
-  - 更新 `config/tools.json` 的 `detail_template`,只返回纯值不包含标签
-  - 同步更新 `shell-lib/tool.sh` 内置逻辑
-  - 同步更新 `server/models/tool_config.py` 内置配置
-- 优化代码规范:
-  - 规范化 `shell-lib/feishu.sh` 代码和注释
-  - 统一函数文档格式
-  - 改进代码组织结构
-
-**优势**:
-- 更高复用性: 命令详情、描述等元素可独立复用
-- 更易扩展: 新增工具类型只需添加对应子模板
-- 配置统一: Shell 脚本和 Python 服务器使用相同配置
-- 代码清晰: 模板职责明确,便于维护
+- 新增飞书卡片按钮回传交互支持，用户点击按钮后飞书内直接显示 toast 提示
+- 新增 `buttons-openapi.json` 模板，使用 `callback` 类型按钮
+- `build_permission_buttons()` 根据 `FEISHU_SEND_MODE` 自动选择按钮类型
+  - `webhook` 模式：使用 `open_url` 类型按钮（点击跳转浏览器）
+  - `openapi` 模式：使用 `callback` 类型按钮（飞书内直接响应）
+- 新增 `src/server/services/decision_handler.py` 统一决策处理逻辑
+- `RequestManager.resolve()` 返回值增加错误码，避免字符串匹配判断
+- 新增飞书事件 `card.action.trigger` 处理支持
+- 配置文档补充飞书事件订阅配置步骤
 
 ### Changed - 2026-01-20
 
-#### 配置文件更新
+- 飞书卡片模板统一升级至 2.0 格式
+- 完善文档并升级通用通知卡片格式
 
-- `config/tools.json`:
-  - 所有工具的 `detail_template` 改为只返回纯值
-  - 移除模板中的标签 (如"**命令：**"、"**文件：**")
-  - 标签由飞书卡片子模板负责添加
-- `shell-lib/tool.sh`:
-  - 内置逻辑改为只返回纯值
-  - 简化转义处理
-- `server/models/tool_config.py`:
-  - 更新内置配置与 tools.json 保持一致
-  - 更新 `format_detail()` 方法只返回纯值
+### Fixed - 2026-01-20
+
+- 为拒绝运行和拒绝并中断按钮添加跳转链接
+- 修复权限请求卡片 JSON 格式错误
 
 ### Added - 2026-01-19
+
+#### 回调页面自动关闭
+
+- 实现回调页面自动关闭功能
+- 支持环境变量配置超时时间
 
 #### 飞书卡片模板化 (extract-feishu-card-templates)
 
@@ -158,6 +678,49 @@ All notable changes to this project will be documented in this file.
 - 版本管理:模板独立存储,可轻松回滚或升级
 - 扩展性强:新增卡片类型只需添加新模板文件
 - 向后兼容:保持现有 API 接口不变
+
+### Added - 2026-01-18
+
+#### 降级文本通知
+
+- 飞书卡片发送失败时自动发送降级文本通知
+- 修复飞书卡片 Bash 命令转义问题
+
+#### 模块化重构
+
+- 项目结构模块化重构，修复 Socket 服务检测逻辑
+- 模块化重构权限通知功能，统一工具配置，消除代码重复
+- 添加客户端超时兜底机制，抽取共享超时配置模块
+- 优化 hooks 配置合并逻辑，保留现有其他配置
+
+### Changed - 2026-01-18
+
+- 优化环境变量配置提示，自动检测 shell 类型并提示配置文件
+- 移除冗余的 server_stdout.log
+
+### Fixed - 2026-01-17
+
+- 修复始终允许写入 `None(*)` 的 bug
+- 添加 Read 工具卡片适配
+- 修复重复发送卡片问题
+- 优化日志打印目录
+
+### Added - 2026-01-16
+
+- 优化飞书卡片的显示问题
+- 更新超时机制
+
+### Changed - 2026-01-16
+
+- 将飞书卡片发送逻辑从后端迁移至前端脚本
+
+### Fixed - 2026-01-16
+
+- 修复 socket 连接过早关闭导致决策响应不完整的问题
+- 后端未启动时回退终端而非拒绝
+- 任何服务错误都回退终端而非拒绝，只有用户明确拒绝才 deny
+- 超时回退终端 & 死连接检测 & 日志时间戳修复
+- 修复依赖检测的 bug
 
 ### Added - 2026-01-15
 
