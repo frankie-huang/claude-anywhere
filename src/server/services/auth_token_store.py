@@ -67,12 +67,13 @@ class AuthTokenStore:
         """
         return cls._instance
 
-    def save(self, owner_id: str, auth_token: str) -> bool:
+    def save(self, owner_id: str, auth_token: str, bot_open_id: str = '') -> bool:
         """保存 auth_token
 
         Args:
             owner_id: 飞书用户 ID
             auth_token: 认证令牌
+            bot_open_id: 机器人 open_id（可选，注册时由网关传入，用于消息中 @机器人）
 
         Returns:
             是否保存成功
@@ -85,6 +86,8 @@ class AuthTokenStore:
                     'auth_token': auth_token,
                     'updated_at': int(time.time())
                 }
+                # 每次都写入 bot_open_id（即使是空值），避免切换网关后残留旧机器人 ID
+                data['bot_open_id'] = bot_open_id
                 return self._save(data)
             except Exception as e:
                 logger.error(f"[auth-token-store] Failed to save token: {e}")

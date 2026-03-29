@@ -2,13 +2,13 @@
   "_comment": "统一日志配置 - Shell 和 Python 共用",
   "version": 1,
   "log_dir_relative": "log",
-  "date_format": "%Y%m%d",
+  "date_format": "%Y-%m-%d",
   "datetime_format": "%Y-%m-%d %H:%M:%S",
   "file_patterns": {
-    "hook": "hook_{date}.log",
-    "server": "callback_{date}.log",
-    "socket_client": "socket_client_{date}.log",
-    "feishu_message": "feishu_message_{date}.log"
+    "hook": "hook/{date}.log",
+    "server": "callback/{date}.log",
+    "socket_client": "socket_client/{date}.log",
+    "feishu_message": "feishu_message/{date}.log"
   },
   "formats": {
     "shell": "[{pid}] {datetime} [{level}] {message}",

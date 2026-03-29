@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-03-29
+
+#### UserPromptSubmit 事件：终端 Prompt 同步到飞书话题
+
+- 新增 `UserPromptSubmit` hook handler（`src/hooks/user_prompt.sh`），终端发起的 prompt 自动同步到飞书话题
+- 飞书发起的 prompt 通过 `skip_next_user_prompt` 标志自动跳过，避免重复通知
+- 新增 `send_feishu_post()` 富文本消息发送，支持 session threading 链式回复和 @机器人
+- 飞书网关 `/gw/feishu/send` 新增 post 富文本消息类型和 `add_typing` 表情选项
+- `stop.sh` 新增 openapi 发送模式直通（不再强制依赖 webhook URL）
+
+#### 注册流程传递 bot_open_id
+
+- 网关注册时通过 `FeishuAPIService.get_bot_info()` 获取机器人 open_id
+- HTTP callback 和 WS auth_ok 两条注册路径均附带 bot_open_id
+- `AuthTokenStore.save()` 将 bot_open_id 持久化到 runtime 文件，供发消息时 @机器人使用
+
+### Added - 2026-03-28
+
+#### 权限卡片工具内容预览
+
+- Edit 工具权限卡片展示 diff 详情（删除/新增对比）
+- Write 工具权限卡片展示写入内容预览
+
+#### 工具内容截断优化
+
+- 提升工具内容截断上限至 5000 字符
+- 截断时展示截断提示，告知用户内容被截断
+- Stop 通知内容截断时追加截断提示
+
+### Changed - 2026-03-28
+
+- 截断提示从内容拼接改为模板独立渲染
+
+### Added - 2026-03-27
+
+#### /users 管理员指令
+
+- 新增 `/users` 管理员指令，支持查看用户在线状态
+
+### Changed - 2026-03-27
+
+#### 日志目录重构
+
+- 日志文件按组件分子目录存放，便于分类管理
+- 日期格式改为 YYYY-MM-DD
+
 ### Changed - 2026-03-26
 
 #### 默认聊天目录话题跟随配置 (default-chat-follow-thread)

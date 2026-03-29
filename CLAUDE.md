@@ -31,6 +31,8 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 | subprocess | `stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True` | `capture_output=True, text=True` (3.7+) |
 | 运算符 | 普通赋值 `x = foo()` | `:=` walrus (3.8+) |
 | 类型注解风格 | 内联注解 `def foo(x: str) -> int:` | `# type:` 注释风格 |
+| 字符串格式化 | f-string `f"hello {name}"` | `.format()` / `%` 格式化 |
+| logging 格式化 | lazy `logger.info("x=%s", x)` | f-string `logger.info(f"x={x}")` |
 
 **常见错误示例：**
 
@@ -104,6 +106,15 @@ from config import get_config, get_config_int
 WEBHOOK_URL = get_config('FEISHU_WEBHOOK_URL', '')
 PORT = get_config_int('CALLBACK_SERVER_PORT', 8080)
 ```
+
+## 提交前检查清单
+
+**每次 commit 前必须执行以下检查：**
+
+- [ ] 如果有功能改动（新功能、Bug 修复、重构、配置变更等） → **必须**更新 `CHANGELOG.md`
+- [ ] 如果有配置/目录结构变更 → 检查 README.md 是否需要同步更新
+
+> 纯代码格式、注释修改等不影响功能的变更无需更新 CHANGELOG。
 
 ## 常用命令
 

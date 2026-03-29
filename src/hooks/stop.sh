@@ -237,16 +237,16 @@ build_response_elements() {
     if [ "$JSON_HAS_JQ" = "true" ]; then
         echo "$response_json" | jq -r --argjson max_len "$max_length" '
             .texts |
-            # 按总长度截断
+            # 按总长度截断，同时跟踪是否发生截断
             reduce .[] as $t (
-                {remaining: $max_len, result: []};
-                if .remaining <= 0 then .
+                {remaining: $max_len, result: [], truncated: false};
+                if .remaining <= 0 then .truncated = true
                 elif ($t | length) <= .remaining then
                     .result += [$t] | .remaining -= ($t | length)
                 else
-                    .result += [$t[:.remaining] + "..."] | .remaining = 0
+                    .result += [$t[:.remaining] + "..."] | .remaining = 0 | .truncated = true
                 end
-            ) | .result |
+            ) | .truncated as $is_truncated | .result |
             # 构建 markdown 元素，元素间用 hr 分隔
             [to_entries[] |
                 (if .key > 0 then
@@ -260,7 +260,12 @@ build_response_elements() {
                     text_align: "left",
                     text_size: "normal_v2"
                 }]
-            ] | flatten | map(tojson) | join(",")
+            ] | flatten |
+            # 截断时追加提示元素
+            (if $is_truncated then
+                . + [{tag: "markdown", content: "<font color='"'"'grey'"'"'>⚠️ 内容过长，已截断</font>", text_align: "left", text_size: "notation", margin: "4px 0px 0px 0px"}]
+            else . end) |
+            map(tojson) | join(",")
         ' 2>/dev/null
     elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
         echo "$response_json" | python3 -c "
@@ -270,14 +275,17 @@ texts = data.get('texts', [])
 max_len = int(sys.argv[1])
 truncated = []
 remaining = max_len
+is_truncated = False
 for text in texts:
     if remaining <= 0:
+        is_truncated = True
         break
     if len(text) <= remaining:
         truncated.append(text)
         remaining -= len(text)
     else:
         truncated.append(text[:remaining] + '...')
+        is_truncated = True
         remaining = 0
 fence = chr(96) * 3
 elements = []
@@ -286,6 +294,8 @@ for i, text in enumerate(truncated):
     if i > 0:
         elements.append(json.dumps({'tag': 'hr', 'margin': '0px 0px 0px 0px'}))
     elements.append(json.dumps({'tag': 'markdown', 'content': text, 'text_align': 'left', 'text_size': 'normal_v2'}))
+if is_truncated:
+    elements.append(json.dumps({'tag': 'markdown', 'content': \"<font color='grey'>\u26a0\ufe0f 内容过长，已截断</font>\", 'text_align': 'left', 'text_size': 'notation', 'margin': '4px 0px 0px 0px'}))
 print(','.join(elements))
 " "$max_length" 2>/dev/null
     fi
@@ -296,8 +306,9 @@ print(','.join(elements))
 # =============================================================================
 send_stop_notification_async() {
     # 捕获当前环境变量供后台使用
+    local SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
     local WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
-    local STOP_MAX_LENGTH=$(get_config "STOP_MESSAGE_MAX_LENGTH" "10000")
+    local STOP_MESSAGE_MAX_LENGTH=$(get_config "STOP_MESSAGE_MAX_LENGTH" "10000")
     local STOP_THINKING_MAX_LENGTH=$(get_config "STOP_THINKING_MAX_LENGTH" "10000")
     local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
     local TRANSCRIPT_PATH=$(json_get "$INPUT" "transcript_path")
@@ -306,8 +317,8 @@ send_stop_notification_async() {
     local SESSION_ID=""
     local TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 
-    # 检查 Webhook URL
-    if [ -z "$WEBHOOK_URL" ]; then
+    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
+    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
         return 0
     fi
 
@@ -338,7 +349,7 @@ send_stop_notification_async() {
         CLAUDE_THINKING=$(json_get "$response_json" "thinking")
 
         # 构建响应元素 JSON 片段（含截断和代码块格式化）
-        RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MAX_LENGTH")
+        RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
         log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#CLAUDE_THINKING} chars"
     fi
 

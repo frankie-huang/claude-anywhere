@@ -1,0 +1,34 @@
+{
+  "tag": "markdown",
+  "content": "**文件：**\n{{file_path}}",
+  "text_align": "left",
+  "text_size": "normal_v2",
+  "margin": "0px 0px 0px 0px"
+},
+{
+  "tag": "column_set",
+  "flex_mode": "stretch",
+  "horizontal_spacing": "0px",
+  "horizontal_align": "left",
+  "columns": [
+    {
+      "tag": "column",
+      "width": "weighted",
+      "background_style": "green-50",
+      "elements": [
+        {
+          "tag": "markdown",
+          "content": "**写入内容**\n```\n{{write_content}}\n```\n{{write_content_hint}}",
+          "text_align": "left",
+          "text_size": "normal_v2"
+        }
+      ],
+      "padding": "8px 12px 8px 12px",
+      "vertical_spacing": "4px",
+      "horizontal_align": "left",
+      "vertical_align": "top",
+      "weight": 1
+    }
+  ],
+  "margin": "4px 0px 0px 0px"
+}

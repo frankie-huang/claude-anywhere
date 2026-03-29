@@ -696,6 +696,66 @@ class MessageSender:
             log_prefix='Text reply'
         )
 
+    def send_post(
+        self,
+        content: Dict[str, Any],
+        receive_id: Optional[str] = None,
+        receive_id_type: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """发送富文本消息（新消息）
+
+        Args:
+            content: 富文本内容（如 {"zh_cn": {"title": "...", "content": [[...]]}}）
+            receive_id: 接收者 ID（必需）
+            receive_id_type: 接收者类型，默认自动检测
+
+        Returns:
+            (success, message_id or error)
+        """
+        if not receive_id_type:
+            receive_id_type = detect_receive_id_type(receive_id)
+
+        if not receive_id:
+            return False, "No receive_id specified"
+
+        url = f"{FEISHU_API_BASE}/im/v1/messages?receive_id_type={receive_id_type}"
+        return self._send_with_retry(
+            url=url,
+            msg_type='post',
+            content=content,
+            payload_extra={'receive_id': receive_id},
+            log_prefix='Post'
+        )
+
+    def reply_post(
+        self,
+        content: Dict[str, Any],
+        message_id: str,
+        reply_in_thread: bool = False
+    ) -> Tuple[bool, str]:
+        """回复富文本消息
+
+        Args:
+            content: 富文本内容（如 {"zh_cn": {"title": "...", "content": [[...]]}}）
+            message_id: 要回复的消息 ID（必需）
+            reply_in_thread: 是否收进话题详情
+
+        Returns:
+            (success, new_message_id or error)
+        """
+        if not message_id:
+            return False, "No message_id specified for reply"
+
+        url = f"{FEISHU_API_BASE}/im/v1/messages/{message_id}/reply"
+        payload_extra = {'reply_in_thread': True} if reply_in_thread else None
+        return self._send_with_retry(
+            url=url,
+            msg_type='post',
+            content=content,
+            payload_extra=payload_extra,
+            log_prefix='Post reply'
+        )
+
     def add_reaction(
         self,
         message_id: str,
@@ -904,6 +964,8 @@ class FeishuAPIService:
         self._app_secret = app_secret
         self._enabled = bool(app_id and app_secret)
 
+        self._bot_info: Optional[Dict[str, Any]] = None
+
         if self._enabled:
             self._token_manager = TokenManager(app_id, app_secret)
             self._message_sender = MessageSender(self._token_manager)
@@ -944,6 +1006,63 @@ class FeishuAPIService:
     def enabled(self) -> bool:
         """服务是否启用"""
         return self._enabled
+
+    def get_bot_info(self) -> Tuple[bool, Dict[str, Any]]:
+        """获取机器人自身信息
+
+        调用 GET /open-apis/bot/v3/info 获取机器人信息，
+        结果缓存到实例变量，避免重复请求。
+
+        Returns:
+            (success, bot_info_dict or error_dict)
+            bot_info_dict 包含 open_id, app_name, avatar_url 等字段
+        """
+        if not self._enabled:
+            return False, {'error': 'Feishu API service not enabled'}
+
+        if self._bot_info is not None:
+            return True, self._bot_info
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, {'error': 'Failed to get access token'}
+
+        url = f"{FEISHU_API_BASE}/bot/v3/info"
+        headers = {
+            'Authorization': f'Bearer {token}',
+        }
+
+        success, result = _http_request(url, method='GET', headers=headers)
+        if not success:
+            logger.error("[feishu-api] Failed to get bot info: %s", result)
+            return False, result
+
+        code = result.get('code', -1)
+        if code != 0:
+            msg = result.get('msg', 'Unknown error')
+            logger.error("[feishu-api] Get bot info error: code=%s, msg=%s", code, msg)
+            return False, result
+
+        bot = result.get('bot', {})
+        self._bot_info = bot
+        logger.info("[feishu-api] Bot info retrieved: app_name=%s, open_id=%s",
+                     bot.get('app_name', ''), bot.get('open_id', ''))
+        return True, bot
+
+    @property
+    def bot_open_id(self) -> Optional[str]:
+        """获取机器人的 open_id（懒加载）
+
+        Returns:
+            机器人的 open_id，获取失败返回 None
+        """
+        if self._bot_info is not None:
+            return self._bot_info.get('open_id')
+
+        success, info = self.get_bot_info()
+        if success:
+            return info.get('open_id')
+        return None
 
     def send_card(
         self,
@@ -1032,6 +1151,48 @@ class FeishuAPIService:
             return False, "Feishu API service not enabled"
 
         return self._message_sender.reply_text(text, message_id, reply_in_thread)
+
+    def send_post(
+        self,
+        content: Dict[str, Any],
+        receive_id: Optional[str] = None,
+        receive_id_type: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """发送富文本消息
+
+        Args:
+            content: 富文本内容（如 {"zh_cn": {"title": "...", "content": [[...]]}}）
+            receive_id: 接收者 ID（必需）
+            receive_id_type: 接收者类型，默认自动检测
+
+        Returns:
+            (success, message_id or error)
+        """
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+
+        return self._message_sender.send_post(content, receive_id, receive_id_type)
+
+    def reply_post(
+        self,
+        content: Dict[str, Any],
+        message_id: str,
+        reply_in_thread: bool = False
+    ) -> Tuple[bool, str]:
+        """回复富文本消息
+
+        Args:
+            content: 富文本内容
+            message_id: 要回复的消息 ID
+            reply_in_thread: 是否收进话题详情
+
+        Returns:
+            (success, new_message_id or error)
+        """
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+
+        return self._message_sender.reply_post(content, message_id, reply_in_thread)
 
     def add_reaction(
         self,

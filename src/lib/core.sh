@@ -189,9 +189,9 @@ env_reload() {
 : "${LOG_FILE:=}"
 
 # 日志配置
-_LOG_DATE_FORMAT="%Y%m%d"
+_LOG_DATE_FORMAT="%Y-%m-%d"
 _LOG_DATETIME_FORMAT="%Y-%m-%d %H:%M:%S"
-_LOG_FILE_PATTERN="hook_{date}.log"
+_LOG_FILE_PATTERN="hook/{date}.log"
 
 # -----------------------------------------------------------------------------
 # 加载日志配置
@@ -202,14 +202,14 @@ _load_log_config() {
     if [ -f "$config_file" ]; then
         # 尝试使用 jq 读取配置
         if command -v jq &> /dev/null; then
-            _LOG_DATE_FORMAT=$(jq -r '.date_format // "%Y%m%d"' "$config_file" 2>/dev/null || echo "%Y%m%d")
+            _LOG_DATE_FORMAT=$(jq -r '.date_format // "%Y-%m-%d"' "$config_file" 2>/dev/null || echo "%Y-%m-%d")
             _LOG_DATETIME_FORMAT=$(jq -r '.datetime_format // "%Y-%m-%d %H:%M:%S"' "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
-            _LOG_FILE_PATTERN=$(jq -r '.file_patterns.hook // "hook_{date}.log"' "$config_file" 2>/dev/null || echo "hook_{date}.log")
+            _LOG_FILE_PATTERN=$(jq -r '.file_patterns.hook // "hook/{date}.log"' "$config_file" 2>/dev/null || echo "hook/{date}.log")
         # 尝试使用 python3 读取配置
         elif command -v python3 &> /dev/null; then
-            _LOG_DATE_FORMAT=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('date_format', '%Y%m%d'))" "$config_file" 2>/dev/null || echo "%Y%m%d")
+            _LOG_DATE_FORMAT=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('date_format', '%Y-%m-%d'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d")
             _LOG_DATETIME_FORMAT=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('datetime_format', '%Y-%m-%d %H:%M:%S'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
-            _LOG_FILE_PATTERN=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('file_patterns', {}).get('hook', 'hook_{date}.log'))" "$config_file" 2>/dev/null || echo "hook_{date}.log")
+            _LOG_FILE_PATTERN=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('file_patterns', {}).get('hook', 'hook/{date}.log'))" "$config_file" 2>/dev/null || echo "hook/{date}.log")
         fi
     fi
 }
@@ -231,8 +231,6 @@ log_init() {
     if [ -n "$log_file" ]; then
         LOG_FILE="$log_file"
     else
-        mkdir -p "$LOG_DIR"
-
         local log_date
         log_date=$(date "+${_LOG_DATE_FORMAT}")
         local log_filename
@@ -333,7 +331,7 @@ log_input() {
 #   $2 - request_id       - 请求 ID（可选，默认 unknown）
 #   $3 - tool_name        - 工具名称（可选，默认 unknown）
 #   $4 - session_id       - 会话 ID（可选，默认 unknown）
-# 输出：写入日志到 ${LOG_DIR}/command/command_${date}_${session_id}.log
+# 输出：写入日志到 ${LOG_DIR}/command/${date}_${session_id}.log
 # 返回：0 = 成功
 # -----------------------------------------------------------------------------
 log_command() {
@@ -346,8 +344,8 @@ log_command() {
     mkdir -p "$command_log_dir"
 
     local date_part
-    date_part=$(date "+%Y%m%d")
-    local log_filename="command_${date_part}_${session_id}.log"
+    date_part=$(date "+%Y-%m-%d")
+    local log_filename="${date_part}_${session_id}.log"
     local log_file="${command_log_dir}/${log_filename}"
 
     {

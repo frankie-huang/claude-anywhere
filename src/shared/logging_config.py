@@ -14,14 +14,14 @@ from typing import Any, Optional
 # 默认配置
 DEFAULT_CONFIG = {
     "log_dir_relative": "log",
-    "date_format": "%Y%m%d",
+    "date_format": "%Y-%m-%d",
     "datetime_format": "%Y-%m-%d %H:%M:%S",
     "file_patterns": {
-        "hook": "hook_{date}.log",
-        "server": "callback_{date}.log",
-        "socket_client": "socket_client_{date}.log",
-        "feishu_message": "feishu_message_{date}.log",
-        "feishu_longpoll": "feishu_longpoll_{date}.log"
+        "hook": "hook/{date}.log",
+        "server": "callback/{date}.log",
+        "socket_client": "socket_client/{date}.log",
+        "feishu_message": "feishu_message/{date}.log",
+        "feishu_longpoll": "feishu_longpoll/{date}.log"
     },
     "formats": {
         "python": "[%(process)d] %(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
@@ -71,14 +71,14 @@ class DailyRotatingFileHandler(logging.FileHandler):
     适用于长期运行的服务进程。
     """
 
-    def __init__(self, log_dir, filename_pattern, date_format="%Y%m%d", **kwargs):
+    def __init__(self, log_dir, filename_pattern, date_format="%Y-%m-%d", **kwargs):
         # type: (str, str, str, **Any) -> None
         """初始化按天轮转处理器
 
         Args:
             log_dir: 日志目录路径
             filename_pattern: 文件名模式，包含 {date} 占位符
-            date_format: 日期格式，默认 %Y%m%d
+            date_format: 日期格式，默认 %Y-%m-%d
             **kwargs: 传递给 FileHandler 的其他参数
         """
         self._log_dir = log_dir
@@ -87,6 +87,7 @@ class DailyRotatingFileHandler(logging.FileHandler):
         self._current_date = time.strftime(date_format)
         filename = filename_pattern.replace("{date}", self._current_date)
         filepath = os.path.join(log_dir, filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         super(DailyRotatingFileHandler, self).__init__(filepath, **kwargs)
 
     def emit(self, record):
@@ -105,6 +106,7 @@ class DailyRotatingFileHandler(logging.FileHandler):
                     # 切换到新文件
                     filename = self._filename_pattern.replace("{date}", today)
                     self.baseFilename = os.path.join(self._log_dir, filename)
+                    os.makedirs(os.path.dirname(self.baseFilename), exist_ok=True)
                     self.stream = self._open()
             finally:
                 self.release()
@@ -156,10 +158,10 @@ def setup_logging(component, logger=None, console=True, propagate=True, encoding
     log_dir = os.path.join(project_root, config.get("log_dir_relative", "log"))
     os.makedirs(log_dir, exist_ok=True)
     file_patterns = config.get("file_patterns", {})
-    pattern = file_patterns.get(component, "{component}_{{date}}.log".format(component=component))
+    pattern = file_patterns.get(component, "{component}/{{date}}.log".format(component=component))
     file_handler = DailyRotatingFileHandler(
         log_dir, pattern,
-        date_format=config.get("date_format", "%Y%m%d"),
+        date_format=config.get("date_format", "%Y-%m-%d"),
         encoding=encoding
     )
     file_handler.setFormatter(formatter)

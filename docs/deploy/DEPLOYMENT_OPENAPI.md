@@ -801,7 +801,7 @@ CLAUDE_COMMAND=[claude, claude --setting opus]
 1. 是否安装了 `lark-oapi` SDK：`pip install lark-oapi`
 2. Python 版本是否 >= 3.8（longpoll 模式要求）
 3. 飞书应用事件订阅是否选择了「WebSocket 长连接」方式
-4. 检查日志 `log/feishu_longpoll_*.log` 中是否有连接成功信息
+4. 检查日志 `log/feishu_longpoll/*.log` 中是否有连接成功信息
 5. `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 是否正确
 
 ### Q: 回复消息继续会话不生效？

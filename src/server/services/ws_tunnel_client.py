@@ -325,10 +325,11 @@ class WSTunnelClient:
             logger.warning("[ws_client] auth_ok missing auth_token")
             return
 
-        # 存储 auth_token
+        # 存储 auth_token（及 bot_open_id）
+        bot_open_id = msg.get('bot_open_id', '')
         token_store = AuthTokenStore.get_instance()
         if token_store:
-            token_store.save(self.owner_id, auth_token)
+            token_store.save(self.owner_id, auth_token, bot_open_id=bot_open_id)
             logger.info("[ws_client] Stored auth_token for %s", self.owner_id)
 
         # 发送确认消息（让网关知道我们已收到并存储了 token）

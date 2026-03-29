@@ -60,6 +60,15 @@ _SECURITY_WARNING_REBIND = (
 )
 
 
+def get_bot_open_id() -> Optional[str]:
+    """从 FeishuAPIService 获取机器人 open_id"""
+    from services.feishu_api import FeishuAPIService
+    service = FeishuAPIService.get_instance()
+    if service:
+        return service.bot_open_id
+    return None
+
+
 def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict]:
     """处理 Callback 后端的注册请求
 
@@ -114,6 +123,7 @@ def handle_register_callback(data: dict) -> Tuple[bool, dict]:
         data: 请求数据
             - owner_id: 飞书用户 ID
             - auth_token: 认证令牌
+            - bot_open_id: 机器人 open_id（可选）
             - gateway_version: 网关版本（可选）
 
     Returns:
@@ -123,6 +133,7 @@ def handle_register_callback(data: dict) -> Tuple[bool, dict]:
 
     owner_id = data.get('owner_id', '')
     auth_token = data.get('auth_token', '')
+    bot_open_id = data.get('bot_open_id', '')
     gateway_version = data.get('gateway_version', '')
 
     # 获取配置的 owner_id
@@ -147,13 +158,13 @@ def handle_register_callback(data: dict) -> Tuple[bool, dict]:
 
     logger.info(
         f"[cb/register] Storing auth_token for owner_id={owner_id}, "
-        f"gateway_version={gateway_version}"
+        f"bot_open_id={bot_open_id}, gateway_version={gateway_version}"
     )
 
-    # 存储 auth_token
-    store = AuthTokenStore.get_instance()
-    if store:
-        if store.save(owner_id, auth_token):
+    # 存储 auth_token（及 bot_open_id）
+    token_store = AuthTokenStore.get_instance()
+    if token_store:
+        if token_store.save(owner_id, auth_token, bot_open_id=bot_open_id):
             logger.info(f"[cb/register] Auth token stored successfully")
             return True, {
                 'success': True,
@@ -339,6 +350,11 @@ def _notify_callback(callback_url: str, owner_id: str, auth_token: str, client_i
         'auth_token': auth_token,
         'gateway_version': '1.0.0'
     }
+
+    # 附带 bot_open_id，供 Callback 端存储到 runtime 文件
+    bot_open_id = get_bot_open_id()
+    if bot_open_id:
+        request_data['bot_open_id'] = bot_open_id
 
     logger.info(f"[register] Calling {api_url}")
 
@@ -964,6 +980,23 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
                                        old_ip=old_ip)
 
 
+def ws_send_auth_ok(sock: 'socket.socket', auth_token: str) -> None:
+    """通过 WebSocket 发送 auth_ok 消息（含 bot_open_id）
+
+    WS 模式首次授权和续期重连共用此函数，确保 auth_ok 消息格式一致。
+    """
+    from services.ws_protocol import ws_send_text
+    auth_ok_data = {
+        'type': 'auth_ok',
+        'auth_token': auth_token
+    }
+    bot_open_id = get_bot_open_id()
+    if bot_open_id:
+        auth_ok_data['bot_open_id'] = bot_open_id
+    msg = json.dumps(auth_ok_data)
+    ws_send_text(sock, msg)
+
+
 def handle_ws_authorization_approved(owner_id: str, request_id: str,
                                      client_ip: str,
                                      reply_in_thread: bool = False,
@@ -1042,7 +1075,6 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
         }
 
     try:
-        from services.ws_protocol import ws_send_text
         # 原子地设置 auth_token、绑定参数，并关闭其他 pending 连接
         # 防止客户端极快回复 auth_ok_ack 时消息循环找不到 token
         # 同时验证 pending 连接仍然存在（防止 get_pending 与此处之间的竞态）
@@ -1067,11 +1099,7 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
                 )
             }
 
-        msg = json.dumps({
-            'type': 'auth_ok',
-            'auth_token': auth_token
-        })
-        ws_send_text(pending_conn, msg)
+        ws_send_auth_ok(pending_conn, auth_token)
         logger.info("[ws_register] Sent auth_ok to %s via WS, request_id=%s, waiting for auth_ok_ack", owner_id, request_id)
     except Exception as e:
         logger.error("[ws_register] Failed to send auth_ok: %s", e)

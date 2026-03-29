@@ -192,6 +192,88 @@ get_tool_color() {
 }
 
 # =============================================================================
+# format_edit_diff - 格式化 Edit 工具的差异内容
+# =============================================================================
+# 功能：将 old_string 和 new_string 格式化为分离的删除/新增文本
+# 用法：format_edit_diff "old_string" "new_string" ["replace_all"]
+# 输出：设置全局变量 EXTRACTED_DIFF_OLD（删除内容）
+#       设置全局变量 EXTRACTED_DIFF_NEW（新增内容）
+#       设置全局变量 EXTRACTED_DIFF（非空表示有差异内容）
+# =============================================================================
+format_edit_diff() {
+    local old_string="${1:-}"
+    local new_string="${2:-}"
+    local replace_all="${3:-false}"
+
+    EXTRACTED_DIFF=""
+    EXTRACTED_DIFF_OLD=""
+    EXTRACTED_DIFF_NEW=""
+
+    # 都为空则不输出
+    if [ -z "$old_string" ] && [ -z "$new_string" ]; then
+        return
+    fi
+
+    local max_lines=100
+    local max_chars=5000
+
+    # replace_all 标记
+    EXTRACTED_REPLACE_ALL=""
+    if [ "$replace_all" = "true" ]; then
+        EXTRACTED_REPLACE_ALL="true"
+    fi
+
+    # 构建删除内容
+    local old_result=""
+    if [ -n "$old_string" ]; then
+        old_result="$old_string"
+        old_result="${old_result%$'\n'}"
+        local old_lines
+        old_lines=$(echo "$old_result" | wc -l)
+        if [ "$old_lines" -gt $max_lines ]; then
+            old_result=$(echo "$old_result" | head -n "$max_lines")
+            EXTRACTED_DIFF_OLD_TRUNCATED="1"
+        fi
+        if [ ${#old_result} -gt $max_chars ]; then
+            old_result="${old_result:0:$max_chars}"
+            EXTRACTED_DIFF_OLD_TRUNCATED="1"
+        fi
+    fi
+
+    # 构建新增内容
+    local new_result=""
+    if [ -n "$new_string" ]; then
+        new_result="$new_string"
+        new_result="${new_result%$'\n'}"
+        local new_lines
+        new_lines=$(echo "$new_result" | wc -l)
+        if [ "$new_lines" -gt $max_lines ]; then
+            new_result=$(echo "$new_result" | head -n "$max_lines")
+            EXTRACTED_DIFF_NEW_TRUNCATED="1"
+        fi
+        if [ ${#new_result} -gt $max_chars ]; then
+            new_result="${new_result:0:$max_chars}"
+            EXTRACTED_DIFF_NEW_TRUNCATED="1"
+        fi
+    fi
+
+    # 非空内容末尾追加换行，配合模板中 {{var}}``` 的写法
+    # 有内容: ```\nhello\n``` / 空内容: ```\n```
+    if [ -n "$old_result" ]; then
+        old_result="${old_result}"$'\n'
+    fi
+    if [ -n "$new_result" ]; then
+        new_result="${new_result}"$'\n'
+    fi
+
+    EXTRACTED_DIFF_OLD="$old_result"
+    EXTRACTED_DIFF_NEW="$new_result"
+    # 只要有任一内容就标记有差异
+    if [ -n "$old_result" ] || [ -n "$new_result" ]; then
+        EXTRACTED_DIFF="1"
+    fi
+}
+
 # 提取并格式化工具详情
 # =============================================================================
 # 功能：从 PermissionRequest 的 tool_input 中提取工具详情并格式化为飞书 Markdown
@@ -199,6 +281,7 @@ get_tool_color() {
 # 输出：设置全局变量 EXTRACTED_COMMAND（命令内容）
 #       设置全局变量 EXTRACTED_DESCRIPTION（描述内容）
 #       设置全局变量 EXTRACTED_COLOR（卡片颜色）
+#       设置全局变量 EXTRACTED_DIFF（Edit 工具的差异内容）
 # =============================================================================
 extract_tool_detail() {
     local json_input="$1"
@@ -217,7 +300,16 @@ extract_tool_detail() {
 
     # 初始化
     EXTRACTED_COMMAND=""
+    EXTRACTED_COMMAND_TRUNCATED=""
     EXTRACTED_DESCRIPTION=""
+    EXTRACTED_DIFF=""
+    EXTRACTED_DIFF_OLD=""
+    EXTRACTED_DIFF_NEW=""
+    EXTRACTED_DIFF_OLD_TRUNCATED=""
+    EXTRACTED_DIFF_NEW_TRUNCATED=""
+    EXTRACTED_REPLACE_ALL=""
+    EXTRACTED_WRITE_CONTENT=""
+    EXTRACTED_WRITE_CONTENT_TRUNCATED=""
 
     # 提取描述（通用）
     EXTRACTED_DESCRIPTION=$(json_get "$json_input" "tool_input.description")
@@ -271,6 +363,7 @@ extract_tool_detail() {
                 local suffix
                 suffix=$(_tool_config_get "$tool_name" "truncate_suffix" 2>/dev/null)
                 field_value="${field_value:0:$limit_length}${suffix}"
+                EXTRACTED_COMMAND_TRUNCATED="1"
             fi
 
             # Bash 命令：只提取原始值，转义由模板渲染统一处理
@@ -285,6 +378,40 @@ extract_tool_detail() {
             _safe_value="${_safe_value//&/\\&}"
             EXTRACTED_COMMAND="${EXTRACTED_COMMAND//\{${field_name}\}/${_safe_value}}"
             EXTRACTED_COMMAND="${EXTRACTED_COMMAND//\{tool_name\}/${tool_name}}"
+
+            # Edit 工具：额外提取 old_string/new_string 生成差异内容
+            # 哨兵技巧：printf x 防止 $() 吞掉尾部换行，%x 去哨兵，%\n 去解析器自带换行
+            if [ "$tool_name" = "Edit" ]; then
+                local old_string new_string replace_all
+                old_string=$(json_get "$json_input" "tool_input.old_string"; printf x)
+                old_string="${old_string%x}"; old_string="${old_string%$'\n'}"
+                new_string=$(json_get "$json_input" "tool_input.new_string"; printf x)
+                new_string="${new_string%x}"; new_string="${new_string%$'\n'}"
+                replace_all=$(json_get "$json_input" "tool_input.replace_all")
+                format_edit_diff "$old_string" "$new_string" "$replace_all"
+            fi
+
+            # Write 工具：额外提取 content 用于卡片展示
+            if [ "$tool_name" = "Write" ]; then
+                local write_content
+                write_content=$(json_get "$json_input" "tool_input.content"; printf x)
+                write_content="${write_content%x}"; write_content="${write_content%$'\n'}"
+                if [ -n "$write_content" ]; then
+                    local max_lines=100
+                    local max_chars=5000
+                    local content_lines
+                    content_lines=$(echo "$write_content" | wc -l)
+                    if [ "$content_lines" -gt $max_lines ]; then
+                        write_content=$(echo "$write_content" | head -n "$max_lines")
+                        EXTRACTED_WRITE_CONTENT_TRUNCATED="1"
+                    fi
+                    if [ ${#write_content} -gt $max_chars ]; then
+                        write_content="${write_content:0:$max_chars}"
+                        EXTRACTED_WRITE_CONTENT_TRUNCATED="1"
+                    fi
+                    EXTRACTED_WRITE_CONTENT="$write_content"
+                fi
+            fi
         fi
     else
         # 使用内置逻辑（向后兼容）
@@ -297,11 +424,45 @@ extract_tool_detail() {
                 # 只提取原始值，转义由模板渲染统一处理
                 EXTRACTED_COMMAND="$command"
                 ;;
-            "Edit"|"Write")
+            "Edit")
                 local file_path
                 file_path=$(json_get "$json_input" "tool_input.file_path")
                 file_path="${file_path:-N/A}"
                 EXTRACTED_COMMAND="$file_path"
+                # 提取 old_string/new_string 生成差异内容
+                # 哨兵技巧：printf x 防止 $() 吞掉尾部换行，%x 去哨兵，%\n 去解析器自带换行
+                local old_string new_string replace_all
+                old_string=$(json_get "$json_input" "tool_input.old_string"; printf x)
+                old_string="${old_string%x}"; old_string="${old_string%$'\n'}"
+                new_string=$(json_get "$json_input" "tool_input.new_string"; printf x)
+                new_string="${new_string%x}"; new_string="${new_string%$'\n'}"
+                replace_all=$(json_get "$json_input" "tool_input.replace_all")
+                format_edit_diff "$old_string" "$new_string" "$replace_all"
+                ;;
+            "Write")
+                local file_path
+                file_path=$(json_get "$json_input" "tool_input.file_path")
+                file_path="${file_path:-N/A}"
+                EXTRACTED_COMMAND="$file_path"
+                # 提取写入内容
+                local write_content
+                write_content=$(json_get "$json_input" "tool_input.content"; printf x)
+                write_content="${write_content%x}"; write_content="${write_content%$'\n'}"
+                if [ -n "$write_content" ]; then
+                    local max_lines=100
+                    local max_chars=5000
+                    local content_lines
+                    content_lines=$(echo "$write_content" | wc -l)
+                    if [ "$content_lines" -gt $max_lines ]; then
+                        write_content=$(echo "$write_content" | head -n "$max_lines")
+                        EXTRACTED_WRITE_CONTENT_TRUNCATED="1"
+                    fi
+                    if [ ${#write_content} -gt $max_chars ]; then
+                        write_content="${write_content:0:$max_chars}"
+                        EXTRACTED_WRITE_CONTENT_TRUNCATED="1"
+                    fi
+                    EXTRACTED_WRITE_CONTENT="$write_content"
+                fi
                 ;;
             "Read")
                 local file_path

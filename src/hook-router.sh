@@ -3,7 +3,7 @@
 # src/hook-router.sh - Claude Code Hook 统一路由入口
 #
 # 这是所有 Claude Code Hook 的唯一入口脚本
-# 根据事件类型（PermissionRequest, Notification, Stop）分发到对应处理脚本
+# 根据事件类型（UserPromptSubmit, PermissionRequest, Notification, Stop）分发到对应处理脚本
 #
 # 用法: 配置到 Claude Code settings.json 的 hooks 中
 #
@@ -73,6 +73,10 @@ case "$HOOK_EVENT" in
     Stop)
         log "Routing to stop handler"
         source "$SRC_DIR/hooks/stop.sh"
+        ;;
+    UserPromptSubmit)
+        log "Routing to user prompt handler"
+        source "$SRC_DIR/hooks/user_prompt.sh"
         ;;
     *)
         log_error "Unknown hook event: $HOOK_EVENT, falling back to terminal"

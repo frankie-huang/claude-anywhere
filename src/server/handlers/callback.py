@@ -17,6 +17,7 @@ POST 路由:
 - /cb/session/get-chat-id: 根据 session_id 获取 chat_id
 - /cb/session/get-last-message-id: 获取 session 的最近消息 ID
 - /cb/session/set-last-message-id: 设置 session 的最近消息 ID
+- /cb/session/check-skip-user-prompt: 检查并清除跳过用户 prompt 标志
 - /cb/decision: 接收飞书网关转发的决策请求
 - /cb/claude/new: 新建 Claude 会话
 - /cb/claude/continue: 继续 Claude 会话
@@ -262,6 +263,29 @@ def handle_record_dir_usage(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
     return 500, {'error': 'DirHistoryStore not initialized'}
 
 
+def handle_check_skip_user_prompt(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """检查并清除 session 的 skip_next_user_prompt 标志
+
+    UserPromptSubmit hook 调用此接口判断是否应跳过该 prompt 的飞书通知。
+    飞书发起的会话在启动时会设置此标志，避免重复发送用户已在飞书输入的 prompt。
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/check-skip-user-prompt'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '')
+    if not session_id:
+        return 400, {'skip': False}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'skip': False, 'error': 'SessionChatStore not initialized'}
+
+    skip = store.check_and_clear_skip_user_prompt(session_id)
+    return 200, {'skip': skip}
+
+
 def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """处理纯决策请求（供飞书网关或其他服务调用）
 
@@ -415,6 +439,7 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/get-chat-id': handle_get_chat_id,
     '/cb/session/get-last-message-id': handle_get_last_message_id,
     '/cb/session/set-last-message-id': handle_set_last_message_id,
+    '/cb/session/check-skip-user-prompt': handle_check_skip_user_prompt,
     '/cb/decision': handle_callback_decision,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,

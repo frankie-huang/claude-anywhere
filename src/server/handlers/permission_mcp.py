@@ -93,11 +93,11 @@ try:
 except ImportError:
     # 目录结构不匹配时回退到标准 logging，写入项目 log 目录
     import logging
-    _log_dir = os.path.join(os.path.dirname(_src_dir), 'log')
+    _log_dir = os.path.join(os.path.dirname(_src_dir), 'log', 'permission_mcp')
     os.makedirs(_log_dir, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
-        filename=os.path.join(_log_dir, 'permission_mcp_fallback.log'),
+        filename=os.path.join(_log_dir, 'fallback.log'),
         format='[%(process)d] %(asctime)s [%(levelname)s] %(message)s'
     )
     logger = logging.getLogger('permission_mcp')

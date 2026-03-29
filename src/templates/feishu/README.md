@@ -69,34 +69,31 @@
 
 **变量**:
 - `{{command}}` - Bash 命令内容
-
-**渲染结果示例**:
-```json
-{
-  "tag": "div",
-  "text": {
-    "content": "**命令：**\nnpm install",
-    "tag": "lark_md"
-  }
-}
-```
+- `{{command_hint}}` - 截断提示（内容过长时显示，为空则不显示）
 
 #### command-detail-file.json
-**用途**: 文件操作详情元素(Edit/Write/Read)
+**用途**: 文件操作详情元素(Read，以及 Edit/Write 降级时使用)
 
 **变量**:
 - `{{file_path}}` - 文件路径
 
-**渲染结果示例**:
-```json
-{
-  "tag": "div",
-  "text": {
-    "content": "**文件：**\n/path/to/file.txt",
-    "tag": "lark_md"
-  }
-}
-```
+#### command-detail-edit.json
+**用途**: Edit 工具差异对比元素（展示删除/新增内容）
+
+**变量**:
+- `{{file_path}}` - 文件路径
+- `{{diff_old}}` - 删除内容（代码块内展示）
+- `{{diff_new}}` - 新增内容（代码块内展示）
+- `{{diff_old_hint}}` - 删除内容截断提示（内容过长时显示，为空则不显示）
+- `{{diff_new_hint}}` - 新增内容截断提示（内容过长时显示，为空则不显示）
+
+#### command-detail-write.json
+**用途**: Write 工具写入内容展示元素
+
+**变量**:
+- `{{file_path}}` - 文件路径
+- `{{write_content}}` - 写入内容（代码块内展示）
+- `{{write_content_hint}}` - 截断提示（内容过长时显示，为空则不显示）
 
 #### description-element.json
 **用途**: 操作描述元素
@@ -208,6 +205,8 @@ export FEISHU_TEMPLATE_PATH=/path/to/custom/templates
 ├── buttons-openapi.json           # 子模板:交互按钮（OpenAPI 模式，callback）
 ├── command-detail-bash.json       # 子模板:Bash命令详情
 ├── command-detail-file.json       # 子模板:文件操作详情
+├── command-detail-edit.json       # 子模板:Edit差异对比详情
+├── command-detail-write.json      # 子模板:Write写入内容详情
 ├── description-element.json       # 子模板:描述元素
 ├── plan-content.json              # 子模板:方案内容（ExitPlanMode 工具）
 └── thinking-element.json          # 子模板:思考过程元素

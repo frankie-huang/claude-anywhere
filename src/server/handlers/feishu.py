@@ -2656,6 +2656,7 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
             - session_id: Claude 会话 ID（可选，用于继续会话）
             - project_dir: 项目工作目录（可选，用于继续会话）
             - reply_to_message_id: 要回复的消息 ID（可选，使用 reply API）
+            - add_typing: 发送成功后是否添加 Typing 表情（可选，默认 false）
 
     Returns:
         (handled, response): handled 始终为 True，response 包含结果
@@ -2675,6 +2676,7 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
     session_id = data.get('session_id', '')
     project_dir = data.get('project_dir', '')
     reply_to_message_id = data.get('reply_to_message_id', '') or ''
+    add_typing = data.get('add_typing', False)
 
     if not msg_type:
         logger.warning("[feishu] /gw/feishu/send: missing msg_type")
@@ -2756,6 +2758,17 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
         else:
             success, sent_message_id = service.send_text(text, receive_id, receive_id_type)
 
+    elif msg_type == 'post':
+        # 富文本消息：content 应为 {"zh_cn": {"title": "...", "content": [[...]]}}
+        if not content or not isinstance(content, dict):
+            logger.warning("[feishu] /gw/feishu/send: missing post content")
+            return True, {'success': False, 'error': 'Missing post content'}
+
+        if reply_to_message_id:
+            success, sent_message_id = service.reply_post(content, reply_to_message_id, reply_in_thread)
+        else:
+            success, sent_message_id = service.send_post(content, receive_id, receive_id_type)
+
     else:
         logger.warning(f"[feishu] /gw/feishu/send: unsupported msg_type: {msg_type}")
         return True, {'success': False, 'error': f'Unsupported msg_type: {msg_type}'}
@@ -2766,6 +2779,10 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
         return True, {'success': False, 'error': sent_message_id}
 
     logger.info(f"[feishu] /gw/feishu/send: message sent to {receive_id} ({receive_id_type}), id={sent_message_id}, reply_to={reply_to_message_id}")
+
+    # 按需添加 Typing 表情（调用方通过 add_typing=true 指定）
+    if add_typing and sent_message_id:
+        service.add_reaction(sent_message_id, 'Typing')
 
     # 保存到本地 MessageSessionStore（飞书网关维护）
     if sent_message_id and session_id and project_dir:

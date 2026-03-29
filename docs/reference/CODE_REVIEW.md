@@ -360,7 +360,7 @@ except:
 |------|------|
 | 目录结构图遗漏文件 | `auth_token_store.py`、`session_chat_store.py`、`dir_history_store.py`、`tool_config.py`、`logging_config.py` 未列出 |
 | `shared/logging.json` 描述错误 | 实际文件是 `logging_config.py`（Python 文件），非 JSON |
-| 日志文件模式不完整 | 缺少 `feishu_message_*.log`、`log/command/` 目录说明 |
+| 日志文件模式不完整 | 缺少 `log/feishu_message/`、`log/command/` 目录说明 |
 
 ---
 

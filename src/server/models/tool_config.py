@@ -145,7 +145,7 @@ class ToolConfigManager:
                 "icon": "terminal",
                 "input_field": "command",
                 "detail_template": "{command}",
-                "limit_length": 500,
+                "limit_length": 5000,
                 "rule_template": "Bash({command})",
                 "truncate_suffix": "..."
             },
@@ -201,7 +201,8 @@ class ToolConfigManager:
                 "icon": "web",
                 "input_field": "query",
                 "detail_template": "{query}",
-                "limit_length": 200,
+                "limit_length": 5000,
+                "truncate_suffix": "...",
                 "rule_template": "WebSearch({query})"
             },
             "WebFetch": {
@@ -211,7 +212,8 @@ class ToolConfigManager:
                 "icon": "web",
                 "input_field": "url",
                 "detail_template": "{url}",
-                "limit_length": 200,
+                "limit_length": 5000,
+                "truncate_suffix": "...",
                 "rule_template": "WebFetch({url})"
             },
             "Skill": {

@@ -301,10 +301,16 @@ settings_file = os.environ.get('SETTINGS_FILE', '')
 hook_path = os.environ.get('HOOK_PATH', '')
 
 # 期望写入的 hooks 配置
-# 注意: Stop 事件不要配置 async: true
-#   - stop.sh 内部已用 `&` 后台执行通知，配置 async 可能导致进程提前终止
+# 注意: UserPromptSubmit / Stop 事件不要配置 async: true
+#   - 脚本内部已用 `&` 后台执行通知，配置 async 可能导致进程提前终止
 #   - 双层 async 会使后台通知进程在父进程退出时被 kill，导致通知不稳定
 desired_hooks = {
+    "UserPromptSubmit": [{
+        "hooks": [{
+            "type": "command",
+            "command": hook_path
+        }]
+    }],
     "PermissionRequest": [{
         "matcher": "",
         "hooks": [{
@@ -450,7 +456,7 @@ if 'hooks' not in config:
     print(f"{GREEN}✓{NC} 未找到 hooks 配置，无需卸载")
     exit(2)
 
-events_to_check = ['PermissionRequest', 'Stop']
+events_to_check = ['UserPromptSubmit', 'PermissionRequest', 'Stop']
 removed = []
 
 for event in events_to_check:

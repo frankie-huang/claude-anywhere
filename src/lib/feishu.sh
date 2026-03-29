@@ -16,6 +16,7 @@
 #   build_notification_card() - 构建通用通知卡片
 #   send_feishu_card()        - 发送飞书卡片
 #   send_feishu_text()        - 发送飞书文本消息(降级)
+#   send_feishu_post()        - 发送飞书富文本消息(支持 at、链式回复)
 #
 # 全局变量:
 #   FEISHU_WEBHOOK_URL        - 飞书 Webhook URL
@@ -140,14 +141,14 @@ render_template() {
            [[ "$key" != "response_elements" ]] && \
            [[ "$key" != "ask_question_form_elements" ]]; then
             # 转义特殊字符为 JSON 格式
-            # 注意: JSON 解析器（jq/python3）会将转义序列解释为实际字符（如 \t → TAB, \n → LF）
-            # 因此需要将这些实际字符重新转义回 JSON 格式
-            if [[ "$key" == "command" ]]; then
-                # command 变量: JSON 解析后需重新转义
-                # 飞书 Markdown 代码块中，只有行首的 ``` 才会破坏外层代码块
-                # 1. 转义行首的 ``` 为 \` \` \`，保留前面的空格
-                # 2. 用 python3 json.dumps 处理 JSON 转义
-                value=$(printf '%s' "$value" | sed 's/^\([[:space:]]*\)```/\1\\`\\`\\`/g')
+            # JSON 解析器会将转义序列解释为实际字符（\t → TAB, \n → LF），需重新转义回 JSON 格式
+            if [[ "$key" == "command" ]] || [[ "$key" == "diff_old" ]] || [[ "$key" == "diff_new" ]] || [[ "$key" == "write_content" ]]; then
+                # 代码类变量（嵌入飞书 Markdown 代码块）：
+                # 1. 转义行首 ``` 为 \` \` \`（防止破坏外层代码块），保留前面的空格
+                # 2. 哨兵技巧：追加 x 防止 $() 吞掉尾部换行，sed 后去除
+                # 3. 用 python3 json.dumps 处理 JSON 转义（降级到 sed 链）
+                value=$(printf '%sx' "$value" | sed 's/^\([[:space:]]*\)```/\1\\`\\`\\`/g')
+                value="${value%x}"
                 if command -v python3 &> /dev/null; then
                     value=$(RENDER_CONTENT="$value" python3 -c 'import os,json; print(json.dumps(os.environ["RENDER_CONTENT"]))' 2>/dev/null | sed 's/^"//;s/"$//')
                 else
@@ -249,6 +250,12 @@ render_sub_template() {
             ;;
         "command-file")
             template_file="${template_dir}/command-detail-file.json"
+            ;;
+        "command-edit")
+            template_file="${template_dir}/command-detail-edit.json"
+            ;;
+        "command-write")
+            template_file="${template_dir}/command-detail-write.json"
             ;;
         "description")
             template_file="${template_dir}/description-element.json"
@@ -490,9 +497,43 @@ build_permission_card() {
     local command_element=""
     case "$tool_name" in
         "Bash")
-            command_element=$(render_sub_template "command-bash" "command=$command_arg")
+            local command_hint=""
+            if [ "$EXTRACTED_COMMAND_TRUNCATED" = "1" ]; then
+                command_hint="⚠️ 内容过长，已截断"
+            fi
+            command_element=$(render_sub_template "command-bash" "command=$command_arg" "command_hint=$command_hint")
             ;;
-        "Edit"|"Write"|"Read")
+        "Edit")
+            if [ -n "$EXTRACTED_DIFF" ]; then
+                local edit_file_label="$command_arg"
+                if [ "$EXTRACTED_REPLACE_ALL" = "true" ]; then
+                    edit_file_label="${command_arg}"$'\n\n'"🔄 全部替换"
+                fi
+                local diff_old_hint=""
+                local diff_new_hint=""
+                if [ "$EXTRACTED_DIFF_OLD_TRUNCATED" = "1" ]; then
+                    diff_old_hint="⚠️ 内容过长，已截断"
+                fi
+                if [ "$EXTRACTED_DIFF_NEW_TRUNCATED" = "1" ]; then
+                    diff_new_hint="⚠️ 内容过长，已截断"
+                fi
+                command_element=$(render_sub_template "command-edit" "file_path=$edit_file_label" "diff_old=$EXTRACTED_DIFF_OLD" "diff_new=$EXTRACTED_DIFF_NEW" "diff_old_hint=$diff_old_hint" "diff_new_hint=$diff_new_hint")
+            else
+                command_element=$(render_sub_template "command-file" "file_path=$command_arg")
+            fi
+            ;;
+        "Write")
+            if [ -n "$EXTRACTED_WRITE_CONTENT" ]; then
+                local write_content_hint=""
+                if [ "$EXTRACTED_WRITE_CONTENT_TRUNCATED" = "1" ]; then
+                    write_content_hint="⚠️ 内容过长，已截断"
+                fi
+                command_element=$(render_sub_template "command-write" "file_path=$command_arg" "write_content=$EXTRACTED_WRITE_CONTENT" "write_content_hint=$write_content_hint")
+            else
+                command_element=$(render_sub_template "command-file" "file_path=$command_arg")
+            fi
+            ;;
+        "Read")
             command_element=$(render_sub_template "command-file" "file_path=$command_arg")
             ;;
         "ExitPlanMode")
@@ -500,7 +541,11 @@ build_permission_card() {
             ;;
         *)
             # 未知工具类型,默认使用 Bash 模板
-            command_element=$(render_sub_template "command-bash" "command=$command_arg")
+            local default_command_hint=""
+            if [ "$EXTRACTED_COMMAND_TRUNCATED" = "1" ]; then
+                default_command_hint="⚠️ 内容过长，已截断"
+            fi
+            command_element=$(render_sub_template "command-bash" "command=$command_arg" "command_hint=$default_command_hint")
             ;;
     esac
 
@@ -748,6 +793,41 @@ _get_auth_token() {
 }
 
 # ----------------------------------------------------------------------------
+# _get_bot_open_id - 获取存储的 bot_open_id
+# ----------------------------------------------------------------------------
+# 功能: 从 runtime/auth_token.json 读取机器人的 open_id
+#
+# 输出:
+#   echos 返回: bot_open_id 字符串，不存在则返回空字符串
+#
+# 说明:
+#   用于富文本消息中 at 机器人等场景
+# ----------------------------------------------------------------------------
+_get_bot_open_id() {
+    # AUTH_TOKEN_FILE 由 core.sh 定义，指向 runtime/auth_token.json
+
+    if [ ! -f "$AUTH_TOKEN_FILE" ]; then
+        echo ""
+        return 0
+    fi
+
+    local token_data
+    token_data=$(cat "$AUTH_TOKEN_FILE" 2>/dev/null)
+    if [ -z "$token_data" ]; then
+        echo ""
+        return 0
+    fi
+
+    local bot_id
+    bot_id=$(json_get "$token_data" "bot_open_id")
+    if [ "$bot_id" = "null" ] || [ -z "$bot_id" ]; then
+        echo ""
+        return 0
+    fi
+    echo "$bot_id"
+}
+
+# ----------------------------------------------------------------------------
 # _get_chat_id - 根据 session_id 获取对应的 chat_id
 # ----------------------------------------------------------------------------
 # 功能: 调用 Callback 后端的 /cb/session/get-chat-id 接口查询 session_id 对应的 chat_id
@@ -849,6 +929,53 @@ _get_last_message_id() {
         echo "$last_message_id"
     else
         echo ""
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# _check_skip_user_prompt - 检查是否跳过 UserPromptSubmit
+# ----------------------------------------------------------------------------
+# 功能: 查询 Callback 后端，判断本次 prompt 是否由飞书发起（需要跳过）
+#
+# 参数:
+#   $1 - session_id  Claude 会话 ID
+#
+# 返回:
+#   0 + stdout "true"  - 应跳过
+#   0 + stdout "false" - 不跳过
+# ----------------------------------------------------------------------------
+_check_skip_user_prompt() {
+    local session_id="$1"
+
+    if [ -z "$session_id" ]; then
+        echo "false"
+        return 0
+    fi
+
+    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
+    callback_url=$(echo "$callback_url" | sed 's:/*$::')
+
+    local response
+    response=$(_do_curl_post "${callback_url}/cb/session/check-skip-user-prompt" \
+        "{\"session_id\":\"$session_id\"}" \
+        "cb/session/check-skip-user-prompt" \
+        "$(_get_auth_token)")
+
+    local http_code
+    http_code=$(echo "$response" | head -n 1)
+    response=$(echo "$response" | sed '1d')
+
+    if [ "$http_code" != "200" ]; then
+        echo "false"
+        return 0
+    fi
+
+    local skip_flag
+    skip_flag=$(json_get "$response" "skip")
+    if [ "$skip_flag" = "true" ]; then
+        echo "true"
+    else
+        echo "false"
     fi
 }
 
@@ -1442,6 +1569,173 @@ send_feishu_text() {
         # Webhook 模式（默认）
         _send_via_webhook "$message_text" "$webhook_url" "webhook-text"
     fi
+}
+
+# ----------------------------------------------------------------------------
+# send_feishu_post - 发送飞书富文本消息（支持 at、链式回复）
+# ----------------------------------------------------------------------------
+# 功能: 发送富文本(post)消息到飞书，支持 session threading 和 at 机器人
+#
+# 参数:
+#   $1 - message_text  文本消息内容
+#   $2 - options       可选参数 JSON，可包含：
+#                      - project_dir    项目工作目录
+#                      - session_id     Claude 会话 ID（用于链式回复）
+#                      - callback_url   Callback 服务地址（可选，透传给网关）
+#
+# 返回:
+#   0 - 发送成功
+#   1 - 发送失败
+#
+# 示例:
+#   send_feishu_post "用户消息" '{"project_dir":"/path","session_id":"abc","callback_url":"http://..."}'
+#
+# 说明:
+#   - 仅 openapi 模式可用（需要 FEISHU_OWNER_ID 配置）
+#   - 传入 session_id 时自动查询 chat_id 和 last_message_id 实现链式回复
+#   - 默认 at 机器人（不受 FEISHU_AT_USER 配置控制，后续如需可另加配置）
+#   - 非 openapi 模式自动降级为 send_feishu_text 纯文本发送
+# ----------------------------------------------------------------------------
+send_feishu_post() {
+    local message_text="$1"
+    local options="${2:-}"
+
+    # 解析可选参数
+    local -a vals=()
+    while IFS= read -r _line; do
+        vals+=("$_line")
+    done <<< "$(json_get_multi "$options" project_dir session_id callback_url)"
+    local project_dir="${vals[0]:-}"
+    local session_id="${vals[1]:-}"
+    local callback_url="${vals[2]:-}"
+
+    local send_mode
+    send_mode=$(get_config "FEISHU_SEND_MODE" "webhook")
+
+    if [ "$send_mode" != "openapi" ]; then
+        # 非 openapi 模式降级为纯文本
+        log "send_feishu_post: not in openapi mode, falling back to text"
+        send_feishu_text "$message_text"
+        return $?
+    fi
+
+    # OpenAPI 模式：通过 /gw/feishu/send 发送富文本消息
+    local gateway_url
+    gateway_url=$(get_config "FEISHU_GATEWAY_URL" "")
+    local target_url="${gateway_url:-$CALLBACK_SERVER_URL}"
+
+    # 读取 owner_id 配置（作为接收者）
+    local owner_id
+    owner_id=$(get_config "FEISHU_OWNER_ID" "")
+
+    if [ -z "$owner_id" ]; then
+        log "Error: FEISHU_OWNER_ID not configured"
+        return 1
+    fi
+
+    # 获取 chat_id（优先使用 session 对应的 chat_id）
+    local chat_id=""
+    if [ -n "$session_id" ]; then
+        chat_id=$(_get_chat_id "$session_id")
+        if [ -n "$chat_id" ]; then
+            log "Found chat_id for session: $chat_id"
+        fi
+    fi
+
+    # 如果没有找到 chat_id，使用配置的 FEISHU_CHAT_ID
+    if [ -z "$chat_id" ]; then
+        chat_id=$(get_config "FEISHU_CHAT_ID" "")
+        if [ -n "$chat_id" ]; then
+            log "Using configured FEISHU_CHAT_ID: $chat_id"
+        fi
+    fi
+
+    # 查询 last_message_id 用于链式回复
+    local reply_to_message_id=""
+    if [ -n "$session_id" ]; then
+        reply_to_message_id=$(_get_last_message_id "$session_id")
+        if [ -n "$reply_to_message_id" ]; then
+            log "Found last_message_id for session: $reply_to_message_id"
+        fi
+    fi
+
+    # 默认 at 机器人
+    local at_user_id
+    at_user_id=$(_get_bot_open_id)
+
+    # 使用 Python 构建富文本消息 JSON（含 at 标签）
+    # 输出结构示例:
+    # {
+    #   "msg_type": "post",
+    #   "content": {
+    #     "zh_cn": {
+    #       "content": [[
+    #         {"tag": "at", "user_id": "ou_xxx"},
+    #         {"tag": "text", "text": " "},
+    #         {"tag": "text", "text": "消息内容"}
+    #       ]]
+    #     }
+    #   },
+    #   "owner_id": "ou_xxx",
+    #   "chat_id": "oc_xxx",           // 可选
+    #   "session_id": "abc",            // 可选
+    #   "project_dir": "/path",         // 可选
+    #   "reply_to_message_id": "om_xxx", // 可选
+    #   "add_typing": true               // 发送成功后添加 Typing 表情
+    # }
+    local request_json
+    request_json=$(MESSAGE_TEXT="$message_text" \
+        OWNER_ID="$owner_id" \
+        CHAT_ID="$chat_id" \
+        SESSION_ID="$session_id" \
+        PROJECT_DIR="$project_dir" \
+        REPLY_TO="$reply_to_message_id" \
+        AT_USER_ID="$at_user_id" \
+        python3 -c '
+import json, os
+
+text = os.environ.get("MESSAGE_TEXT", "")
+owner_id = os.environ.get("OWNER_ID", "")
+chat_id = os.environ.get("CHAT_ID", "")
+session_id = os.environ.get("SESSION_ID", "")
+project_dir = os.environ.get("PROJECT_DIR", "")
+reply_to = os.environ.get("REPLY_TO", "")
+at_user_id = os.environ.get("AT_USER_ID", "")
+
+# 构建富文本 content 行
+content_line = []
+if at_user_id:
+    content_line.append({"tag": "at", "user_id": at_user_id})
+    content_line.append({"tag": "text", "text": " "})
+content_line.append({"tag": "text", "text": text})
+
+post_content = {"zh_cn": {"content": [content_line]}}
+
+req = {
+    "msg_type": "post",
+    "content": post_content,
+    "owner_id": owner_id,
+}
+if chat_id:
+    req["chat_id"] = chat_id
+if session_id:
+    req["session_id"] = session_id
+if project_dir:
+    req["project_dir"] = project_dir
+if reply_to:
+    req["reply_to_message_id"] = reply_to
+req["add_typing"] = True
+
+print(json.dumps(req, ensure_ascii=False))
+' 2>/dev/null)
+
+    if [ -z "$request_json" ]; then
+        log "Error: Failed to build post message JSON"
+        return 1
+    fi
+
+    log "Sending post message (session=${session_id:-none}, reply_to=${reply_to_message_id:-none}): ${message_text:0:50}"
+    _send_via_http_endpoint "$request_json" "$target_url" "openapi-post"
 }
 
 # =============================================================================

@@ -120,6 +120,9 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             store.save(session_id, chat_id, claude_command=actual_cmd)
             logger.info(f"[claude-continue] Saved chat_id mapping: {session_id} -> {chat_id}")
 
+            # 标记跳过下一条 UserPromptSubmit（飞书发起的 prompt 已在飞书展示）
+            store.set_skip_next_user_prompt(session_id)
+
     # 同步执行并检查（使用 resume 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,
                                 session_mode='resume', claude_command=actual_cmd)
@@ -396,6 +399,9 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         if store:
             store.save(session_id, chat_id, claude_command=actual_cmd)
             logger.info(f"[claude-new] Saved chat_id mapping: {session_id} -> {chat_id}")
+
+            # 标记跳过下一条 UserPromptSubmit（飞书发起的 prompt 已在飞书展示）
+            store.set_skip_next_user_prompt(session_id)
 
     # 同步执行并检查（使用 new 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,

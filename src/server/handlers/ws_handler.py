@@ -102,7 +102,7 @@ def handle_ws_tunnel(handler: Any, params: Dict[str, List[str]]) -> None:
 
     # 握手成功后，_WS_CLIENT_MODE_MAP 已写入 id(sock)。
     # _process_tunnel_connection 正常路径会进入 _ws_message_loop（其 finally 负责清理），
-    # 但早期退出路径（超时、协议错误、_ws_send_auth_ok 失败等）需要此处 finally
+    # 但早期退出路径（超时、协议错误、ws_send_auth_ok 失败等）需要此处 finally
     # 兜底清理，防止 pending 条目和协议层状态泄漏。
     try:
         _process_tunnel_connection(sock, handler, owner_id, registry)
@@ -214,7 +214,8 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
                 })
 
                 # 发送新 token，等待消息循环中的 auth_ok_ack 完成认证
-                _ws_send_auth_ok(sock, new_token)
+                from handlers.register import ws_send_auth_ok
+                ws_send_auth_ok(sock, new_token)
 
                 # 进入消息循环（pending 状态，等待 auth_ok_ack）
                 _ws_message_loop(sock, owner_id, registry, is_pending=True, request_id=request_id)
@@ -427,11 +428,3 @@ def _handle_ws_message(sock: socket.socket, owner_id: str, msg: Dict[str, Any], 
         logger.debug("[ws/tunnel] Unknown message type '%s' from %s", msg_type, owner_id)
 
 
-def _ws_send_auth_ok(sock: socket.socket, auth_token: str) -> None:
-    """发送 auth_ok 消息"""
-    from services.ws_protocol import ws_send_text
-    msg = json.dumps({
-        'type': 'auth_ok',
-        'auth_token': auth_token
-    })
-    ws_send_text(sock, msg)

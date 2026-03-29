@@ -1,6 +1,6 @@
 {
   "tag": "markdown",
-  "content": "**命令：**\n```shell\n{{command}}\n```",
+  "content": "**命令：**\n```shell\n{{command}}\n```\n{{command_hint}}",
   "text_align": "left",
   "text_size": "normal_v2",
   "margin": "0px 0px 0px 0px"

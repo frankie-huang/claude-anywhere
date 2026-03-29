@@ -33,6 +33,7 @@ class SessionChatStore:
                 "chat_id": "oc_xxx",              # 飞书群聊 ID
                 "claude_command": "claude",        # 使用的 Claude 命令（可选）
                 "last_message_id": "om_xxx",       # 链式回复锚点（可选，由 set_last_message_id 管理）
+                "skip_next_user_prompt": true,     # 跳过下一条 UserPromptSubmit（飞书发起时设置）
                 "updated_at": 1706745600           # 最近更新时间戳
             }
         }
@@ -243,6 +244,75 @@ class SessionChatStore:
                 return result
             except Exception as e:
                 logger.error(f"[session-chat-store] Failed to set last_message_id: {e}")
+                return False
+
+    def set_skip_next_user_prompt(self, session_id: str) -> bool:
+        """设置 skip_next_user_prompt 标志
+
+        飞书网关发起会话/继续会话时调用，标记该 session 的下一条
+        UserPromptSubmit 事件应被跳过（因为 prompt 已在飞书端展示）。
+
+        Args:
+            session_id: Claude 会话 ID
+
+        Returns:
+            是否设置成功
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+
+                if not item:
+                    # session 不存在，创建带标志的记录
+                    item = {
+                        'skip_next_user_prompt': True,
+                        'updated_at': int(time.time())
+                    }
+                else:
+                    item['skip_next_user_prompt'] = True
+                    item['updated_at'] = int(time.time())
+
+                data[session_id] = item
+                result = self._save(data)
+                if result:
+                    logger.info(f"[session-chat-store] Set skip_next_user_prompt: {session_id}")
+                return result
+            except Exception as e:
+                logger.error(f"[session-chat-store] Failed to set skip flag: {e}")
+                return False
+
+    def check_and_clear_skip_user_prompt(self, session_id: str) -> bool:
+        """检查并清除 skip_next_user_prompt 标志（原子操作）
+
+        UserPromptSubmit hook 调用此方法判断是否应跳过。
+        如果标志为 True 则清除并返回 True，否则返回 False。
+
+        Args:
+            session_id: Claude 会话 ID
+
+        Returns:
+            True 表示应跳过（飞书发起的 prompt），False 表示不应跳过
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+
+                if not item:
+                    return False
+
+                skip = item.get('skip_next_user_prompt', False)
+                if skip:
+                    del item['skip_next_user_prompt']
+                    item['updated_at'] = int(time.time())
+                    data[session_id] = item
+                    self._save(data)
+                    logger.info(f"[session-chat-store] Cleared skip_next_user_prompt: {session_id}")
+
+                return skip
+            except Exception as e:
+                logger.error(f"[session-chat-store] Failed to check skip flag: {e}")
                 return False
 
     def cleanup_expired(self) -> int:

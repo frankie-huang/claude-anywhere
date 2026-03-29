@@ -22,13 +22,14 @@
 ### 项目组件
 
 1. **统一 Hook 路由** (`src/hook-router.sh`) - Claude Code Hook 统一入口，事件分发
-2. **权限处理脚本** (`src/hooks/permission.sh`) - PermissionRequest 事件处理
-3. **通用通知脚本** (`src/hooks/webhook.sh`) - Notification 事件处理
-4. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
-5. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
-6. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
-7. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
-8. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
+2. **用户 Prompt 同步脚本** (`src/hooks/user_prompt.sh`) - UserPromptSubmit 事件处理
+3. **权限处理脚本** (`src/hooks/permission.sh`) - PermissionRequest 事件处理
+4. **通用通知脚本** (`src/hooks/webhook.sh`) - Notification 事件处理
+5. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
+6. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
+7. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
+8. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
+9. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
 
 ## 项目结构
 
@@ -41,6 +42,7 @@ claude-anywhere/
 │   ├── hook-router.sh          # Hook 统一入口（配置到 Claude Code）
 │   ├── start-server.sh         # 回调服务启动脚本
 │   ├── hooks/                  # Hook 事件处理脚本
+│   │   ├── user_prompt.sh      # 用户 Prompt 同步（UserPromptSubmit 事件）
 │   │   ├── permission.sh       # 权限请求处理（可交互）
 │   │   ├── webhook.sh          # 通用通知处理（Notification 事件）
 │   │   └── stop.sh             # 任务完成通知处理（Stop 事件）
@@ -336,6 +338,8 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 - ✅ **飞书卡片模板化**: 支持模块化的飞书卡片模板，便于自定义和扩展
 - ✅ **决策页面自动关闭**: 支持定时自动关闭决策页面（`CALLBACK_PAGE_CLOSE_DELAY`）
 - ✅ **任务完成通知**: Claude 处理完成后自动发送飞书通知，包含响应摘要和会话标识
+- ✅ **Write 内容预览**: Write 工具权限卡片展示写入内容代码块预览
+- ✅ **超长内容截断提示**: Permission 请求（Bash/Edit/Write）和 Stop 事件的内容超长时显示截断提示
 
 ### OpenAPI 模式
 - ✅ **飞书回复继续会话**: 用户可回复飞书消息在对应的 Claude session 中继续提问
@@ -365,6 +369,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 |------|------|-----------|
 | `setup.sh` | 一键安装、服务管理、更新 | - |
 | `src/hook-router.sh` | Hook 统一入口（配置到 Claude Code） | 所有 Hook 事件 |
+| `src/hooks/user_prompt.sh` | 用户 Prompt 同步到飞书 | UserPromptSubmit |
 | `src/hooks/permission.sh` | 权限请求处理（可交互） | PermissionRequest |
 | `src/hooks/webhook.sh` | 通用通知（任务暂停等） | Notification |
 | `src/hooks/stop.sh` | 任务完成通知（含响应摘要） | Stop |
@@ -486,6 +491,16 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/claude-anywhere/src/hook-router.sh"
+          }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
         "matcher": "",
@@ -804,15 +819,17 @@ brew install python3 curl jq socat
 
 ## 日志
 
-日志文件位于 `log/` 目录，按天自动轮转：
+日志文件位于 `log/` 目录，按组件分子目录存放，按天自动轮转：
 
 | 文件模式 | 说明 |
 |----------|------|
-| `hook_YYYYMMDD.log` | Hook 脚本日志 |
-| `callback_YYYYMMDD.log` | 回调服务日志 |
-| `socket_client_YYYYMMDD.log` | Socket 客户端日志 |
-| `feishu_message_YYYYMMDD.log` | 飞书消息日志 |
-| `feishu_longpoll_YYYYMMDD.log` | 飞书长连接日志 |
+| `hook/YYYY-MM-DD.log` | Hook 脚本日志 |
+| `callback/YYYY-MM-DD.log` | 回调服务日志 |
+| `socket_client/YYYY-MM-DD.log` | Socket 客户端日志 |
+| `feishu_message/YYYY-MM-DD.log` | 飞书消息日志 |
+| `feishu_longpoll/YYYY-MM-DD.log` | 飞书长连接日志 |
+| `permission_mcp/YYYY-MM-DD.log` | MCP 权限审批日志 |
+| `command/YYYY-MM-DD_{session}.log` | 命令日志（按 session 分文件） |
 
 日志配置统一定义在 `shared/logging.json`。
 

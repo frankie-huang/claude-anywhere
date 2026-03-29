@@ -23,7 +23,7 @@ Claude Code 支持 **11 种 hook 事件**：
 | **PreToolUse** | 工具调用前 | ✓ | - |
 | **PermissionRequest** | 权限请求对话显示时 | ✓ | ✅ |
 | **PostToolUse** | 工具调用完成后 | ✓ | - |
-| **UserPromptSubmit** | 用户提交提示词时 | ✗ | - |
+| **UserPromptSubmit** | 用户提交提示词时 | ✗ | ✅ |
 | **Notification** | Claude 发送通知时 | ✓ | ✅ |
 | **Stop** | 主 Agent 完成响应时 | ✗ | ✅ |
 | **SubagentStop** | 子 Agent 完成响应时 | ✗ | - |
