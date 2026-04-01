@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-04-02
+
+#### 统一 Python 3 环境检测，修复 setup 与运行时依赖不一致
+
+- 所有 shell 脚本中的裸 `python3` 调用统一替换为 `$PYTHON3` 变量
+- 新增 `find_python3()`（install.sh）和 `_init_python3()`（core.sh）按 7 级优先级检测 Python 3：
+  `.env PYTHON_PATH` > 项目 `.venv` > 激活 venv > 激活 conda > pyenv > PATH python3 > PATH python
+- `setup.sh` 配置时将检测到的 Python 路径持久化到 `.env` 的 `PYTHON_PATH`
+- `start-server.sh` 启动时验证 `.env` 中的 `PYTHON_PATH` 是否与检测结果一致，不一致时警告
+- `.env` 中 `PYTHON_PATH` 无效时 `setup.sh` 报错退出，提示用户修正或清空
+- 新增 `.env.example` 的 `PYTHON_PATH` 配置项
+- 新增 `README.md` Python 环境检测文档
+
 ### Fixed - 2026-03-31
 
 #### build_shell_cmd 注入当前 PATH 保持一致性

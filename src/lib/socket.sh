@@ -60,7 +60,7 @@ check_socket_tools() {
     SOCKET_CLIENT="${SRC_DIR}/server/socket_client.py"
 
     # 检测 Python 客户端（推荐）
-    if [ -f "$SOCKET_CLIENT" ] && command -v python3 &> /dev/null; then
+    if [ -f "$SOCKET_CLIENT" ] && [ -n "$PYTHON3" ]; then
         HAS_SOCKET_CLIENT=true
     fi
 
@@ -104,7 +104,7 @@ socket_send_request() {
     # 优先使用 Python 客户端
     if [ "$HAS_SOCKET_CLIENT" = "true" ]; then
         # 只捕获 stdout（JSON 响应），stderr（日志）丢弃（已写入日志文件）
-        response=$(echo "$request_json" | python3 "$SOCKET_CLIENT" "$socket_path" 2>/dev/null)
+        response=$(echo "$request_json" | "$PYTHON3" "$SOCKET_CLIENT" "$socket_path" 2>/dev/null)
         local exit_code=$?
 
         if [ $exit_code -ne 0 ]; then
@@ -254,8 +254,8 @@ check_socket_service() {
 
     # 尝试连接以验证服务是否真的在运行
     # 这样可以检测服务异常退出后残留的 socket 文件
-    if command -v python3 &> /dev/null; then
-        _HOOK_SOCK="$socket_path" python3 -c "
+    if [ -n "$PYTHON3" ]; then
+        _HOOK_SOCK="$socket_path" "$PYTHON3" -c "
 import socket, sys, os, json
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(2)

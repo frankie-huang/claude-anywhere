@@ -419,24 +419,27 @@ get_env_value() {
 # 辅助函数：检查 Python 版本是否 >= 指定版本
 check_python_version_ge() {
     local required="$1"
-    python3 -c "import sys; exit(0 if sys.version_info >= tuple(map(int, '$required'.split('.'))) else 1)"
+    [ -n "$PYTHON3" ] || return 1
+    "$PYTHON3" -c "import sys; exit(0 if sys.version_info >= tuple(map(int, '$required'.split('.'))) else 1)"
 }
 
 # 辅助函数：获取当前 Python 版本字符串
 get_python_version() {
-    python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+    [ -n "$PYTHON3" ] || { echo "unknown"; return 1; }
+    "$PYTHON3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
 }
 
 # 辅助函数：安装 lark-oapi
 install_lark_oapi() {
-    print_info "正在安装 lark-oapi..."
-    if python3 -m pip install lark-oapi; then
+    [ -n "$PYTHON3" ] || { print_error "未检测到 Python 3"; return 1; }
+    print_info "正在安装 lark-oapi（使用 $PYTHON3）..."
+    if "$PYTHON3" -m pip install lark-oapi; then
         HAS_LARK_OAPI=true
         print_success "lark-oapi 安装成功"
         return 0
     else
         print_error "安装失败，请手动安装后重试"
-        echo "  python3 -m pip install lark-oapi"
+        echo "  $PYTHON3 -m pip install lark-oapi"
         return 1
     fi
 }
@@ -519,11 +522,28 @@ if [ -z "$OWNER_ID" ]; then
     fi
 fi
 
+# 检查 Python 3 是否可用（后续配置写入依赖 Python）
+if [ -z "$PYTHON3" ]; then
+    print_error "未检测到 Python 3（已检查 PYTHON_PATH/.env、venv、conda、系统 PATH）"
+    echo "请安装 Python 3 后重试"
+    exit 1
+fi
+
+# .env 中的 PYTHON_PATH 无效时警告，继续使用检测到的 Python，配置完成后自动更新
+if [ "$_PYTHON_PATH_INVALID" = "yes" ]; then
+    print_warning ".env 中的 PYTHON_PATH 无效: $_INVALID_PYTHON_PATH"
+    echo "  将使用检测到的 Python: $PYTHON3"
+    echo "  配置完成后会自动更新 .env 中的 PYTHON_PATH"
+    echo ""
+fi
+
+print_success "Python 3: $("$PYTHON3" --version 2>&1) ($PYTHON3)"
+
 # 检测 lark-oapi 是否已安装
 HAS_LARK_OAPI=false
-if python3 -c "import lark_oapi" 2>/dev/null; then
+if "$PYTHON3" -c "import lark_oapi" 2>/dev/null; then
     HAS_LARK_OAPI=true
-    print_success "lark-oapi 已安装（支持长连接模式）"
+    print_success "lark-oapi 已安装（支持长连接模式，Python: $PYTHON3）"
 fi
 
 # 确定部署模式（单机模式优先）
@@ -601,7 +621,7 @@ case "$DEPLOY_MODE" in
                             echo ""
                             echo "请选择："
                             echo "  1) 手动安装 lark-oapi 后重新运行此脚本"
-                            echo "     python3 -m pip install lark-oapi"
+                            echo "     ${PYTHON3:-python3} -m pip install lark-oapi"
                             echo ""
                             echo "  2) 使用 HTTP 回调模式（需要 --verification-token 参数）"
                             echo "     $CMD_PREFIX --app-id=$APP_ID --app-secret=<App Secret> --verification-token=<Token>"
@@ -623,7 +643,7 @@ case "$DEPLOY_MODE" in
 
                 if check_python_version_ge "3.8"; then
                     echo "提示: 安装 lark-oapi 可使用长连接模式（无需公网 IP）"
-                    echo "  python3 -m pip install lark-oapi"
+                    echo "  ${PYTHON3:-python3} -m pip install lark-oapi"
                     echo ""
                     if ask_yes_no "是否现在安装？" "N"; then
                         install_lark_oapi || print_warning "安装失败，继续使用 HTTP 回调模式"
@@ -687,7 +707,9 @@ VERIFICATION_TOKEN="$VERIFICATION_TOKEN" \
 PORT="$PORT" \
 CLEAR_CREDENTIALS="$CLEAR_CREDENTIALS" \
 CLEAR_GATEWAY="$CLEAR_GATEWAY" \
-python3 << 'PYTHON_SCRIPT'
+_PYTHON3_PATH="$PYTHON3" \
+_PYTHON_PATH_INVALID="$_PYTHON_PATH_INVALID" \
+"$PYTHON3" << 'PYTHON_SCRIPT'
 import os
 import re
 
@@ -711,7 +733,8 @@ def update_env_var(content, key, value):
     replacement = key + '=' + value
     new_content, count = re.subn(pattern, replacement, content, flags=re.MULTILINE)
     if count == 0:
-        new_content = content.rstrip('\n') + '\n' + replacement + '\n'
+        # 追加新配置时前面加一个空行（分隔不同区块）
+        new_content = content.rstrip('\n') + '\n\n' + replacement + '\n'
     return new_content
 
 content = update_env_var(content, 'FEISHU_SEND_MODE', 'openapi')
@@ -749,6 +772,18 @@ if port:
         if current_url.endswith(':' + old_port) or current_url.endswith(':' + old_port + '/'):
             new_url = current_url.replace(':' + old_port, ':' + port)
             content = update_env_var(content, 'CALLBACK_SERVER_URL', new_url)
+
+# 持久化 Python 路径，确保运行时使用相同的 Python 解释器
+# 空值时写入，旧值无效时覆盖，有效值不覆盖（由用户自行管理）
+python3_path = os.environ.get('_PYTHON3_PATH', '')
+python_path_invalid = os.environ.get('_PYTHON_PATH_INVALID', 'no')
+if python3_path:
+    old_match = re.search(r'^PYTHON_PATH=(.*)$', content, re.MULTILINE)
+    old_value = old_match.group(1).strip() if old_match else None
+    if old_value:
+        old_value = old_value.strip('"').strip("'")
+    if not old_value or python_path_invalid == 'yes':
+        content = update_env_var(content, 'PYTHON_PATH', python3_path)
 
 with open(env_file, 'w') as f:
     f.write(content)

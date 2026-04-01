@@ -575,7 +575,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 - **http**：传统 HTTP 回调模式，需要公网端点接收飞书事件
 - **longpoll**：WebSocket 长连接模式，网关主动连接飞书，无需公网端点
 
-> **longpoll 模式优势**：无需公网 IP 和 HTTPS 证书，适用于本地开发和内网部署。需安装 `lark-oapi` SDK：`python3 -m pip install lark-oapi`
+> **longpoll 模式优势**：无需公网 IP 和 HTTPS 证书，适用于本地开发和内网部署。需安装 `lark-oapi` SDK：`pip install lark-oapi`（建议在 setup.sh 检测到的 Python 环境中安装）
 
 **OpenAPI 模式 — 网关（分离部署）**
 
@@ -749,6 +749,20 @@ CLAUDE_COMMAND=[claude, claude --model opus]
 - `jq` - 更好的 JSON 处理（脚本会自动降级使用 Python3 或 grep/sed）
 - `socat` - Socket 通信备选方案（有 Python socket_client 作为替代）
 - `lark-oapi` - 飞书长连接模式所需（`pip install lark-oapi`，需 Python >= 3.8）
+
+### Python 环境检测
+
+脚本会自动按以下优先级查找 Python 3 解释器：
+
+1. `.env` 中的 `PYTHON_PATH`（setup 时自动记录）
+2. 项目根目录的 `.venv`（未激活时也能检测）
+3. 当前激活的 venv（`$VIRTUAL_ENV/bin/python3`）
+4. 当前激活的 conda 环境（`$CONDA_PREFIX/bin/python3`）
+5. pyenv 管理的 Python（读取 `.python-version` 或 `~/.pyenv/version`）
+6. 系统 PATH 中的 `python3`
+7. 系统 PATH 中的 `python`（验证为 Python 3）
+
+`setup.sh` 运行时会将检测到的 Python 绝对路径写入 `.env` 的 `PYTHON_PATH`，确保后续服务启动时使用相同的 Python 环境（避免 venv/conda/pyenv 下安装的依赖在运行时找不到的问题）。
 
 ### 安装
 

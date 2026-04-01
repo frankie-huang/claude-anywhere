@@ -106,7 +106,7 @@ format_ask_user_questions() {
         ' 2>/dev/null
     elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
         # 使用 python3 解析 questions 数组和选项，输出实际换行符
-        echo "$json_input" | python3 -c '
+        echo "$json_input" | "$PYTHON3" -c '
 import sys, json
 try:
     data = json.load(sys.stdin)

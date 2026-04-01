@@ -149,8 +149,8 @@ render_template() {
                 # 3. 用 python3 json.dumps 处理 JSON 转义（降级到 sed 链）
                 value=$(printf '%sx' "$value" | sed 's/^\([[:space:]]*\)```/\1\\`\\`\\`/g')
                 value="${value%x}"
-                if command -v python3 &> /dev/null; then
-                    value=$(RENDER_CONTENT="$value" python3 -c 'import os,json; print(json.dumps(os.environ["RENDER_CONTENT"]))' 2>/dev/null | sed 's/^"//;s/"$//')
+                if [ -n "$PYTHON3" ]; then
+                    value=$(RENDER_CONTENT="$value" "$PYTHON3" -c 'import os,json; print(json.dumps(os.environ["RENDER_CONTENT"]))' 2>/dev/null | sed 's/^"//;s/"$//')
                 else
                     # 降级到 sed 链
                     value=$(printf '%s' "$value" | \
@@ -164,8 +164,8 @@ render_template() {
                 # 1. 删除代码块标记前的空格（如 "   ```bash" → "```bash"）
                 # 2. 用 python3 json.dumps 处理 JSON 转义
                 value=$(printf '%s' "$value" | sed 's/^[[:space:]]*```/```/g')
-                if command -v python3 &> /dev/null; then
-                    value=$(RENDER_CONTENT="$value" python3 -c 'import os,json; print(json.dumps(os.environ["RENDER_CONTENT"]))' 2>/dev/null | sed 's/^"//;s/"$//')
+                if [ -n "$PYTHON3" ]; then
+                    value=$(RENDER_CONTENT="$value" "$PYTHON3" -c 'import os,json; print(json.dumps(os.environ["RENDER_CONTENT"]))' 2>/dev/null | sed 's/^"//;s/"$//')
                 else
                     # 降级到 sed 链
                     value=$(printf '%s' "$value" | \
@@ -1691,7 +1691,7 @@ send_feishu_post() {
         PROJECT_DIR="$project_dir" \
         REPLY_TO="$reply_to_message_id" \
         AT_USER_ID="$at_user_id" \
-        python3 -c '
+        "$PYTHON3" -c '
 import json, os
 
 text = os.environ.get("MESSAGE_TEXT", "")
@@ -1771,7 +1771,7 @@ build_ask_question_card() {
 
     # 使用 Python 动态构建表单元素（通过环境变量传递 JSON，避免 stdin 和 heredoc 冲突）
     local form_elements
-    form_elements=$(QUESTIONS_JSON="$questions_json" python3 << 'PYTHON_SCRIPT'
+    form_elements=$(QUESTIONS_JSON="$questions_json" "$PYTHON3" << 'PYTHON_SCRIPT'
 import json
 import sys
 import os

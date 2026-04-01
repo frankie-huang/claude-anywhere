@@ -32,6 +32,150 @@ HOOK_PATH="${SCRIPT_DIR}/src/hook-router.sh"
 SETTINGS_FILE="${HOME}/.claude/settings.json"
 
 # =============================================================================
+# Python 3 环境检测（完整版，含 venv/conda 支持）
+# =============================================================================
+# 安装/配置时使用，检测后由 setup.sh 持久化到 .env PYTHON_PATH
+# 运行时脚本通过 core.sh 的 _init_python3() 读取持久化路径
+# =============================================================================
+
+: "${PYTHON3:=}"
+
+# 验证路径是否为可用的 Python 3
+# 参数：$1 - 候选 Python 路径
+# 返回：0=是 Python 3, 1=不是/不可执行
+_validate_python3() {
+    local candidate="$1"
+    [ -z "$candidate" ] && return 1
+    [ ! -x "$candidate" ] && return 1
+    # 验证主版本号是否为 3（排除 Python 2）
+    "$candidate" -c "import sys; exit(0 if sys.version_info[0] == 3 else 1)" 2>/dev/null
+}
+
+# 按优先级查找 Python 3 解释器
+# 优先级：.env PYTHON_PATH > 项目 .venv > 激活 venv > 激活 conda > pyenv > PATH python3 > PATH python
+# 导出：
+#   $PYTHON3              - 找到的 Python 3 绝对路径，未找到时为空
+#   _PYTHON_PATH_INVALID  - .env 中的 PYTHON_PATH 是否无效（yes/no）
+#   _INVALID_PYTHON_PATH  - 无效的 PYTHON_PATH 原始值（用于警告提示）
+find_python3() {
+    # 已经检测过且有效，直接返回
+    if [ -n "$PYTHON3" ] && _validate_python3 "$PYTHON3"; then
+        return 0
+    fi
+
+    local candidate=""
+    _PYTHON_PATH_INVALID="no"
+    _INVALID_PYTHON_PATH=""
+
+    # 1. .env 中记录的 PYTHON_PATH（上次 setup 持久化的路径）
+    #    去除可能存在的引号（单引号或双引号）
+    local env_file="${SCRIPT_DIR}/.env"
+    if [ -f "$env_file" ]; then
+        candidate=$(sed -n 's/^PYTHON_PATH=//p' "$env_file" 2>/dev/null | head -1)
+        candidate="${candidate#\"}" ; candidate="${candidate%\"}"
+        candidate="${candidate#\'}" ; candidate="${candidate%\'}"
+        if [ -n "$candidate" ]; then
+            if _validate_python3 "$candidate"; then
+                PYTHON3="$candidate"
+                export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+                return 0
+            else
+                # .env 中有 PYTHON_PATH 但无效
+                _PYTHON_PATH_INVALID="yes"
+                _INVALID_PYTHON_PATH="$candidate"
+            fi
+        fi
+    fi
+
+    # 2. 项目根目录下的 .venv（未激活时也能检测）
+    local project_venv="${SCRIPT_DIR}/.venv"
+    if [ -d "$project_venv" ]; then
+        for bin in "$project_venv/bin/python3" "$project_venv/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+                return 0
+            fi
+        done
+    fi
+
+    # 3. 当前激活的 venv（VIRTUAL_ENV 环境变量）
+    if [ -n "$VIRTUAL_ENV" ]; then
+        for bin in "$VIRTUAL_ENV/bin/python3" "$VIRTUAL_ENV/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+                return 0
+            fi
+        done
+    fi
+
+    # 4. 当前激活的 conda 环境（CONDA_PREFIX 环境变量）
+    if [ -n "$CONDA_PREFIX" ]; then
+        for bin in "$CONDA_PREFIX/bin/python3" "$CONDA_PREFIX/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+                return 0
+            fi
+        done
+    fi
+
+    # 5. pyenv 管理的 Python（未通过 PATH 配置时的兜底检测）
+    #    优先读取 .python-version（项目级别），其次 ~/.pyenv/version（全局级别）
+    local pyenv_version=""
+    local pyenv_root="${PYENV_ROOT:-$HOME/.pyenv}"
+
+    # 项目级别：.python-version
+    if [ -f "${SCRIPT_DIR}/.python-version" ]; then
+        pyenv_version=$(cat "${SCRIPT_DIR}/.python-version" 2>/dev/null | head -1)
+        # 跳过 system 标记
+        [ "$pyenv_version" = "system" ] && pyenv_version=""
+    fi
+
+    # 全局级别：~/.pyenv/version
+    if [ -z "$pyenv_version" ] && [ -f "$pyenv_root/version" ]; then
+        pyenv_version=$(cat "$pyenv_root/version" 2>/dev/null | head -1)
+        [ "$pyenv_version" = "system" ] && pyenv_version=""
+    fi
+
+    # 构造 pyenv Python 路径并验证
+    if [ -n "$pyenv_version" ]; then
+        for bin in "$pyenv_root/versions/$pyenv_version/bin/python3" "$pyenv_root/versions/$pyenv_version/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+                return 0
+            fi
+        done
+    fi
+
+    # 6. PATH 中的 python3
+    candidate=$(command -v python3 2>/dev/null)
+    if _validate_python3 "$candidate"; then
+        PYTHON3="$candidate"
+        export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+        return 0
+    fi
+
+    # 7. PATH 中的 python（某些系统只有 python 命令，需验证是否为 Python 3）
+    candidate=$(command -v python 2>/dev/null)
+    if _validate_python3 "$candidate"; then
+        PYTHON3="$candidate"
+        export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+        return 0
+    fi
+
+    # 未找到任何可用的 Python 3
+    PYTHON3=""
+    export PYTHON3 _PYTHON_PATH_INVALID _INVALID_PYTHON_PATH
+    return 1
+}
+
+# 自动检测
+find_python3 2>/dev/null || true
+
+# =============================================================================
 # 辅助函数
 # =============================================================================
 
@@ -90,8 +234,18 @@ check_dependencies() {
     local missing=()
     local optional_missing=()
 
-    # 必需依赖
-    local required_deps=("python3" "curl" "bash")
+    # 检测 Python 3（使用 find_python3() 的检测结果）
+    if [ -n "$PYTHON3" ]; then
+        local py_version
+        py_version=$("$PYTHON3" --version 2>&1 | head -1)
+        print_success "python3: $py_version ($PYTHON3)"
+    else
+        print_error "python3: 未找到（已检查 PYTHON_PATH/.env、venv、conda、系统 PATH）"
+        missing+=("python3")
+    fi
+
+    # 其他必需依赖
+    local required_deps=("curl" "bash")
     for dep in "${required_deps[@]}"; do
         if command -v "$dep" &>/dev/null; then
             print_success "$dep: $("$dep" --version 2>&1 | head -1)"
@@ -204,7 +358,7 @@ check_timeout_config() {
 
     # 读取 settings.json 中的 PermissionRequest hook timeout
     if [ -f "$SETTINGS_FILE" ]; then
-        hook_timeout=$(SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" python3 << 'PYTHON_SCRIPT' 2>/dev/null
+        hook_timeout=$(SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" "$PYTHON3" << 'PYTHON_SCRIPT' 2>/dev/null
 import json
 import os
 
@@ -291,7 +445,7 @@ configure_hook() {
     # 使用 Python 统一处理配置（新建或合并，仅增量写入缺失的 hook 事件）
     # PermissionRequest timeout 需大于服务端 PERMISSION_REQUEST_TIMEOUT（默认值见 .env.example）
     # 冲突时通过 /dev/tty 读取用户输入（因 stdin 被 heredoc 占用）
-    SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" python3 << 'PYTHON_SCRIPT'
+    SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" "$PYTHON3" << 'PYTHON_SCRIPT'
 import json
 import os
 
@@ -459,7 +613,7 @@ uninstall() {
         # 使用 Python 精确移除指向本项目脚本的 hook（保留用户的其他 hook）
         # 退出码: 0=有变更已写入, 1=错误, 2=无需操作
         local py_exit=0
-        SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" python3 << 'PYTHON_SCRIPT' || py_exit=$?
+        SETTINGS_FILE="$SETTINGS_FILE" HOOK_PATH="$HOOK_PATH" "$PYTHON3" << 'PYTHON_SCRIPT' || py_exit=$?
 import json
 import os
 

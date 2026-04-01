@@ -91,7 +91,7 @@ vscode_proxy_open() {
 
     # URL 编码路径
     local encoded_path
-    encoded_path=$(_HOOK_PATH="$project_path" python3 -c "import os, urllib.parse; print(urllib.parse.quote(os.environ['_HOOK_PATH'], safe=''))" 2>/dev/null)
+    encoded_path=$(_HOOK_PATH="$project_path" "$PYTHON3" -c "import os, urllib.parse; print(urllib.parse.quote(os.environ['_HOOK_PATH'], safe=''))" 2>/dev/null)
     if [ -z "$encoded_path" ]; then
         encoded_path=$(echo -n "$project_path" | sed 's/ /%20/g')
     fi

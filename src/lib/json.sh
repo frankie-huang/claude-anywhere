@@ -50,7 +50,7 @@ json_init() {
     fi
 
     # 检测 python3（比 grep/sed 更可靠）
-    if command -v python3 &> /dev/null; then
+    if [ -n "$PYTHON3" ]; then
         JSON_PARSER="python3"
         JSON_HAS_PYTHON3=true
         export JSON_PARSER JSON_HAS_PYTHON3
@@ -98,7 +98,7 @@ json_get() {
             ;;
         python3)
             # Python3 解析（安全处理中间键不存在）
-            echo "$json" | python3 -c "
+            echo "$json" | "$PYTHON3" -c "
 import sys, json
 d = json.load(sys.stdin)
 parts = sys.argv[1].split('.')
@@ -183,7 +183,7 @@ json_get_multi() {
             ;;
         python3)
             # Python3 解析（一次调用获取所有字段）
-            echo "$json" | python3 -c "
+            echo "$json" | "$PYTHON3" -c "
 import sys, json
 d = json.load(sys.stdin)
 for f in sys.argv[1:]:
@@ -251,7 +251,7 @@ _json_get_complex() {
             ;;
         python3)
             # Python3 解析（安全处理中间键不存在）
-            echo "$json" | python3 -c "
+            echo "$json" | "$PYTHON3" -c "
 import sys, json
 fallback = json.loads(sys.argv[2])
 d = json.load(sys.stdin)
@@ -439,7 +439,7 @@ json_get_array_value() {
             ;;
         python3)
             # Python3 解析
-            echo "$json" | python3 -c "
+            echo "$json" | "$PYTHON3" -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -506,7 +506,7 @@ json_has_field() {
         python3)
             # Python3 解析（安全处理中间键不存在）
             local value
-            value=$(echo "$json" | python3 -c "
+            value=$(echo "$json" | "$PYTHON3" -c "
 import sys, json
 d = json.load(sys.stdin)
 parts = sys.argv[1].split('.')

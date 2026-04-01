@@ -31,11 +31,39 @@ source "${SCRIPT_DIR}/lib/core.sh"
 mkdir -p "$LOG_DIR/callback"
 mkdir -p "$RUNTIME_DIR"
 
-# 检查 Python 3
-if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 is required but not installed."
+# 检查 Python 3（使用 core.sh 统一检测的 PYTHON3 变量）
+if [ -z "$PYTHON3" ]; then
+    echo "Error: python3 is required but not found."
+    echo "Searched: .env PYTHON_PATH, .venv, VIRTUAL_ENV, CONDA_PREFIX, pyenv, PATH"
     exit 1
 fi
+echo "Using Python: $PYTHON3"
+
+# 验证 .env 中的 PYTHON_PATH 是否与实际使用的 Python 一致
+# core.sh 已完成检测和验证，此处仅对比 .env 值与检测结果是否一致
+validate_env_python_path() {
+    local env_file="${PROJECT_ROOT}/.env"
+    [ ! -f "$env_file" ] && return 0
+
+    local env_python_path
+    env_python_path=$(sed -n 's/^PYTHON_PATH=//p' "$env_file" 2>/dev/null | head -1)
+    [ -z "$env_python_path" ] && return 0
+
+    # 去除引号
+    env_python_path="${env_python_path#\"}" ; env_python_path="${env_python_path%\"}"
+    env_python_path="${env_python_path#\'}" ; env_python_path="${env_python_path%\'}"
+
+    # 对比 .env 记录的路径与 core.sh 实际检测到的路径
+    if [ "$env_python_path" != "$PYTHON3" ]; then
+        echo ""
+        echo "Warning: PYTHON_PATH in .env ($env_python_path) differs from detected Python ($PYTHON3)"
+        echo "         To fix, manually edit .env or re-run ./setup.sh with configuration parameters"
+        echo ""
+        return 1
+    fi
+
+    return 0
+}
 
 # =============================================================================
 # 辅助函数
@@ -75,6 +103,9 @@ start_service() {
 
     echo "Starting Claude Code Permission Callback Server..."
 
+    # 验证 .env 中的 PYTHON_PATH（如果存在）
+    validate_env_python_path
+
     # 检查必需的配置
     local webhook_url
     webhook_url=$(get_config "FEISHU_WEBHOOK_URL" "")
@@ -85,7 +116,7 @@ start_service() {
     # 后台启动服务：stdout 丢弃（由 Python 内部 FileHandler 直接写日志文件），stderr 捕获到错误文件
     local log_file="$LOG_DIR/callback/$(date +%Y-%m-%d).log"
     local error_file="$LOG_DIR/startup_error.log"
-    nohup python3 "${SERVER_DIR}/main.py" >/dev/null 2>"$error_file" &
+    nohup "$PYTHON3" "${SERVER_DIR}/main.py" >/dev/null 2>"$error_file" &
     local pid=$!
 
     # 保存 PID

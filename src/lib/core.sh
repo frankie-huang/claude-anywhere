@@ -20,9 +20,11 @@
 #   LOG_DIR         - 日志目录 (log/)
 #   RUNTIME_DIR     - 运行时目录 (runtime/)
 #   AUTH_TOKEN_FILE - 认证令牌文件 (runtime/auth_token.json)
+#   PYTHON3         - Python 3 解释器路径 (自动检测)
 #
 # 函数:
 #   get_project_root()    - 获取项目根目录
+#   _init_python3()       - 初始化 Python 3 解释器路径（运行时）
 #   get_config()          - 获取配置值
 #   log()                 - 记录日志
 #   log_init()            - 初始化日志
@@ -78,7 +80,155 @@ AUTH_TOKEN_FILE="$RUNTIME_DIR/auth_token.json"
 export SRC_DIR LIB_DIR CONFIG_DIR TEMPLATES_DIR SHARED_DIR LOG_DIR RUNTIME_DIR AUTH_TOKEN_FILE
 
 # =============================================================================
-# 第二部分：环境配置
+# 第二部分：Python 环境初始化（运行时）
+# =============================================================================
+# 自动检测 Python 3 解释器，source 时自动执行
+# 优先级：.env PYTHON_PATH > 项目 .venv > 激活 venv > 激活 conda > pyenv > PATH python3 > PATH python
+# 完整检测（含 _PYTHON_PATH_INVALID 标志）在 install.sh 的 find_python3() 中
+# =============================================================================
+
+: "${PYTHON3:=}"
+: "${_PYTHON3_VALIDATED:=}"
+
+# 内部函数：验证路径是否为可用的 Python 3
+# 参数：$1 - 候选 Python 路径
+# 返回：0=是 Python 3, 1=不是/不可执行
+_validate_python3() {
+    local candidate="$1"
+    [ -z "$candidate" ] && return 1
+    [ ! -x "$candidate" ] && return 1
+    # 验证主版本号是否为 3（排除 Python 2）
+    "$candidate" -c "import sys; exit(0 if sys.version_info[0] == 3 else 1)" 2>/dev/null
+}
+
+# 初始化 Python 3 解释器路径（运行时使用）
+# 优先级：.env PYTHON_PATH > 项目 .venv > 激活 venv > 激活 conda > pyenv > PATH python3 > PATH python
+# 导出：$PYTHON3 - 找到的 Python 3 绝对路径，未找到时为空
+_init_python3() {
+    # 已经验证过，跳过子进程调用（避免每次 source 时重复验证）
+    if [ -n "$PYTHON3" ] && [ "$_PYTHON3_VALIDATED" = "1" ]; then
+        return 0
+    fi
+
+    # 已设置但未缓存验证结果，执行一次验证
+    if [ -n "$PYTHON3" ] && _validate_python3 "$PYTHON3"; then
+        _PYTHON3_VALIDATED="1"
+        export PYTHON3 _PYTHON3_VALIDATED
+        return 0
+    fi
+
+    local candidate=""
+
+    # 1. .env 中 setup 持久化的路径（最可靠，已包含 venv/conda 信息）
+    #    去除可能存在的引号（单引号或双引号）
+    local env_file="${PROJECT_ROOT}/.env"
+    if [ -f "$env_file" ]; then
+        candidate=$(sed -n 's/^PYTHON_PATH=//p' "$env_file" 2>/dev/null | head -1)
+        candidate="${candidate#\"}" ; candidate="${candidate%\"}"
+        candidate="${candidate#\'}" ; candidate="${candidate%\'}"
+        if _validate_python3 "$candidate"; then
+            PYTHON3="$candidate"
+            _PYTHON3_VALIDATED="1"
+            export PYTHON3 _PYTHON3_VALIDATED
+            return 0
+        fi
+    fi
+
+    # 2. 项目根目录下的 .venv（未激活时也能检测）
+    local project_venv="${PROJECT_ROOT}/.venv"
+    if [ -d "$project_venv" ]; then
+        for bin in "$project_venv/bin/python3" "$project_venv/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                _PYTHON3_VALIDATED="1"
+                export PYTHON3 _PYTHON3_VALIDATED
+                return 0
+            fi
+        done
+    fi
+
+    # 3. 当前激活的 venv（VIRTUAL_ENV 环境变量）
+    if [ -n "$VIRTUAL_ENV" ]; then
+        for bin in "$VIRTUAL_ENV/bin/python3" "$VIRTUAL_ENV/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                _PYTHON3_VALIDATED="1"
+                export PYTHON3 _PYTHON3_VALIDATED
+                return 0
+            fi
+        done
+    fi
+
+    # 4. 当前激活的 conda 环境（CONDA_PREFIX 环境变量）
+    if [ -n "$CONDA_PREFIX" ]; then
+        for bin in "$CONDA_PREFIX/bin/python3" "$CONDA_PREFIX/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                _PYTHON3_VALIDATED="1"
+                export PYTHON3 _PYTHON3_VALIDATED
+                return 0
+            fi
+        done
+    fi
+
+    # 5. pyenv 管理的 Python（未通过 PATH 配置时的兜底检测）
+    local pyenv_version=""
+    local pyenv_root="${PYENV_ROOT:-$HOME/.pyenv}"
+
+    # 项目级别：.python-version
+    if [ -f "${PROJECT_ROOT}/.python-version" ]; then
+        pyenv_version=$(cat "${PROJECT_ROOT}/.python-version" 2>/dev/null | head -1)
+        [ "$pyenv_version" = "system" ] && pyenv_version=""
+    fi
+
+    # 全局级别：~/.pyenv/version
+    if [ -z "$pyenv_version" ] && [ -f "$pyenv_root/version" ]; then
+        pyenv_version=$(cat "$pyenv_root/version" 2>/dev/null | head -1)
+        [ "$pyenv_version" = "system" ] && pyenv_version=""
+    fi
+
+    # 构造 pyenv Python 路径并验证
+    if [ -n "$pyenv_version" ]; then
+        for bin in "$pyenv_root/versions/$pyenv_version/bin/python3" "$pyenv_root/versions/$pyenv_version/bin/python"; do
+            if _validate_python3 "$bin"; then
+                PYTHON3="$bin"
+                _PYTHON3_VALIDATED="1"
+                export PYTHON3 _PYTHON3_VALIDATED
+                return 0
+            fi
+        done
+    fi
+
+    # 6. PATH 中的 python3
+    candidate=$(command -v python3 2>/dev/null)
+    if _validate_python3 "$candidate"; then
+        PYTHON3="$candidate"
+        _PYTHON3_VALIDATED="1"
+        export PYTHON3 _PYTHON3_VALIDATED
+        return 0
+    fi
+
+    # 7. PATH 中的 python（某些系统只有 python 命令，需验证是否为 Python 3）
+    candidate=$(command -v python 2>/dev/null)
+    if _validate_python3 "$candidate"; then
+        PYTHON3="$candidate"
+        _PYTHON3_VALIDATED="1"
+        export PYTHON3 _PYTHON3_VALIDATED
+        return 0
+    fi
+
+    # 未找到
+    PYTHON3=""
+    _PYTHON3_VALIDATED=""
+    export PYTHON3 _PYTHON3_VALIDATED
+    return 1
+}
+
+# 自动初始化（静默）
+_init_python3 2>/dev/null || true
+
+# =============================================================================
+# 第三部分：环境配置（.env）
 # =============================================================================
 
 # 内部变量
@@ -206,10 +356,10 @@ _load_log_config() {
             _LOG_DATETIME_FORMAT=$(jq -r '.datetime_format // "%Y-%m-%d %H:%M:%S"' "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
             _LOG_FILE_PATTERN=$(jq -r '.file_patterns.hook // "hook/{date}.log"' "$config_file" 2>/dev/null || echo "hook/{date}.log")
         # 尝试使用 python3 读取配置
-        elif command -v python3 &> /dev/null; then
-            _LOG_DATE_FORMAT=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('date_format', '%Y-%m-%d'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d")
-            _LOG_DATETIME_FORMAT=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('datetime_format', '%Y-%m-%d %H:%M:%S'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
-            _LOG_FILE_PATTERN=$(python3 -c "import sys, json; print(json.load(open(sys.argv[1])).get('file_patterns', {}).get('hook', 'hook/{date}.log'))" "$config_file" 2>/dev/null || echo "hook/{date}.log")
+        elif [ -n "$PYTHON3" ]; then
+            _LOG_DATE_FORMAT=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('date_format', '%Y-%m-%d'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d")
+            _LOG_DATETIME_FORMAT=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('datetime_format', '%Y-%m-%d %H:%M:%S'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
+            _LOG_FILE_PATTERN=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('file_patterns', {}).get('hook', 'hook/{date}.log'))" "$config_file" 2>/dev/null || echo "hook/{date}.log")
         fi
     fi
 }

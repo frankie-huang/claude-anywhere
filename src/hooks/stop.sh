@@ -77,7 +77,7 @@ end
 ' "$transcript_file" 2>/dev/null)
 
         elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-            result=$(python3 -c "
+            result=$("$PYTHON3" -c "
 import sys, json
 
 with open(sys.argv[1], 'r') as f:
@@ -268,7 +268,7 @@ build_response_elements() {
             map(tojson) | join(",")
         ' 2>/dev/null
     elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-        echo "$response_json" | python3 -c "
+        echo "$response_json" | "$PYTHON3" -c "
 import sys, json, re
 data = json.load(sys.stdin)
 texts = data.get('texts', [])

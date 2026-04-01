@@ -111,7 +111,7 @@ find_tool_use_id() {
             return 1
         fi
     elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-        tail -10 "$transcript" 2>/dev/null | python3 -c "
+        tail -10 "$transcript" 2>/dev/null | "$PYTHON3" -c "
 import sys, json
 tool_name = sys.argv[1]
 # 倒序遍历，找到最近的匹配 tool_use
@@ -173,7 +173,7 @@ check_tool_result_exists() {
         done < <(tail -10 "$transcript" 2>/dev/null)
         return 1
     elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-        tail -10 "$transcript" 2>/dev/null | python3 -c "
+        tail -10 "$transcript" 2>/dev/null | "$PYTHON3" -c "
 import sys, json
 target_id = sys.argv[1]
 for line in sys.stdin:
