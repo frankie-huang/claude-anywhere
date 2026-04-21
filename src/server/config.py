@@ -180,6 +180,18 @@ def get_claude_commands() -> List[str]:
     return [raw]
 
 
+def get_claude_args_template() -> str:
+    """获取 CLAUDE_ARGS_TEMPLATE 配置
+
+    占位符 {cmd} 和 {args} 的展开语义见 handlers.claude._expand_template。
+
+    Returns:
+        模板字符串,默认 '{cmd} {args}'
+    """
+    raw = get_config('CLAUDE_ARGS_TEMPLATE', '').strip()
+    return raw if raw else '{cmd} {args}'
+
+
 def reload_config():
     """重新加载 .env 文件
 

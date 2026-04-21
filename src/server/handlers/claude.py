@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, List, Any
 
 from services.session_chat_store import SessionChatStore
 from handlers.utils import build_shell_cmd, run_in_background as _run_in_background
@@ -144,7 +144,7 @@ def _get_shell() -> str:
     return os.environ.get('SHELL', '/bin/bash')
 
 
-def _get_mcp_args(project_dir: str, session_id: str) -> str:
+def _get_mcp_args(project_dir: str, session_id: str) -> List[str]:
     """
     获取 MCP 审批相关的命令行参数
 
@@ -156,18 +156,19 @@ def _get_mcp_args(project_dir: str, session_id: str) -> str:
         session_id: Claude 会话 ID，传递给 MCP server 用于权限审批上下文
 
     Returns:
-        MCP 相关参数字符串
-        如果 MCP 脚本不存在则返回空字符串
+        MCP 相关参数 argv 列表(未经 shell quote),MCP 脚本缺失时返回空列表
     """
     # 动态定位 MCP 脚本路径（与 claude.py 同目录）
     mcp_script = os.path.join(os.path.dirname(__file__), "permission_mcp.py")
 
     if not os.path.exists(mcp_script):
         logger.debug(f"[mcp] MCP script not found: {mcp_script}")
-        return ""
+        return []
 
-    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
+    # sys.executable 返回启动本进程的 Python 解释器路径，
+    # 即 start-server.sh 中 $PYTHON3 所指向的同一个程序，确保 MCP 子进程与服务使用同一 Python 环境
     python_cmd = sys.executable or "python3"
+    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
     mcp_config = {
         "mcpServers": {
             "approver": {
@@ -179,7 +180,53 @@ def _get_mcp_args(project_dir: str, session_id: str) -> str:
 
     config_json = json.dumps(mcp_config)
     logger.info(f"[mcp] Using MCP config: script={mcp_script}, session={session_id}, cwd={project_dir}")
-    return f"--permission-prompt-tool {MCP_TOOL_NAME} --mcp-config {shlex.quote(config_json)}"
+    return ['--permission-prompt-tool', MCP_TOOL_NAME, '--mcp-config', config_json]
+
+
+def _shlex_join(argv: List[str]) -> str:
+    """把 argv 列表合成单个 shell 字符串(Python 3.6 兼容的 shlex.join)"""
+    return ' '.join(shlex.quote(a) for a in argv)
+
+
+def _expand_template(template: str, cmd_argv: List[str], args_argv: List[str]) -> List[str]:
+    """按 shell 引号语义展开命令模板为 argv 列表
+
+    支持占位符 {cmd} 和 {args},展开规则:
+      - 裸位(token 未被引号包裹且正好等于占位符)→ 展开为多个独立 argv
+      - 引号位(token 被 "..." 或 '...' 包裹,或占位符作为子串出现)→
+        占位符值用 shell quote 合成单字符串后替换,整个 token 作为一个 argv
+        (透传给 wrapper 自行 shlex 解析,保证 prompt 里引号/空格安全)
+
+    引号判定使用 shlex.split(posix=False) 保留引号字符信息。
+
+    Args:
+        template: 模板字符串,如 '{cmd} {args}' 或 '{cmd} -a "{args}"'
+        cmd_argv: claude 命令 argv 列表,如 ['claude'] 或 ['ttadk', 'code', '-t', 'claude']
+        args_argv: claude 参数 argv 列表,如 ['-p', '--resume', 'sid', '--', 'prompt']
+
+    Returns:
+        展开后的 argv 列表,可直接用 shlex.join 拼成 shell 命令串
+    """
+    # posix=False 保留引号字符,用于区分裸位/引号位
+    tokens = shlex.split(template, posix=False)
+    cmd_joined = _shlex_join(cmd_argv)
+    args_joined = _shlex_join(args_argv)
+
+    result: List[str] = []
+    for tok in tokens:
+        # 检测是否被成对引号包裹(单或双)
+        quoted = len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'")
+        inner = tok[1:-1] if quoted else tok
+
+        if not quoted and inner == '{cmd}':
+            result.extend(cmd_argv)
+        elif not quoted and inner == '{args}':
+            result.extend(args_argv)
+        else:
+            # 引号包裹 或 子串出现 → 合成为单个 argv
+            replaced = inner.replace('{cmd}', cmd_joined).replace('{args}', args_joined)
+            result.append(replaced)
+    return result
 
 
 def _get_claude_command(claude_command: str = '') -> str:
@@ -217,34 +264,42 @@ def _execute_and_check(session_id: str, project_dir: str, prompt: str, chat_id: 
     Returns:
         (success, response)
     """
+    from config import get_claude_args_template
+
     shell = _get_shell()
     claude_cmd = _get_claude_command(claude_command)
-    # 使用 shlex.quote 安全处理 prompt 中的特殊字符
-    safe_prompt = shlex.quote(prompt)
-    safe_session = shlex.quote(session_id)
+    template = get_claude_args_template()
 
-    # 根据会话模式选择参数
-    # 先收集所有 flag 参数，最后用 -- 分隔符追加 prompt
-    # 确保 prompt 中的 --flag 不会被 CLI 误解析为参数
+    # 把 CLAUDE_COMMAND 拆成 argv(支持 'ttadk code -t claude' 这种多 token)
+    cmd_argv = shlex.split(claude_cmd)
+
+    # 根据会话模式组装 claude argv(prompt 未预先 quote,由模板展开时统一处理)
+    # -- 分隔符确保 prompt 中的 --flag 不会被 CLI 误解析为参数
     if session_mode == 'new':
-        flags = f'{claude_cmd} -p --session-id {safe_session}'
+        session_flag = '--session-id'
         log_prefix = '[claude-new]'
     else:
-        flags = f'{claude_cmd} -p --resume {safe_session}'
+        session_flag = '--resume'
         log_prefix = '[claude-continue]'
 
+    # mcp 参数插在 -- 之前(-- 之后是 prompt)
+    mcp_argv = _get_mcp_args(project_dir, session_id)
+    args_argv: List[str] = ['-p', session_flag, session_id] + mcp_argv + ['--', prompt]
+
     # 打印可直接复制执行的简化命令（不含 mcp 参数，prompt 用占位符）
-    debug_shell_cmd = build_shell_cmd(shell, f"{flags} -- <prompt>")
+    debug_argv = _expand_template(template, cmd_argv,
+                                  ['-p', session_flag, session_id, '--', 'PROMPT'])
+    debug_shell_cmd = build_shell_cmd(shell, _shlex_join(debug_argv))
     if len(debug_shell_cmd) >= 3:
         logger.info(f"{log_prefix} Copyable: cd {project_dir} && "
                     f"{debug_shell_cmd[0]} {debug_shell_cmd[1]} {shlex.quote(debug_shell_cmd[2])}")
 
-    mcp_args = _get_mcp_args(project_dir, session_id).strip()
-    if mcp_args:
-        flags += ' ' + mcp_args
+    # 实际执行的命令
+    final_argv = _expand_template(template, cmd_argv, args_argv)
+    cmd_str = _shlex_join(final_argv)
 
-    cmd_str = f'{flags} -- {safe_prompt}'
-    log_cmd = f"{flags} -- '<prompt>'"
+    # 日志里隐藏 prompt 内容(用占位符版的 debug_argv 拼 log)
+    log_cmd = _shlex_join(debug_argv)
 
     cmd = build_shell_cmd(shell, cmd_str)
 
