@@ -106,22 +106,20 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
 
     # Command 优先级: 请求指定 > SessionChatStore session 记录 > 默认
     if not claude_command:
-        chat_store = SessionChatStore.get_instance()
-        if chat_store:
-            claude_command = chat_store.get_command(session_id) or ''
+        session_store = SessionChatStore.get_instance()
+        if session_store:
+            claude_command = session_store.get_command(session_id) or ''
 
     actual_cmd = _get_claude_command(claude_command)
     logger.info(f"[claude-continue] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
-    # 如果有 chat_id，保存 session_id -> chat_id + claude_command 映射
-    if chat_id:
-        store = SessionChatStore.get_instance()
-        if store:
-            store.save(session_id, chat_id, claude_command=actual_cmd)
-            logger.info(f"[claude-continue] Saved chat_id mapping: {session_id} -> {chat_id}")
-
-            # 标记跳过下一条 UserPromptSubmit（飞书发起的 prompt 已在飞书展示）
-            store.set_skip_next_user_prompt(session_id)
+    # 更新 session 映射：刷新 claude_command 和 chat_id
+    # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
+    # 飞书发起的 prompt 已在飞书展示，标记跳过
+    store = SessionChatStore.get_instance()
+    if store:
+        store.save(session_id, chat_id, claude_command=actual_cmd)
+        store.set_skip_next_user_prompt(session_id)
 
     # 同步执行并检查（使用 resume 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,
@@ -166,8 +164,10 @@ def _get_mcp_args(project_dir: str, session_id: str) -> str:
         logger.debug(f"[mcp] MCP script not found: {mcp_script}")
         return ""
 
-    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
+    # sys.executable 返回启动本进程的 Python 解释器路径，
+    # 即 start-server.sh 中 $PYTHON3 所指向的同一个程序，确保 MCP 子进程与服务使用同一 Python 环境
     python_cmd = sys.executable or "python3"
+    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
     mcp_config = {
         "mcpServers": {
             "approver": {
@@ -393,21 +393,26 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         if claude_command not in get_claude_commands():
             return Response.error('invalid claude_command')
 
-    # 生成 UUID session_id
-    session_id = str(uuid.uuid4())
+    # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
+    session_id = data.get('session_id', '') or str(uuid.uuid4())
 
     actual_cmd = _get_claude_command(claude_command)
     logger.info(f"[claude-new] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
     # 保存 session_id -> chat_id + claude_command 映射
-    if chat_id:
-        store = SessionChatStore.get_instance()
-        if store:
-            store.save(session_id, chat_id, claude_command=actual_cmd)
-            logger.info(f"[claude-new] Saved chat_id mapping: {session_id} -> {chat_id}")
+    from config import FEISHU_SESSION_MODE
+    group_active = (FEISHU_SESSION_MODE == 'group')
+    store = SessionChatStore.get_instance()
+    if store:
+        store.save(session_id, chat_id, claude_command=actual_cmd,
+                   group_active=group_active, project_dir=project_dir)
+        logger.info(f"[claude-new] Saved mapping: {session_id} -> {chat_id or '(group pending)'}")
 
-            # 标记跳过下一条 UserPromptSubmit（飞书发起的 prompt 已在飞书展示）
-            store.set_skip_next_user_prompt(session_id)
+    # 设置 skip_user_prompt 标志
+    # 由调用方通过 skip_user_prompt 字段决定，不再根据 chat_id 是否为空判断
+    skip_user_prompt = data.get('skip_user_prompt', True)
+    if skip_user_prompt and store:
+        store.set_skip_next_user_prompt(session_id)
 
     # 同步执行并检查（使用 new 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,

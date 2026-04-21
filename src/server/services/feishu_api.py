@@ -634,6 +634,48 @@ class MessageSender:
             log_prefix='Card reply'
         )
 
+    def patch_card(self, message_id: str, card_json: str) -> Tuple[bool, str]:
+        """更新已发送的卡片消息内容
+
+        使用飞书 PATCH API: PATCH /open-apis/im/v1/messages/:message_id
+        https://open.feishu.cn/document/server-docs/im-v1/message-card/patch
+
+        Args:
+            message_id: 要更新的消息 ID
+            card_json: 新的卡片 JSON 字符串
+
+        Returns:
+            (success, error_message)
+        """
+        if not message_id or not card_json:
+            return False, "Missing parameters"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Authorization': f'Bearer {token}'
+        }
+
+        url = f'{FEISHU_API_BASE}/im/v1/messages/{message_id}'
+        payload = json.dumps({
+            'msg_type': 'interactive',
+            'content': card_json
+        }).encode('utf-8')
+
+        success, resp = _http_request(url, method='PATCH', headers=headers, data=payload)
+        if not success:
+            return False, resp.get('msg', 'Request failed')
+
+        code = resp.get('code', -1)
+        if code != 0:
+            return False, resp.get('msg', 'Unknown error')
+
+        logger.info("[feishu-api] Card patched: %s", message_id)
+        return True, ''
+
     def send_text(
         self,
         text: str,
@@ -937,6 +979,140 @@ class MessageSender:
 
         return deleted > 0, deleted
 
+    def create_group_chat(self, name: str, owner_id: str = '') -> Tuple[bool, str]:
+        """创建群聊并拉入用户
+
+        机器人创建群聊时自动成为群成员。
+        如果指定 owner_id，创建后自动将其拉入群聊。
+        所需权限：im:chat 或 im:chat:create
+        https://open.feishu.cn/document/server-docs/group/chat/create
+
+        Args:
+            name: 群聊名称（最大 100 字符）
+            owner_id: 要拉入的用户 ID（user_id 格式，可选）
+
+        Returns:
+            (success, chat_id or error_message)
+        """
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f'{FEISHU_API_BASE}/im/v1/chats'
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Authorization': f'Bearer {token}'
+        }
+        body = json.dumps({
+            'name': name[:100],
+            'chat_mode': 'group',
+            'chat_type': 'private',
+        }).encode('utf-8')
+
+        success, resp = _http_request(url, method='POST', headers=headers, data=body)
+        if not success:
+            return False, resp.get('msg', 'Request failed')
+
+        code = resp.get('code', -1)
+        if code != 0:
+            return False, resp.get('msg', 'Unknown error')
+
+        chat_id = resp.get('data', {}).get('chat_id', '')
+        if not chat_id:
+            return False, 'No chat_id in response'
+
+        # 拉入用户（失败则解散群聊，避免产生用户不可见的孤儿群）
+        if owner_id:
+            add_ok, add_err = self.add_chat_members(chat_id, [owner_id])
+            if not add_ok:
+                logger.warning("[feishu-api] Failed to add owner, dissolving group: %s", chat_id)
+                self.dissolve_group_chat(chat_id)
+                return False, "Failed to add owner to group: %s" % add_err
+
+        logger.info("[feishu-api] Group created: name=%s, chat_id=%s", name, chat_id)
+        return True, chat_id
+
+    def add_chat_members(self, chat_id: str, id_list: List[str],
+                         member_id_type: str = 'user_id') -> Tuple[bool, str]:
+        """添加群成员
+
+        所需权限：im:chat 或 im:chat.members:write_only
+        https://open.feishu.cn/document/server-docs/group/chat-member/create
+
+        Args:
+            chat_id: 群聊 ID
+            id_list: 用户 ID 列表
+            member_id_type: ID 类型，默认 user_id
+
+        Returns:
+            (success, error_message)
+        """
+        if not chat_id or not id_list:
+            return False, "Missing parameters"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f'{FEISHU_API_BASE}/im/v1/chats/{chat_id}/members?member_id_type={member_id_type}'
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Authorization': f'Bearer {token}'
+        }
+        body = json.dumps({'id_list': id_list}).encode('utf-8')
+
+        success, resp = _http_request(url, method='POST', headers=headers, data=body)
+        if not success:
+            return False, resp.get('msg', 'Request failed')
+
+        code = resp.get('code', -1)
+        if code != 0:
+            return False, resp.get('msg', 'Unknown error')
+
+        logger.info("[feishu-api] Added %d members to chat %s", len(id_list), chat_id)
+        return True, ''
+
+    def dissolve_group_chat(self, chat_id: str) -> Tuple[bool, str]:
+        """解散群聊
+
+        所需权限：im:chat 或 im:chat:delete
+        https://open.feishu.cn/document/server-docs/group/chat/delete
+
+        Args:
+            chat_id: 群聊 ID
+
+        Returns:
+            (success, error_message)
+        """
+        if not chat_id:
+            return False, "Missing chat_id"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f'{FEISHU_API_BASE}/im/v1/chats/{chat_id}'
+        headers = {
+            'Authorization': f'Bearer {token}'
+        }
+
+        success, resp = _http_request(url, method='DELETE', headers=headers)
+        code = resp.get('code', -1)
+
+        # 232009 = already dissolved，视为成功（HTTP 非 200 但业务上可接受）
+        if code == 232009:
+            logger.info("[feishu-api] Group chat already dissolved: %s", chat_id)
+            return True, ''
+
+        if not success:
+            return False, resp.get('msg', 'Request failed')
+
+        if code != 0:
+            return False, resp.get('msg', 'Unknown error')
+
+        logger.info("[feishu-api] Group dissolved: %s", chat_id)
+        return True, ''
+
 
 # =============================================================================
 # FeishuAPIService
@@ -1108,6 +1284,12 @@ class FeishuAPIService:
 
         return self._message_sender.reply_card(card_json, message_id, reply_in_thread)
 
+    def patch_card(self, message_id: str, card_json: str) -> Tuple[bool, str]:
+        """更新卡片消息"""
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+        return self._message_sender.patch_card(message_id, card_json)
+
     def send_text(
         self,
         text: str,
@@ -1235,3 +1417,26 @@ class FeishuAPIService:
             return False, 0
 
         return self._message_sender.remove_reaction(message_id, emoji_type)
+
+    # =========================================================================
+    # 群聊管理 API
+    # =========================================================================
+
+    def create_group_chat(self, name: str, owner_id: str = '') -> Tuple[bool, str]:
+        """创建群聊并拉入用户"""
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+        return self._message_sender.create_group_chat(name, owner_id)
+
+    def add_chat_members(self, chat_id: str, id_list: List[str],
+                         member_id_type: str = 'user_id') -> Tuple[bool, str]:
+        """添加群成员"""
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+        return self._message_sender.add_chat_members(chat_id, id_list, member_id_type)
+
+    def dissolve_group_chat(self, chat_id: str) -> Tuple[bool, str]:
+        """解散群聊"""
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+        return self._message_sender.dissolve_group_chat(chat_id)

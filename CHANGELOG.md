@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-04-21
+
+#### 新增 `/attach` 命令：将指定 session 绑定到当前群聊
+
+- 网关侧 `_handle_attach_command`：仅支持群聊使用，session_id 前缀至少 8 字符，唯一匹配时执行绑定；多匹配提示缩小前缀，无匹配明确反馈
+- Callback 侧 `/cb/session/attach`：纯数据层，复用 `SessionChatStore.save()` 自动处理 chat_id 迁移、dissolved 复活、反向索引维护与前任 active session 降级
+- 绑定成功后若原群为服务创建群聊，提示对应 seq 供手动 `/groups dissolve` 清理；附带自动解散阈值说明
+- `SessionChatStore.find_by_prefix()`：按前缀查询 session，不过滤 dissolved/过期，交由调用方决策
+- `GroupSeqStore.get_seq(chat_id)`：按 chat_id 反查 seq，补齐主键查询能力
+- `/groups` 命令改为非管理员专属：每个 owner 只能看/解散自己的群，权限天然隔离
+
 ### Fixed - 2026-04-02
 
 #### 统一 Python 3 环境检测，修复 setup 与运行时依赖不一致

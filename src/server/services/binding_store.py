@@ -27,6 +27,7 @@ class BindingStore:
             "callback_url": "https://callback.example.com",
             "auth_token": "abc123.def456",
             "reply_in_thread": true,
+            "session_mode": "message",
             "claude_commands": ["claude", "claude --model opus"],
             "default_chat_dir": "/home/user/project",
             "default_chat_follow_thread": true,
@@ -106,7 +107,7 @@ class BindingStore:
         callback_url: str,
         auth_token: str,
         registered_ip: str = '',
-        reply_in_thread: bool = False,
+        session_mode: str = 'message',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
         default_chat_follow_thread: bool = True
@@ -118,7 +119,7 @@ class BindingStore:
             callback_url: Callback 后端 URL
             auth_token: 认证令牌
             registered_ip: 注册来源 IP
-            reply_in_thread: 是否使用回复话题模式
+            session_mode: 会话模式，message/thread/group
             claude_commands: 可用的 Claude 命令列表（从 Callback 后端传递）
             default_chat_dir: 默认聊天目录（从 Callback 后端传递）
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
@@ -144,10 +145,15 @@ class BindingStore:
                     )
                 # 处理 claude_commands：过滤空字符串，为空时默认 ["claude"]
                 valid_commands = [c for c in (claude_commands or []) if c and c.strip()]
+                # 校验 session_mode（入口处已做 reply_in_thread → session_mode 转换，
+                # 此处为防御性校验，防止未来新调用方传入非法值）
+                if session_mode not in ('message', 'thread', 'group'):
+                    session_mode = 'message'
                 binding_data = {
                     'callback_url': callback_url,
                     'auth_token': auth_token,
-                    'reply_in_thread': reply_in_thread,
+                    'reply_in_thread': (session_mode == 'thread'),  # 兼容旧版读取
+                    'session_mode': session_mode,
                     'default_chat_follow_thread': default_chat_follow_thread,
                     'claude_commands': valid_commands or ['claude'],
                     'updated_at': int(time.time()),

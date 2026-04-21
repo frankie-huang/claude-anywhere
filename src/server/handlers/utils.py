@@ -6,7 +6,7 @@ import shlex
 import threading
 import urllib.request
 
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from config import CALLBACK_PAGE_CLOSE_DELAY
 
@@ -46,7 +46,7 @@ def post_json(url, data, auth_token=None, timeout=10):
 
 
 def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
-    """从 Callback 侧发送文本消息到飞书（兼容单机和分离部署）
+    """从 Callback 侧调用飞书网关，发送文本消息（兼容单机和分离部署）
 
     优先使用 FeishuAPIService 直接发送（单机模式），
     不可用时通过网关 /gw/feishu/send 转发（分离部署模式）。
@@ -58,21 +58,24 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
     Returns:
         (success, message_id or error)
     """
-    # 方式 1：直接通过 FeishuAPIService 发送（单机模式）
-    try:
-        from services.feishu_api import FeishuAPIService
-        service = FeishuAPIService.get_instance()
-        if service and service.enabled:
-            success, result = service.send_text(
-                text,
-                receive_id=chat_id,
-                receive_id_type='chat_id'
-            )
-            return (success, result)
-    except Exception as e:
-        logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+    from config import IS_CALLBACK_BACKEND
 
-    # 方式 2：通过网关转发（分离部署模式）
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接通过 FeishuAPIService 发送
+        try:
+            from services.feishu_api import FeishuAPIService
+            service = FeishuAPIService.get_instance()
+            if service and service.enabled:
+                success, result = service.send_text(
+                    text,
+                    receive_id=chat_id,
+                    receive_id_type='chat_id'
+                )
+                return (success, result)
+        except Exception as e:
+            logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关转发
     try:
         from config import FEISHU_GATEWAY_URL, FEISHU_OWNER_ID
         from services.auth_token_store import AuthTokenStore
@@ -99,6 +102,111 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
             return (False, resp.get('error', 'unknown'))
     except Exception as e:
         return (False, str(e))
+
+
+def create_feishu_group(name: str) -> Tuple[bool, str]:
+    """从 Callback 侧调用飞书网关，创建飞书群聊（兼容单机和分离部署）
+
+    owner_id 由各模式自行获取：
+    - 单机模式：从 FEISHU_OWNER_ID 配置读取
+    - 分离部署：网关从 binding 中的 owner_id 获取
+
+    Args:
+        name: 群聊名称
+
+    Returns:
+        (success, chat_id or error)
+    """
+    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID
+
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接调用网关侧统一入口（创建 + 写归属记录一次完成）
+        try:
+            from handlers.feishu import create_group_chat_and_record
+            return create_group_chat_and_record(name, FEISHU_OWNER_ID)
+        except Exception as e:
+            logger.warning("[create_feishu_group] create_group_chat_and_record unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关转发
+    try:
+        from config import FEISHU_GATEWAY_URL
+        from services.auth_token_store import AuthTokenStore
+
+        if not FEISHU_GATEWAY_URL:
+            return (False, 'no feishu service available')
+
+        store = AuthTokenStore.get_instance()
+        auth_token = store.get() if store else ''
+        if not auth_token:
+            return (False, 'no auth_token available')
+
+        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/create-group'
+        data = {
+            'name': name,
+            'owner_id': FEISHU_OWNER_ID
+        }
+        resp = post_json(api_url, data, auth_token=auth_token)
+        if resp.get('success'):
+            return (True, resp.get('chat_id', ''))
+        else:
+            return (False, resp.get('error', 'unknown'))
+    except Exception as e:
+        return (False, str(e))
+
+
+def dissolve_feishu_groups(chat_ids: List[str]) -> Dict[str, Any]:
+    """从 Callback 侧调用飞书网关解散飞书群聊（兼容单机和分离部署，支持批量）
+
+    归属判断由网关侧完成：非服务创建的群聊会被跳过（skipped_items），不视为失败。
+
+    Args:
+        chat_ids: 群聊 ID 列表
+
+    Returns:
+        {
+            'dissolved_items': List[str],     # 实际解散的 chat_id
+            'skipped_items': List[str],       # 非服务创建的 chat_id
+            'failed': List[{chat_id, error}]  # API 错误
+        }
+    """
+    if not chat_ids:
+        return {'dissolved_items': [], 'skipped_items': [], 'failed': []}
+
+    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID
+
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接调用网关侧函数（解散 + 清理归属记录）
+        try:
+            from handlers.feishu import batch_dissolve_groups
+            return batch_dissolve_groups(chat_ids, FEISHU_OWNER_ID)
+        except Exception as e:
+            logger.warning("[dissolve_feishu_groups] batch_dissolve_groups unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关批量转发
+    try:
+        from config import FEISHU_GATEWAY_URL
+        from services.auth_token_store import AuthTokenStore
+
+        if not FEISHU_GATEWAY_URL:
+            return {'dissolved_items': [], 'skipped_items': [],
+                    'failed': [{'chat_id': cid, 'error': 'no feishu service available'} for cid in chat_ids]}
+
+        store = AuthTokenStore.get_instance()
+        auth_token = store.get() if store else ''
+        if not auth_token:
+            return {'dissolved_items': [], 'skipped_items': [],
+                    'failed': [{'chat_id': cid, 'error': 'no auth_token available'} for cid in chat_ids]}
+
+        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/dissolve-groups'
+        resp = post_json(api_url, {'chat_ids': chat_ids, 'owner_id': FEISHU_OWNER_ID}, auth_token=auth_token)
+        return {
+            'dissolved_items': resp.get('dissolved_items', []),
+            'skipped_items': resp.get('skipped_items', []),
+            'failed': resp.get('failed', []),
+        }
+    except Exception as e:
+        return {'dissolved_items': [], 'skipped_items': [],
+                'failed': [{'chat_id': cid, 'error': str(e)} for cid in chat_ids]}
 
 
 def send_json(handler, status, data):

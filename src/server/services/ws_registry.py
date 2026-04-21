@@ -405,7 +405,8 @@ class WebSocketRegistry:
         return True
 
     def prepare_authorization(self, owner_id: str, request_id: str,
-                              auth_token: str, binding_params: Dict[str, Any]) -> bool:
+                              auth_token: str, binding_params: Dict[str, Any],
+                              merge: bool = True) -> bool:
         """原子地设置 auth_token、绑定参数，并关闭其他 pending 连接
 
         将 set_pending_auth_token + set_pending_binding_params + remove_other_pendings
@@ -416,6 +417,7 @@ class WebSocketRegistry:
             request_id: 要授权的请求 ID
             auth_token: 认证令牌
             binding_params: 绑定参数
+            merge: 是否合并已有参数（True，默认）还是覆盖（False）
 
         Returns:
             True 表示 request_id 对应的 pending 连接仍存在且设置成功，
@@ -440,7 +442,13 @@ class WebSocketRegistry:
             # 设置绑定参数
             if owner_id not in self._pending_binding_params:
                 self._pending_binding_params[owner_id] = {}
-            self._pending_binding_params[owner_id][request_id] = binding_params
+            if merge and request_id in self._pending_binding_params.get(owner_id, {}):
+                # 合并模式：用新值更新已有字段，已有但未传入的字段保持不变
+                existing = self._pending_binding_params[owner_id][request_id]
+                existing.update(binding_params)
+            else:
+                # 覆盖模式：直接替换
+                self._pending_binding_params[owner_id][request_id] = binding_params
 
             # 移除其他 pending 连接
             pendings = self._pending[owner_id]

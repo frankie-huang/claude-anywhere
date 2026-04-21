@@ -98,7 +98,7 @@ class AutoRegister:
 
     def _register(self):
         """执行注册"""
-        from config import FEISHU_REPLY_IN_THREAD, DEFAULT_CHAT_DIR, DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands
+        from config import FEISHU_REPLY_IN_THREAD, FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR, DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands
 
         logger.info(
             f"[auto-register] Starting registration in background: "
@@ -111,6 +111,7 @@ class AutoRegister:
             self._owner_id,
             register_url,
             reply_in_thread=FEISHU_REPLY_IN_THREAD,
+            session_mode=FEISHU_SESSION_MODE,
             claude_commands=get_claude_commands(),
             default_chat_dir=DEFAULT_CHAT_DIR,
             default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD
@@ -127,6 +128,7 @@ class AutoRegister:
         owner_id: str,
         register_url: str,
         reply_in_thread: bool = False,
+        session_mode: str = '',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
         default_chat_follow_thread: bool = True
@@ -150,7 +152,8 @@ class AutoRegister:
         request_data = {
             'callback_url': callback_url,
             'owner_id': owner_id,
-            'reply_in_thread': reply_in_thread
+            'reply_in_thread': reply_in_thread,
+            'session_mode': session_mode
         }
         # 添加 claude_commands（如果提供）
         if claude_commands:

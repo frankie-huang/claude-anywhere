@@ -14,20 +14,27 @@ GET 路由:
 POST 路由:
 - /cb/register: 接收飞书网关通知的 auth_token
 - /cb/check-owner: 验证 owner_id 是否属于该 Callback 后端
+- /cb/decision: 接收飞书网关转发的决策请求
 - /cb/session/get-chat-id: 根据 session_id 获取 chat_id
 - /cb/session/get-last-message-id: 获取 session 的最近消息 ID
 - /cb/session/set-last-message-id: 设置 session 的最近消息 ID
 - /cb/session/check-skip-user-prompt: 检查并清除跳过用户 prompt 标志
-- /cb/decision: 接收飞书网关转发的决策请求
+- /cb/session/ensure-chat: 确保 session 有 chat_id（group 模式懒创建群聊）
+- /cb/session/resolve-group-chat: 通过 chat_id 反查 session_id
+- /cb/session/attach: 将指定 session 绑定到目标群聊
 - /cb/claude/new: 新建 Claude 会话
 - /cb/claude/continue: 继续 Claude 会话
 - /cb/claude/recent-dirs: 获取近期工作目录
 - /cb/claude/browse-dirs: 浏览子目录
+- /cb/groups/list: 列出活跃群聊
+- /cb/groups/dissolve: 批量解散群聊
 """
 
 import logging
 import os
-from typing import Any, Callable, Dict, Tuple
+import threading
+import time
+from typing import Any, Callable, Dict, List, Tuple
 
 from services.auth_token import check_global_auth_token
 from services.request_manager import RequestManager
@@ -35,7 +42,7 @@ from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
 from handlers.claude import handle_continue_session, handle_new_session
-from handlers.utils import send_json, send_html_response
+from handlers.utils import send_json, send_html_response, create_feishu_group, dissolve_feishu_groups
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +203,7 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     store = SessionChatStore.get_instance()
     chat_id = ''
     if store:
-        chat_id = store.get(session_id) or ''
+        chat_id = store.get_chat_id(session_id) or ''
 
     return 200, {'chat_id': chat_id}
 
@@ -427,6 +434,378 @@ def handle_browse_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
 
 
 # =============================================
+# 群聊管理路由
+# =============================================
+
+# ensure-chat 并发锁：防止同一 session 同时创建多个群聊
+# 注意：创建失败时故意不清理 per-session 锁。如果失败时也 pop，会出现竞态：
+#   线程 B 持有旧锁对象等待中 → A 失败 pop 锁 → C 进来创建新锁 →
+#   B 和 C 持有不同锁对象，互斥失效，导致同一 session 重复创建群聊。
+# 失败后锁保留在 dict 中，后续线程复用同一把锁，保证互斥正确。
+# 只有成功路径（chat_id 已持久化）才清理，因为后续调用在锁外首次检查即命中。
+_ensure_chat_locks: Dict[str, threading.Lock] = {}
+_ensure_chat_global_lock = threading.Lock()
+
+
+def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """确保 session 有对应的 chat_id（group 模式下懒创建群聊）
+
+    调用方:
+    - 飞书网关 feishu.py: /new 命令处理后立即调用，创建失败仅 warning，不影响 session 创建
+    - Shell 脚本 feishu.sh (_resolve_chat_id): 启动时调用，返回空则 fallback 到 FEISHU_CHAT_ID
+    """
+    from services.group_seq_store import GroupSeqStore
+    from services.session_chat_store import SessionChatStore
+    from config import FEISHU_SESSION_MODE, FEISHU_GROUP_NAME_PREFIX
+
+    if not check_global_auth_token(headers, '/cb/session/ensure-chat'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '')
+    project_dir = data.get('project_dir', '')
+
+    if not session_id:
+        return 400, {'error': 'Missing session_id'}
+
+    seq_store = GroupSeqStore.get_instance()
+    session_store = SessionChatStore.get_instance()
+    if not session_store or not seq_store:
+        return 500, {'error': 'Store not initialized'}
+
+    # 已有 chat_id 则直接返回
+    existing = session_store.get_chat_id(session_id)
+    if existing:
+        return 200, {'chat_id': existing}
+
+    # 判断是否需要创建群聊：正常流程中 session 由 handle_new_session 创建，
+    # group_active 字段一定存在。session 记录不存在时（存储异常、过期被清理等）
+    # 降级为全局配置，相当于将该 session 重新初始化为当前模式。
+    session_data = session_store.get_session(session_id)
+    group_active = session_data.get('group_active') if session_data else (FEISHU_SESSION_MODE == 'group')
+    if not group_active:
+        return 200, {'chat_id': ''}
+
+    # per-session 锁防止并发创建
+    with _ensure_chat_global_lock:
+        if session_id not in _ensure_chat_locks:
+            _ensure_chat_locks[session_id] = threading.Lock()
+        lock = _ensure_chat_locks[session_id]
+
+    with lock:
+        # 二次检查（锁内）
+        existing = session_store.get_chat_id(session_id)
+        if existing:
+            return 200, {'chat_id': existing}
+
+        # 构建群聊名称：{前缀} - {目录名} - {MMdd HH:mm:ss}
+        dir_name = os.path.basename(project_dir) if project_dir else ''
+        if len(dir_name) > 30:
+            dir_name = dir_name[:29] + '\u2026'  # U+2026 "…" 省略号，单字符，截断后总长仍为 30
+        timestamp = time.strftime('%m%d %H:%M:%S')
+        if dir_name:
+            name = f"{FEISHU_GROUP_NAME_PREFIX} - {dir_name} - {timestamp}"
+        else:
+            name = f"{FEISHU_GROUP_NAME_PREFIX} - {timestamp}"
+
+        # 创建群聊
+        ok, result = create_feishu_group(name)
+        if not ok:
+            logger.error("[ensure-chat] Failed to create group: %s", result)
+            return 500, {'error': 'Failed to create group: %s' % result}
+
+        chat_id = result
+        # 顺序：allocate seq → save session。
+        # 若中间崩溃，留下"有 seq 无 session 引用"的孤儿群：/groups list 可见、
+        # _dissolve_idle_groups 按 seq.created_at 兜底回收，不会永久失控。
+        # 反过来先 save session 再 allocate 的话，中间崩溃会留下 group_active=True
+        # 但 seq 缺失的 session，/groups 命令看不到该群、无法在线管理。
+        seq = seq_store.allocate(chat_id)
+        session_store.save(session_id, chat_id, group_active=True, project_dir=project_dir)
+        logger.info("[ensure-chat] Created group #%d: session=%s, chat_id=%s", seq, session_id, chat_id)
+
+        # 创建成功后清理 per-session 锁：chat_id 已持久化，
+        # 后续调用在锁外首次检查即命中，此锁不再被使用
+        with _ensure_chat_global_lock:
+            _ensure_chat_locks.pop(session_id, None)
+
+        return 200, {'chat_id': chat_id}
+
+
+def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """按前缀查找 session 并在唯一匹配时绑定到目标群聊
+
+    callback 只负责数据层：返回匹配情况和绑定结果，不生成用户提示。
+    网关侧根据 matched_ids 和 attached 自行构造反馈消息。
+
+    调用方 (飞书网关 feishu.py):
+    - /attach 命令: _handle_attach_command() 用户在群聊中执行
+
+    请求:
+        - session_prefix: session_id 前缀
+        - chat_id: 目标群聊 ID
+
+    响应:
+        {
+            'matched_ids': list[str],      # 前缀匹配到的全部 session_id
+            'attached': bool,              # 是否执行了绑定（仅唯一匹配时为 True）
+            'session_id': str,             # 绑定的 session_id（attached=True 时有值）
+            'original_chat_id': str,       # session 绑定前的 chat_id（attached=True 时有值）
+            'original_seq': int | None,    # 原群聊的 seq（仅当原群是服务创建时非 None）
+            'dissolve_days': int,          # FEISHU_GROUP_DISSOLVE_DAYS 配置值，0 表示未启用自动解散
+        }
+    """
+    from services.session_chat_store import SessionChatStore
+    from services.group_seq_store import GroupSeqStore
+    from config import FEISHU_GROUP_DISSOLVE_DAYS
+
+    if not check_global_auth_token(headers, '/cb/session/attach'):
+        return 401, {'error': 'Unauthorized'}
+
+    prefix = data.get('session_prefix', '').strip()
+    target_chat_id = data.get('chat_id', '').strip()
+    if not prefix or not target_chat_id:
+        return 400, {'error': 'Missing session_prefix or chat_id'}
+
+    session_store = SessionChatStore.get_instance()
+    seq_store = GroupSeqStore.get_instance()
+    if not session_store or not seq_store:
+        return 500, {'error': 'Store not initialized'}
+
+    matches = session_store.find_by_prefix(prefix)
+    result = {
+        'matched_ids': list(matches.keys()),
+        'attached': False,
+        'session_id': '',
+        'original_chat_id': '',
+        'original_seq': None,
+        'dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+    }
+
+    if len(matches) != 1:
+        return 200, result
+
+    session_id, session_data = next(iter(matches.items()))
+    original_chat_id = session_data.get('chat_id', '')
+
+    # 执行迁移（save 会自动处理 chat_id 变更、dissolved 复活、反向索引等）
+    session_store.save(session_id, target_chat_id, group_active=True)
+
+    # 仅当原群聊不同于目标群聊时才返回 seq，避免提示用户"孤儿群"实际是当前群
+    original_seq = None
+    if original_chat_id and original_chat_id != target_chat_id:
+        original_seq = seq_store.get_seq(original_chat_id)
+
+    result.update({
+        'attached': True,
+        'session_id': session_id,
+        'original_chat_id': original_chat_id,
+        'original_seq': original_seq,
+    })
+
+    logger.info("[session-attach] %s: %s -> %s (original_seq=%s)",
+                session_id, original_chat_id or '-', target_chat_id, result['original_seq'])
+    return 200, result
+
+
+def handle_resolve_group_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """通过 chat_id 反查 session_id
+
+    调用方 (均为飞书网关 feishu.py):
+    - 群聊普通消息处理: 通过 chat_id 找到对应 session，转发为 /continue
+    - /new 命令处理: 群聊中发起 /new 时，查询该群是否已绑定 session，继承工作目录和命令
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/resolve-group-chat'):
+        return 401, {'error': 'Unauthorized'}
+
+    chat_id = data.get('chat_id', '')
+    if not chat_id:
+        return 400, {'error': 'Missing chat_id'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    session_id = store.get_session_by_chat_id(chat_id)
+    if not session_id:
+        return 200, {'session_id': '', 'project_dir': '', 'claude_command': ''}
+
+    session_data = store.get_session(session_id)
+    project_dir = session_data.get('project_dir', '') if session_data else ''
+    claude_command = session_data.get('claude_command', '') if session_data else ''
+    return 200, {'session_id': session_id, 'project_dir': project_dir, 'claude_command': claude_command}
+
+
+def handle_groups_list(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """列出活跃群聊
+
+    调用方 (飞书网关 feishu.py):
+    - /groups 命令: _list_groups() 展示当前活跃群聊列表
+
+    数据源：
+    - GroupSeqStore：服务创建群聊的清单和 seq
+    - SessionChatStore：每个 chat_id 对应 session 的 project_dir 和最近活跃时间
+    """
+    from services.session_chat_store import SessionChatStore
+    from services.group_seq_store import GroupSeqStore
+
+    if not check_global_auth_token(headers, '/cb/groups/list'):
+        return 401, {'error': 'Unauthorized'}
+
+    seq_store = GroupSeqStore.get_instance()
+    session_store = SessionChatStore.get_instance()
+    if not seq_store or not session_store:
+        return 500, {'error': 'Store not initialized'}
+
+    chat_last_active = session_store.get_chat_last_active()
+    # 一次性拿全量 session，后续按 session_id 索引，避免循环内反复加锁读文件
+    sessions = session_store.get_all()
+
+    groups = []
+    for entry in seq_store.get_all():
+        chat_id = entry['chat_id']
+        # 查 active session 的 project_dir（仅用于展示）
+        project_dir = ''
+        session_id = session_store.get_session_by_chat_id(chat_id)
+        # 有 session_id 关联，说明该群聊有活跃会话；否则为孤儿群——可能是该群聊的
+        # 最近会话已被 attach 到其他群聊（group_active 转移）、session 记录已过期清理等
+        if session_id:
+            session_data = sessions.get(session_id)
+            if session_data:
+                project_dir = session_data.get('project_dir', '')
+        # 孤儿群（无活跃 session 关联）用 created_at 兜底
+        updated_at = chat_last_active.get(chat_id, entry.get('created_at', 0))
+        groups.append({
+            'chat_id': chat_id,
+            'group_seq': entry['seq'],
+            'project_dir': project_dir,
+            'updated_at': updated_at,
+        })
+    # 按 updated_at 降序（最近活跃的在前）
+    groups.sort(key=lambda x: x['updated_at'], reverse=True)
+    return 200, {'groups': groups}
+
+
+def dissolve_groups_by_targets(chat_ids: List[str]) -> Dict[str, Any]:
+    """批量解散群聊并清理相关 session 状态
+
+    调用方:
+    - handle_groups_dissolve(): /groups dissolve 命令，按序号或全部解散群聊
+    - _dissolve_idle_groups() (main.py): 自动解散空闲群聊
+
+    归属判断（是否服务创建）由网关侧 batch_dissolve_groups 完成，
+    callback 侧只负责 session 映射清理。
+
+    Args:
+        chat_ids: 待解散的群聊 ID 列表
+
+    Returns:
+        {'dissolved_count': int, 'dissolved_items': list, 'skipped_count': int,
+         'failed': list (optional)}
+    """
+    if not chat_ids:
+        return {'dissolved_count': 0, 'dissolved_items': [], 'skipped_count': 0}
+
+    from services.session_chat_store import SessionChatStore
+    from services.group_seq_store import GroupSeqStore
+
+    session_store = SessionChatStore.get_instance()
+    seq_store = GroupSeqStore.get_instance()
+    if not session_store or not seq_store:
+        return {
+            'dissolved_count': 0,
+            'dissolved_items': [],
+            'skipped_count': 0,
+            'failed': [{'chat_id': cid, 'error': 'Store not initialized'}
+                       for cid in chat_ids],
+        }
+
+    # 批量解散（网关内部按归属判断，非服务群聊会进入 skipped_items）
+    resp = dissolve_feishu_groups(chat_ids)
+    dissolved_items = resp['dissolved_items']
+    skipped_items = resp.get('skipped_items', [])
+    failed_items = resp.get('failed', [])
+
+    # 按 chat_id 批量标记所有相关 session 为 dissolved，并清理 GroupSeqStore 记录
+    for chat_id in dissolved_items:
+        session_store.mark_dissolved(chat_id)
+        seq_store.remove(chat_id)
+
+    # 脏 seq 清理：skipped = 网关 GroupChatStore 无该群归属（已解散/从未归属），
+    # callback 侧保留 seq 会被 /groups list、自动解散反复扫到
+    for chat_id in skipped_items:
+        if seq_store.remove(chat_id):
+            logger.info("[groups-dissolve] Purged dangling seq for chat_id=%s (gateway reported skipped)", chat_id)
+
+    logger.info("[groups-dissolve] Dissolved %d groups (skipped %d, failed %d)",
+                len(dissolved_items), len(skipped_items), len(failed_items))
+    result = {
+        'dissolved_count': len(dissolved_items),
+        'dissolved_items': dissolved_items,
+        'skipped_count': len(skipped_items),
+    }
+    if failed_items:
+        result['failed'] = failed_items
+    return result
+
+
+def handle_groups_dissolve(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """按 seqs 或 all 查询解散群聊（HTTP 路由 POST /cb/groups/dissolve）
+
+    调用方 (飞书网关 feishu.py):
+    - /groups dissolve 命令: _dissolve_groups() 按序号或全部解散群聊
+
+    请求 data:
+    - all: bool，true 表示解散全部活跃群聊
+    - seqs: List[int]，按 group_seq 序号解散（all 为 false 时必需）
+
+    响应 body:
+    - dissolved_count: int，成功解散数
+    - dissolved_items: List[str]，成功解散的 chat_id 列表
+    - skipped_count: int，跳过的外部群聊数
+    - failed: List[{seq, chat_id, error}]，失败明细（可选）
+    """
+    from services.session_chat_store import SessionChatStore
+    from services.group_seq_store import GroupSeqStore
+
+    if not check_global_auth_token(headers, '/cb/groups/dissolve'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_store = SessionChatStore.get_instance()
+    seq_store = GroupSeqStore.get_instance()
+    if not session_store or not seq_store:
+        return 500, {'error': 'Store not initialized'}
+
+    # 确定目标 chat_id 列表，同时构建 chat_id → seq 快照用于 failed 回填
+    # 快照必须在 dissolve 前建立：dissolve 成功会 remove seq，事后回查拿不到
+    if data.get('all'):
+        entries = seq_store.get_all()
+        chat_ids = [entry['chat_id'] for entry in entries]
+        chat_to_seq = {entry['chat_id']: entry['seq'] for entry in entries}
+    else:
+        seqs = data.get('seqs', [])
+        if not seqs:
+            return 400, {'error': 'Missing seqs or all'}
+        # 走内存索引，零 I/O；同时 dict 自动去重，避免用户输入重复 seq 时下游幂等被重复触发
+        chat_to_seq = {}
+        for s in seqs:
+            cid = seq_store.get_chat_by_seq(s)
+            if cid:
+                chat_to_seq[cid] = s
+        chat_ids = list(chat_to_seq.keys())
+
+    result = dissolve_groups_by_targets(chat_ids)
+
+    # 回填 seq：网关侧返回的 failed 只带 chat_id，seq 是 callback 的业务概念，
+    # 在响应层按 chat_id 反查补齐，避免用户侧失败反馈丢失群聊序号。
+    if result.get('failed'):
+        for item in result['failed']:
+            item['seq'] = chat_to_seq.get(item.get('chat_id', ''), 0)
+    return 200, result
+
+
+# =============================================
 # POST 路由表 — 纯函数签名: (data, headers) → (status, body)
 # =============================================
 
@@ -436,16 +815,21 @@ PostRouteHandler = Callable[[Dict[str, Any], Dict[str, str]], Tuple[int, Dict[st
 BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/register': handle_register_callback_route,
     '/cb/check-owner': handle_check_owner_id_route,
+    '/cb/decision': handle_callback_decision,
     '/cb/session/get-chat-id': handle_get_chat_id,
     '/cb/session/get-last-message-id': handle_get_last_message_id,
     '/cb/session/set-last-message-id': handle_set_last_message_id,
     '/cb/session/check-skip-user-prompt': handle_check_skip_user_prompt,
-    '/cb/decision': handle_callback_decision,
+    '/cb/session/ensure-chat': handle_ensure_chat,
+    '/cb/session/resolve-group-chat': handle_resolve_group_chat,
+    '/cb/session/attach': handle_session_attach,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,
     '/cb/claude/record-dir-usage': handle_record_dir_usage,
     '/cb/claude/recent-dirs': handle_recent_dirs,
     '/cb/claude/browse-dirs': handle_browse_dirs,
+    '/cb/groups/list': handle_groups_list,
+    '/cb/groups/dissolve': handle_groups_dissolve,
 }
 
 # =============================================

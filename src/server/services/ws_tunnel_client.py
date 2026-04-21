@@ -48,6 +48,7 @@ class WSTunnelClient:
 
     def __init__(self, gateway_url: str, owner_id: str,
                  reply_in_thread: bool = False,
+                 session_mode: str = '',
                  claude_commands: Optional[List[str]] = None,
                  default_chat_dir: str = '',
                  default_chat_follow_thread: bool = True) -> None:
@@ -56,6 +57,7 @@ class WSTunnelClient:
             gateway_url: 网关 HTTP base URL（如 http://gateway:8080）
             owner_id: 飞书用户 ID
             reply_in_thread: 是否使用回复话题模式
+            session_mode: 会话模式（message/thread/group）
             claude_commands: 可用的 Claude 命令列表
             default_chat_dir: 默认聊天目录
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
@@ -63,6 +65,7 @@ class WSTunnelClient:
         self.gateway_url = gateway_url
         self.owner_id = owner_id
         self.reply_in_thread = reply_in_thread
+        self.session_mode = session_mode
         self.claude_commands = claude_commands
         self.default_chat_dir = default_chat_dir
         self.default_chat_follow_thread = default_chat_follow_thread
@@ -177,7 +180,8 @@ class WSTunnelClient:
         register_data = {
             'type': 'register',
             'owner_id': self.owner_id,
-            'reply_in_thread': self.reply_in_thread
+            'reply_in_thread': self.reply_in_thread,
+            'session_mode': self.session_mode
         }
         if self.claude_commands:
             register_data['claude_commands'] = self.claude_commands
@@ -441,6 +445,7 @@ _client_instance: Optional['WSTunnelClient'] = None
 
 def start_ws_tunnel_client(gateway_url: str, owner_id: str,
                            reply_in_thread: bool = False,
+                           session_mode: str = '',
                            claude_commands: Optional[List[str]] = None,
                            default_chat_dir: str = '',
                            default_chat_follow_thread: bool = True) -> WSTunnelClient:
@@ -450,6 +455,7 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
         gateway_url: 网关 HTTP base URL（如 http://gateway:8080）
         owner_id: 飞书用户 ID
         reply_in_thread: 是否使用回复话题模式
+        session_mode: 会话模式（message/thread/group）
         claude_commands: 可用的 Claude 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
@@ -466,6 +472,7 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
     _client_instance = WSTunnelClient(
         gateway_url, owner_id,
         reply_in_thread=reply_in_thread,
+        session_mode=session_mode,
         claude_commands=claude_commands,
         default_chat_dir=default_chat_dir,
         default_chat_follow_thread=default_chat_follow_thread

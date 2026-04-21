@@ -180,6 +180,24 @@ def get_claude_commands() -> List[str]:
     return [raw]
 
 
+def get_session_mode() -> str:
+    """获取会话模式
+
+    优先级：
+    1. FEISHU_SESSION_MODE 显式配置（message/thread/group）
+    2. 向后兼容：FEISHU_REPLY_IN_THREAD=true → 'thread'
+    3. 默认：'message'
+    """
+    mode = get_config('FEISHU_SESSION_MODE', '')
+    if mode in ('message', 'thread', 'group'):
+        return mode
+    # 向后兼容：读取已废弃的 FEISHU_REPLY_IN_THREAD
+    reply_in_thread = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
+    if reply_in_thread:
+        return 'thread'
+    return 'message'
+
+
 def reload_config():
     """重新加载 .env 文件
 
@@ -291,6 +309,13 @@ if FEISHU_SEND_MODE == 'openapi':
     # - 分离部署（True）：纯 Callback 后端，连接远程网关
     IS_CALLBACK_BACKEND = bool(_FEISHU_GATEWAY_URL_RAW)
 
+# 飞书事件接收模式: auto / http / longpoll
+# - auto: 自动检测（默认）- 有 lark-oapi 则 longpoll，否则 http
+# - http: 传统 HTTP 回调模式（需要公网端点）
+# - longpoll: WebSocket 长连接模式（网关主动连接飞书，无需公网端点）
+# 注: 一般无需配置，auto 自动选择，不在 .env.example 中暴露
+FEISHU_EVENT_MODE = get_config('FEISHU_EVENT_MODE', 'auto')
+
 # 默认聊天目录（配置后普通消息自动创建/继续会话）
 # 支持 ~ 开头的路径，自动展开为用户主目录
 DEFAULT_CHAT_DIR = os.path.expanduser(get_config('DEFAULT_CHAT_DIR', ''))
@@ -305,9 +330,9 @@ DEFAULT_CHAT_FOLLOW_THREAD = get_config('DEFAULT_CHAT_FOLLOW_THREAD', 'true').lo
 # False (默认): 回复消息正常显示在群聊主界面
 FEISHU_REPLY_IN_THREAD = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
 
-# 飞书事件接收模式: auto / http / longpoll
-# - auto: 自动检测（默认）- 有 lark-oapi 则 longpoll，否则 http
-# - http: 传统 HTTP 回调模式（需要公网端点）
-# - longpoll: WebSocket 长连接模式（网关主动连接飞书，无需公网端点）
-# 注: 一般无需配置，auto 自动选择，不在 .env.example 中暴露
-FEISHU_EVENT_MODE = get_config('FEISHU_EVENT_MODE', 'auto')
+# 会话模式：message（普通消息）/ thread（话题回复）/ group（独立群聊）
+FEISHU_SESSION_MODE = get_session_mode()
+
+# 群聊模式配置
+FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Claude')
+FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
