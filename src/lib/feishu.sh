@@ -183,24 +183,26 @@ render_template() {
             fi
         fi
 
-        # 转义 awk gsub 的特殊字符
-        # 注意: ENVIRON 传递的字符串中只有 & 是特殊字符(代表匹配内容)
-        # \ 不会被 gsub 特殊处理，所以只需转义 &
-        value=$(printf '%s' "$value" | sed 's/&/\\&/g')
-
-        # 使用 awk 进行替换
-        # 通过 ENVIRON 传递变量避免 shell 展开问题
+        # tr -c 将非 [a-zA-Z0-9_] 字符替换为 _，防止 key 注入 awk 代码
         local awk_key="TEMPLATE_KEY_$(echo "$key" | tr -c 'a-zA-Z0-9_' '_')"
         local awk_val="TEMPLATE_VAL_$(echo "$key" | tr -c 'a-zA-Z0-9_' '_')"
         export "$awk_key"="{{$key}}"
         export "$awk_val"="$value"
 
-        template_content=$(awk "
+        # 使用 awk index+substr 进行字面替换（避免 gsub 对 \ 和 & 的特殊解释）
+        # 通过 ENVIRON 传递变量避免 shell 展开问题
+        template_content=$(awk '
         {
-            gsub(ENVIRON[\"$awk_key\"], ENVIRON[\"$awk_val\"])
-            print
+            key = ENVIRON["'"$awk_key"'"]
+            val = ENVIRON["'"$awk_val"'"]
+            out = ""
+            while ((i = index($0, key)) > 0) {
+                out = out substr($0, 1, i-1) val
+                $0 = substr($0, i + length(key))
+            }
+            print out $0
         }
-        " <<< "$template_content")
+        ' <<< "$template_content")
 
         # 清理环境变量
         unset "$awk_key" "$awk_val"

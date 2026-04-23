@@ -25,6 +25,8 @@ POST 路由:
 - /cb/claude/browse-dirs: 浏览子目录
 """
 
+import base64
+import json
 import logging
 import os
 from typing import Any, Callable, Dict, Tuple
@@ -286,6 +288,64 @@ def handle_check_skip_user_prompt(data: Dict[str, Any], headers: Dict[str, str])
     return 200, {'skip': skip}
 
 
+def _extract_answers_from_form_value(form_value: Dict[str, Any],
+                                     questions: list) -> Dict[str, str]:
+    """按飞书卡片 form_value 约定（字段命名由 src/lib/feishu.sh 写死）构造 answers。
+
+    Args:
+        form_value: 飞书 card.action 回调里的 event.action.form_value 原值，按题
+            号索引编码（不含 question 原文）:
+
+                {
+                  "q_{i}_select": str | List[str],  # i 为题号（0-based）
+                                                     #   单选题 -> str（未选为 ""）
+                                                     #   多选题 -> List[str]（未选为 []）
+                  "q_{i}_custom": str                # 自定义输入框（未填为 ""）
+                }
+
+        questions: AskUserQuestion 的原始 questions 数组（Claude 工具协议），
+            每项至少含 `question` 字段用作 answers 的 key；数组顺序与
+            form_value 里的索引 i 一致。
+
+    Returns:
+        {question_text: answer_str} 字典，按 questions 顺序填充。
+
+        - 多选（select_value 是 list）：合并 select 选项 + custom 输入，
+          英文逗号 + 空格分隔，例：``"Python, TypeScript, 自定义内容"``
+        - 单选：custom 非空时优先用 custom（覆盖下拉），否则用 select；
+          两者都空则为 ``""``
+
+    最终被 Claude 模型消费（通过 hookSpecificOutput.decision.updatedInput 注入
+    AskUserQuestion 工具返回值）。
+
+    已知协议约束（不是本函数可改）:
+        - Claude Code 的 AskUserQuestion hook 协议要求 answers 的 value 为 str
+          （社区验证，见 openspec archive `add-ask-user-question-approval`），
+          多选答案按 ", " 拼接，不要改成 List[str] 或其它分隔符。
+        - 未验证场景：option label 或用户 custom 输入本身含 ", " 子串时，
+          Claude 侧如何解析多选答案未实测；理论上可能产生边界歧义，但也可能
+          Claude 会结合原 questions.options 反查消歧。遇到相关问题再补实验。
+          待 Claude Code 为 AskUserQuestion 提供独立 hook event 并支持结构化
+          answers 后可根治（参考 anthropics/claude-code#12605）。
+    """
+    answers: Dict[str, str] = {}
+    for i, q in enumerate(questions):
+        question_text = q.get('question', '')
+        select_value = form_value.get(f'q_{i}_select', '')
+        custom_value = form_value.get(f'q_{i}_custom', '')
+
+        if isinstance(select_value, list):
+            labels = list(select_value)
+            if custom_value:
+                labels.append(custom_value)
+            answer = ', '.join(labels) if labels else ''
+        else:
+            answer = custom_value if custom_value else (select_value or '')
+
+        answers[question_text] = answer
+    return answers
+
+
 def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """处理纯决策请求（供飞书网关或其他服务调用）
 
@@ -302,8 +362,8 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
             - action: 动作类型 (allow/always/deny/interrupt/answer)
             - request_id: 请求 ID
             - project_dir: 项目目录（可选，用于 always 写入规则）
-            - answers: AskUserQuestion 的答案字典（仅 action=answer 时使用）
-            - questions: AskUserQuestion 的原始问题数组（仅 action=answer 时使用）
+            - form_value: 飞书卡片 card.action 回调里的 form_value 原值，其具体
+              schema 由 action 决定（action=answer 时的格式见下方分支注释）
         headers: 请求头字典
     """
     # 验证 auth_token（飞书网关调用）
@@ -317,8 +377,7 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
     action = data.get('action', '')
     request_id = data.get('request_id', '')
     project_dir = data.get('project_dir', '')
-    answers = data.get('answers')
-    questions = data.get('questions')
+    form_value = data.get('form_value')
 
     logger.info("[cb/decision] action=%s, request_id=%s", action, request_id)
 
@@ -331,11 +390,71 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
             'message': '无效的请求参数'
         }
 
-    # 调用纯决策接口
-    success, decision, message = handle_decision(
-        request_id, action, project_dir,
-        answers=answers, questions=questions
-    )
+    if action == 'answer':
+        # action=answer 时 form_value 为 AskUserQuestion 卡片的表单提交值，
+        # schema（字段命名由 src/lib/feishu.sh 渲染时写死）:
+        #   {
+        #     "q_{i}_select": str | List[str],   # i 为题号（0-based）
+        #                                         #   单选题 -> str（未选为 ""）
+        #                                         #   多选题 -> List[str]（未选为 []）
+        #     "q_{i}_custom": str                 # 自定义输入框（未填为 ""）
+        #   }
+        # 不含 question 原文，只有索引；需要结合 RequestManager 里该 request 的
+        # questions_encoded（Claude AskUserQuestion 的原始 questions 数组 base64）
+        # 反查 question 原文后构造 answers: {question_text: answer_str}。
+        #
+        # 其它 action 类型（allow/always/deny/interrupt）目前不使用 form_value；
+        # 若未来新增用例，请在对应分支内补充自己的 schema 说明，避免混淆。
+        if form_value is None:
+            logger.warning("[cb/decision] answer action missing form_value: %s", request_id)
+            return 400, {
+                'success': False,
+                'decision': None,
+                'message': '缺少 form_value'
+            }
+        req_data = RequestManager.get_instance().get_request_data(request_id)
+        if not req_data:
+            logger.warning("[cb/decision] Request not found: %s", request_id)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '请求不存在或已过期'
+            }
+        questions_encoded = req_data.get('questions_encoded', '')
+        if not questions_encoded:
+            logger.warning("[cb/decision] No questions_encoded for request: %s", request_id)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据不存在'
+            }
+        try:
+            questions_json = base64.b64decode(questions_encoded.encode()).decode('utf-8')
+            questions = json.loads(questions_json)
+        except Exception as e:
+            logger.error("[cb/decision] Failed to decode questions: %s", e)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据解析失败'
+            }
+        if not questions:
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据不存在'
+            }
+        answers = _extract_answers_from_form_value(form_value, questions)
+        logger.info("[cb/decision] answers built from form_value: %s",
+                    json.dumps(answers, ensure_ascii=False))
+
+        success, decision, message = handle_decision(
+            request_id, action,
+            answers=answers, questions=questions
+        )
+    else:
+        # 其它 action（allow/always/deny/interrupt）：只需 project_dir，无需 answers/questions
+        success, decision, message = handle_decision(request_id, action, project_dir)
 
     logger.info(
         "[cb/decision] result: request_id=%s, success=%s, decision=%s, message=%s",

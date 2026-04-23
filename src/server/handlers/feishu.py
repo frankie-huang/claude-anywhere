@@ -12,7 +12,6 @@ WebSocket 隧道支持：
     - 适用于 Callback 后端不可公网访问的场景（本地开发、内网部署）
 """
 
-import base64
 import copy
 import hmac
 import json
@@ -1936,6 +1935,53 @@ def _add_typing_reaction(card_message_id: str):
         service.add_reaction(card_message_id, 'Typing')
 
 
+def _apply_custom_overrides(form_value: Dict[str, Any]) -> Tuple[Dict[str, Any], List[int]]:
+    """让单选题的 q_{i}_custom 覆盖 q_{i}_select，返回清理后的 form_value 副本
+    和被覆盖的题号列表。
+
+    form_value 字段命名（q_{i}_select / q_{i}_custom）由 src/lib/feishu.sh
+    渲染卡片时写死。本函数集中处理该约定：
+
+    - **判定**：单选题同时有非空 q_{i}_select 和 q_{i}_custom 时视为"覆盖"。
+      多选题（select 值是 list）不存在覆盖语义；未选中（空串）也不算。
+    - **清理**：从 form_value 副本中剥离被覆盖题目的 q_{i}_select 字段，
+      使卡片更新时只回显用户最终的 custom 内容。
+    - **题号**：0-based 升序列表，供 toast 文案使用（展示时由调用方 +1
+      转成"第 X 题"）。
+
+    不修改入参；返回的是新的 dict。
+
+    Returns:
+        (cleaned_form_value, overridden_indices)
+    """
+    cleaned = dict(form_value)  # 浅拷贝
+    prefix, suffix = 'q_', '_select'
+    overridden = []
+    for key, value in cleaned.items():
+        # 只看 q_{i}_select 字段；q_{i}_custom 及其它键由各自消费方处理
+        if not (key.startswith(prefix) and key.endswith(suffix)):
+            continue
+        # value 是 list -> 多选题（不存在"custom 覆盖 select"的语义）
+        # value 为空串 -> 单选未选中，自然谈不上覆盖
+        if isinstance(value, list) or not value:
+            continue
+        # 防御：过滤形如 q_foo_select 的异常键，保证 idx 是纯数字
+        idx_str = key[len(prefix):-len(suffix)]
+        if not idx_str.isdigit():
+            continue
+        idx = int(idx_str)
+        # 同题 custom 非空，才算"自定义输入覆盖了下拉"
+        if cleaned.get(f'q_{idx}_custom', ''):
+            overridden.append(idx)
+    overridden.sort()
+
+    # 延迟到识别完成后再剥离 select，避免迭代 dict 时修改导致 RuntimeError
+    for idx in overridden:
+        cleaned.pop(f'q_{idx}_select', None)
+
+    return cleaned, overridden
+
+
 def _handle_ask_question_answer(request_id: str, form_value: dict, original_data: dict,
                                 card_message_id: str = '') -> Tuple[bool, dict]:
     """处理 AskUserQuestion 表单提交
@@ -1967,84 +2013,15 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             }
         }
 
-    # 从 RequestManager 获取原始请求数据（包含 questions）
-    from services.request_manager import RequestManager
-    request_manager = RequestManager.get_instance()
-    req_data = request_manager.get_request_data(request_id)
+    # 单选题若 custom 非空则覆盖下拉：清除对应 q_{i}_select 字段并收集题号，
+    # 用于卡片更新展示和 toast 文案（多选题不存在覆盖语义）。
+    form_value, overridden_questions = _apply_custom_overrides(form_value)
 
-    if not req_data:
-        logger.warning("[feishu] Request not found: %s", request_id)
-        return True, {
-            'toast': {
-                'type': TOAST_ERROR,
-                'content': '请求不存在或已过期'
-            }
-        }
-
-    # 解码 questions（base64 编码）
-    questions_encoded = req_data.get('questions_encoded', '')
-    questions = []
-    if questions_encoded:
-        try:
-            questions_json = base64.b64decode(questions_encoded.encode()).decode('utf-8')
-            questions = json.loads(questions_json)
-        except Exception as e:
-            logger.error("[feishu] Failed to decode questions: %s", e)
-            return True, {
-                'toast': {
-                    'type': TOAST_ERROR,
-                    'content': '问题数据解析失败'
-                }
-            }
-
-    if not questions:
-        logger.warning("[feishu] No questions found for request: %s", request_id)
-        return True, {
-            'toast': {
-                'type': TOAST_ERROR,
-                'content': '问题数据不存在'
-            }
-        }
-
-    # 浅拷贝 form_value，避免修改调用方传入的原始数据
-    form_value = dict(form_value)
-
-    # 从 form_value 中提取答案
-    answers = {}
-    overridden_questions = []  # 记录自定义内容覆盖了选项的单选题
-    for i, q in enumerate(questions):
-        question_text = q.get('question', '')
-        select_name = f'q_{i}_select'
-        custom_name = f'q_{i}_custom'
-
-        select_value = form_value.get(select_name, '')
-        custom_value = form_value.get(custom_name, '')
-
-        # 处理多选情况（select_value 可能是列表）
-        if isinstance(select_value, list):
-            # 多选：选中的选项 + 自定义输入全部作为答案
-            selected_labels = list(select_value)
-            if custom_value:
-                selected_labels.append(custom_value)
-            answer = ', '.join(selected_labels) if selected_labels else ''
-        else:
-            # 单选：自定义输入优先（因为下拉选中后无法清空）
-            if custom_value and select_value:
-                overridden_questions.append((i + 1, select_value))
-                form_value.pop(select_name, None)  # 清除下拉值，确保卡片更新时只显示自定义选项
-            answer = custom_value if custom_value else (select_value or '')
-
-        answers[question_text] = answer
-        logger.debug("[feishu] Question %d: '%s' -> '%s'", i, question_text, answer)
-
-    logger.info("[feishu] AskUserQuestion answers: %s", json.dumps(answers, ensure_ascii=False))
-
-    # 构建请求数据
+    # 构建请求数据：只透传 form_value，由 callback 端生成 answers/questions
     request_data = {
         'action': 'answer',
         'request_id': request_id,
-        'answers': answers,
-        'questions': questions
+        'form_value': form_value,
     }
 
     start_time = time.time()
@@ -2074,7 +2051,7 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             toast_content = message or '已提交回答'
             # 如果有单选题被自定义内容覆盖，在提示中告知用户
             if overridden_questions:
-                nums = '、'.join(f'第{qnum}题' for qnum, _ in overridden_questions)
+                nums = '、'.join(f'第{idx + 1}题' for idx in overridden_questions)
                 toast_content += f'（{nums}的自定义内容已覆盖选项）'
             logger.info("[feishu] AskUserQuestion succeeded: decision=%s, elapsed=%.0fms", decision, elapsed)
             # 决策成功后，异步添加 Typing 表情
