@@ -383,40 +383,40 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
             - success=True, status='completed': 命令快速完成
             - success=False, error=...: 命令启动/执行失败
     """
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return Response.error('Session store not initialized')
+
     project_dir = data.get('project_dir', '')
     prompt = data.get('prompt', '')
     chat_id = data.get('chat_id', '') or ''  # 确保 None 转为空字符串
     claude_command = data.get('claude_command', '') or ''
+    # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
+    session_id = data.get('session_id', '') or str(uuid.uuid4())
 
     # 参数验证
     if not project_dir:
         return Response.error('Missing project_dir')
     if not prompt:
         return Response.error('Missing prompt')
-
     # 验证项目目录存在
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
-    # 验证 claude_command 合法性（如果指定了的话）
+    # 确定实际命令：网关传入 > store 已有值（/clear clone 继承）> 默认
     if claude_command:
+        # 验证 claude_command 合法性（如果指定了的话）
         from config import get_claude_commands
         if claude_command not in get_claude_commands():
             return Response.error('invalid claude_command')
-
-    # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
-    session_id = data.get('session_id', '') or str(uuid.uuid4())
-
+    else:
+        session_data = session_store.get_session(session_id)
+        claude_command = (session_data or {}).get('claude_command', '')
     actual_cmd = _get_claude_command(claude_command)
     logger.info(f"[claude-new] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
-    # 保存 session_id -> chat_id + claude_command 映射
     from config import FEISHU_SESSION_MODE
     is_group_mode = (FEISHU_SESSION_MODE == 'group')
-    session_store = SessionChatStore.get_instance()
-    if not session_store:
-        return Response.error('Session store not initialized')
-
     if is_group_mode and not chat_id:
         # group 模式无 chat_id → 委托给 do_ensure_chat 创建群聊并绑定
         from handlers.callback import do_ensure_chat

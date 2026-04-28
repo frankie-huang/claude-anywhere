@@ -853,6 +853,62 @@ def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
     }
 
 
+def handle_session_clone(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """以旧 session 为模板创建新 session 记录（/clear 用）
+
+    从旧 session 继承 project_dir + claude_command，创建新 session 记录绑定到 chat_id。
+    旧 session 不受影响（不标记 dissolved，不杀进程）。
+
+    调用方 (飞书网关 feishu.py):
+    - /clear 命令: 预创建新 session，等待下一条消息启动 Claude 进程
+
+    请求:
+        - old_session_id: 旧 Claude 会话 ID（用于读取继承属性）
+        - new_session_id: 新 Claude 会话 ID（由网关生成）
+        - chat_id: 飞书群聊 ID
+
+    响应:
+        {ok: true, project_dir: str}
+        旧 session 不存在时仍创建新记录（继承属性为空）
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/clone'):
+        return 401, {'error': 'Unauthorized'}
+
+    old_session_id = data.get('old_session_id', '').strip()
+    new_session_id = data.get('new_session_id', '').strip()
+    chat_id = data.get('chat_id', '').strip()
+
+    if not new_session_id:
+        return 400, {'error': 'Missing new_session_id'}
+    if not chat_id:
+        return 400, {'error': 'Missing chat_id'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    # 从旧 session 读取继承属性（允许 dissolved，只读不改）
+    project_dir = ''
+    claude_command = ''
+    if old_session_id:
+        old_item = store.get_session(old_session_id, include_dissolved=True)
+        if old_item:
+            project_dir = old_item.get('project_dir', '')
+            claude_command = old_item.get('claude_command', '')
+
+    # 创建新 session 记录
+    ok = store.save(new_session_id, chat_id,
+                    project_dir=project_dir, claude_command=claude_command)
+    if not ok:
+        return 500, {'error': 'Failed to save new session'}
+
+    logger.info("[session-clone] Cloned %s -> %s (chat=%s, dir=%s, cmd=%s)",
+                old_session_id, new_session_id, chat_id, project_dir, claude_command)
+    return 200, {'ok': True, 'project_dir': project_dir}
+
+
 # =============================================
 # POST 路由表 — 纯函数签名: (data, headers) → (status, body)
 # =============================================
@@ -872,6 +928,7 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/get-info': handle_get_session_info,
     '/cb/session/attach': handle_session_attach,
     '/cb/session/mute': handle_session_mute,
+    '/cb/session/clone': handle_session_clone,
     '/cb/session/invalidate-chats': handle_invalidate_chats,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,

@@ -173,7 +173,7 @@ class GroupChatStore:
                 return False
 
     # =========================================================================
-    # 读接口（内存索引，O(1)）
+    # 读接口 — 内存索引，O(1)
     # =========================================================================
 
     def get_owner(self, chat_id: str) -> Optional[str]:
@@ -189,6 +189,10 @@ class GroupChatStore:
     def is_service_created(self, chat_id: str) -> bool:
         """判断是否服务创建的群聊（在本 store 有记录即为服务创建）。"""
         return chat_id in self._chat_index
+
+    # =========================================================================
+    # 读接口 — 磁盘 _load()，持 _file_lock
+    # =========================================================================
 
     def get_chat_by_seq(self, owner_id: str, seq: int) -> Optional[str]:
         """按 owner + seq 反查 chat_id。"""

@@ -171,6 +171,10 @@ class BindingStore:
                 elif existing and 'group_name_prefix' in existing:
                     binding_data['group_name_prefix'] = existing['group_name_prefix']
                 if group_dissolve_days is not None:
+                    try:
+                        group_dissolve_days = int(group_dissolve_days)
+                    except (TypeError, ValueError):
+                        group_dissolve_days = 0
                     binding_data['group_dissolve_days'] = group_dissolve_days
                 elif existing and 'group_dissolve_days' in existing:
                     binding_data['group_dissolve_days'] = existing['group_dissolve_days']

@@ -105,7 +105,7 @@ class SessionFacade:
         隔离查询。
 
         Returns:
-            {'session_id': str, 'project_dir': str}
+            {'session_id': str, 'project_dir': str, 'new_session': bool}
             找不到返回空 dict。claude_command 等 session 语义字段不在路由表里，
             需要时调用方走 fetch_session_info 单独回源 callback。
         """
@@ -124,6 +124,7 @@ class SessionFacade:
         return {
             'session_id': item['session_id'],
             'project_dir': item.get('project_dir', ''),
+            'new_session': bool(item.get('new_session')),
         }
 
     @classmethod
@@ -216,6 +217,7 @@ class SessionFacade:
                     'source': cls.RouteSource.GROUP_CHAT,
                     'session_id': session_id,
                     'project_dir': resp.get('project_dir', ''),
+                    'new_session': resp.get('new_session', False),
                 }
 
         return {'source': cls.RouteSource.UNRESOLVED, **empty}

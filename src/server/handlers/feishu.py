@@ -417,7 +417,7 @@ def _handle_message_event(data: dict):
                         "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
                         "\n如果网关地址（`--gateway-url`）非公网可达，请联系管理员获取对外可用的网关地址。" \
                         "\n\n注意：执行命令前，请先申请当前应用的使用权限，否则将无法接收到注册绑定卡片。如未申请，请先申请权限后再执行命令。" % (gateway_ws_url, user_id)
-            _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+            _run_in_background(_send_notice_message, (chat_id, hint, message_id))
         return
 
     # 检查是否是命令（优先处理，因为命令也可能是回复消息）
@@ -432,7 +432,7 @@ def _handle_message_event(data: dict):
     prompt = text.strip()
     if not prompt:
         hint = "消息内容为空，无法继续会话" if parent_id else "消息内容为空，请发送文字消息与我对话"
-        _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+        _run_in_background(_send_notice_message, (chat_id, hint, message_id))
         return
 
     # 路由到已有 session：优先 parent_id，其次 group 模式群聊 chat_id 反查
@@ -443,7 +443,7 @@ def _handle_message_event(data: dict):
     _auto_unmute_if_needed(binding, route_info, chat_id, message_id)
 
     if SessionFacade.RouteSource.is_parent_not_found(route_source):
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id,
                             _SESSION_NOT_FOUND_HINT + "请稍后重试或重新发起 /new 指令。",
                             message_id))
@@ -459,10 +459,18 @@ def _handle_message_event(data: dict):
             owner_id = binding.get('_owner_id', '')
             if gs_store and owner_id:
                 gs_store.touch(owner_id, chat_id)
-        _run_in_background(_forward_continue_request,
-                           (binding, route_info['session_id'],
-                            route_info['project_dir'], prompt,
-                            chat_id, message_id))
+        # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
+        if route_info.get('new_session'):
+            chat_type = message.get('chat_type', '')
+            _run_in_background(_forward_new_request,
+                               (binding, route_info['session_id'],
+                                route_info['project_dir'], prompt,
+                                chat_id, message_id, chat_type))
+        else:
+            _run_in_background(_forward_continue_request,
+                               (binding, route_info['session_id'],
+                                route_info['project_dir'], prompt,
+                                chat_id, message_id))
         return
 
     # 未路由到已有 session：走默认聊天目录 / 使用提示
@@ -481,7 +489,7 @@ def _handle_message_event(data: dict):
            "**继续会话：**\n" \
            "回复 Claude 的消息即可继续对话\n\n" \
            "**支持的指令：**\n" + supported
-    _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+    _run_in_background(_send_notice_message, (chat_id, hint, message_id))
 
 
 def _get_supported_commands(owner_id: str = '') -> str:
@@ -558,7 +566,7 @@ def _handle_command(data: dict, command: str, args: str):
         # 管理员专属指令需要权限检查
         if admin_only and owner_id != gateway_owner_id:
             if chat_id:
-                _run_in_background(_send_reject_message, (chat_id, "此指令仅限管理员使用", message_id))
+                _run_in_background(_send_notice_message, (chat_id, "此指令仅限管理员使用", message_id))
             return
         handler_func(data, args)
     else:
@@ -566,7 +574,7 @@ def _handle_command(data: dict, command: str, args: str):
         # 发送未知指令提示
         if chat_id:
             supported = _get_supported_commands(owner_id)
-            _run_in_background(_send_reject_message, (chat_id, f"未知指令：`/{command}`\n\n支持的指令：\n{supported}", message_id))
+            _run_in_background(_send_notice_message, (chat_id, f"未知指令：`/{command}`\n\n支持的指令：\n{supported}", message_id))
 
 
 def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None:
@@ -600,12 +608,14 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
     else:
         # 创建新的默认会话
         logger.info(f"[default-chat] Creating new session in {default_chat_dir} for {owner_id}, prompt={_sanitize_user_content(prompt)}")
+        new_session_id = str(uuid.uuid4())
         _run_in_background(_forward_new_request_for_default_dir, (
-            binding, default_chat_dir, prompt, chat_id, message_id
+            binding, new_session_id, default_chat_dir, prompt, chat_id, message_id
         ))
 
 
-def _forward_new_request_for_default_dir(binding: Dict[str, Any], project_dir: str, prompt: str,
+def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: str,
+                                         project_dir: str, prompt: str,
                                          chat_id: str, message_id: str, chat_type: str = '',
                                          claude_command: str = '') -> str:
     """转发默认聊天新建会话请求，完成后将 session_id 持久化到 BindingStore
@@ -618,7 +628,7 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], project_dir: s
     """
     from services.binding_store import BindingStore
 
-    session_id = _forward_new_request(binding, project_dir, prompt, chat_id, message_id, chat_type, claude_command)
+    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, claude_command)
 
     owner_id = binding.get('_owner_id', '') if binding else ''
     if session_id and owner_id:
@@ -691,12 +701,12 @@ def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
         # add_typing 复用 skip_user_prompt：skip=False 说明后续消息在新群聊，
         # 会导致当前聊天的 Typing 可能无法被移除，所以不加
         _send_session_result_notification(chat_id, response_data, payload.get('project_dir', ''),
-                                           is_new=is_new,
-                                           claude_command=payload.get('claude_command', ''),
-                                           reply_to=reply_to,
-                                           reply_in_thread=reply_in_thread,
-                                           binding=binding,
-                                           add_typing=payload.get('skip_user_prompt', True))
+                                          is_new=is_new,
+                                          claude_command=payload.get('claude_command', ''),
+                                          reply_to=reply_to,
+                                          reply_in_thread=reply_in_thread,
+                                          binding=binding,
+                                          add_typing=payload.get('skip_user_prompt', True))
 
     except urllib.error.HTTPError as e:
         error_detail = _extract_http_error_detail(e)
@@ -949,8 +959,8 @@ def _send_text_message(service, chat_id: str, text: str, reply_to: Optional[str]
         return False, ''
 
 
-def _send_reject_message(chat_id: str, text: str, reply_to: Optional[str] = None):
-    """发送拒绝消息（后台线程调用）
+def _send_notice_message(chat_id: str, text: str, reply_to: Optional[str] = None):
+    """发送通知消息（后台线程调用）
 
     Args:
         chat_id: 群聊 ID
@@ -1272,7 +1282,8 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
     }
 
     # 在后台线程中异步执行会话创建
-    _run_in_background(_forward_new_request, (binding, selected_dir, prompt, chat_id, message_id, chat_type, claude_command))
+    new_session_id = str(uuid.uuid4())
+    _run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, claude_command))
 
     return True, response
 
@@ -2578,7 +2589,7 @@ def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
 
     if not binding:
         logger.warning("[feishu] No binding found, cannot fetch recent dirs")
-        _run_in_background(_send_reject_message, (chat_id, "您尚未注册，无法使用此功能", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "您尚未注册，无法使用此功能", message_id))
         return
 
     reply_in_thread = _should_reply_in_thread(binding, project_dir)
@@ -2627,12 +2638,12 @@ def _handle_new_command(data: dict, args: str):
     # 解析指令参数（支持 --dir= 和 --cmd=）
     success, project_dir, cmd_arg, prompt = _parse_command_args(args)
     if not success:
-        _run_in_background(_send_reject_message, (chat_id, "参数格式错误，正确格式：`/new --dir=/path/to/project [--cmd=0] prompt`", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "参数格式错误，正确格式：`/new --dir=/path/to/project [--cmd=0] prompt`", message_id))
         return
 
     binding = _get_binding_from_event(event)
     if not binding:
-        _run_in_background(_send_reject_message, (chat_id, "您尚未注册，无法使用此功能", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "您尚未注册，无法使用此功能", message_id))
         return
     owner_id = binding.get('_owner_id', '')
     msg_chat_type = message.get('chat_type', '')
@@ -2664,7 +2675,7 @@ def _handle_new_command(data: dict, args: str):
         # 有 --cmd 时解析用户指定的命令，否则使用 binding 默认命令
         ok, result = _resolve_claude_command_from_binding(binding, cmd_arg)
         if not ok:
-            _run_in_background(_send_reject_message, (chat_id, result, message_id))
+            _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
         claude_command = result
 
@@ -2688,19 +2699,21 @@ def _handle_new_command(data: dict, args: str):
 
     # 在后台线程中转发到 Callback 后端
     # 如果使用的是默认聊天目录，同时更新活跃默认会话
+    new_session_id = str(uuid.uuid4())
     if default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
-        _run_in_background(_forward_new_request_for_default_dir, (binding, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
+        _run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
     else:
-        _run_in_background(_forward_new_request, (binding, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
+        _run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
 
 
-def _forward_new_request(binding: dict, project_dir: str, prompt: str,
+def _forward_new_request(binding: dict, session_id: str, project_dir: str, prompt: str,
                          chat_id: str, message_id: str, chat_type: str = '',
                          claude_command: str = '') -> str:
     """转发新建会话请求到 Callback 后端
 
     Args:
         binding: 绑定信息（包含 auth_token, callback_url 等）
+        session_id: 会话 ID（由调用方生成）
         project_dir: 项目工作目录
         prompt: 用户输入的 prompt
         chat_id: 聊天 ID（P2P 或群聊）
@@ -2721,9 +2734,6 @@ def _forward_new_request(binding: dict, project_dir: str, prompt: str,
     reply_in_thread = _should_reply_in_thread(binding, project_dir)
     session_mode = binding.get('session_mode', '')
 
-    # 网关侧生成 session_id
-    session_id = str(uuid.uuid4())
-
     # 确定目标 chat_id 和 skip_user_prompt
     target_chat_id = chat_id
     skip_user_prompt = True  # 默认跳过（飞书发起的 prompt 已在飞书展示）
@@ -2733,7 +2743,7 @@ def _forward_new_request(binding: dict, project_dir: str, prompt: str,
         gs_store = GroupSessionStore.get_instance()
         owner_id = binding.get('_owner_id', '')
         if not gs_store or not owner_id:
-            _run_in_background(_send_reject_message, (chat_id, "存储服务未就绪，请稍后重试", message_id))
+            _run_in_background(_send_notice_message, (chat_id, "存储服务未就绪，请稍后重试", message_id))
             return ''
         if chat_type != 'group':
             # P2P /new（group 模式）：不预建群，让 callback ensure-chat 统一处理
@@ -2937,9 +2947,17 @@ def batch_dissolve_groups(binding: Dict[str, Any],
 
     # 2) 先通知 callback 标记 dissolved；失败则中止，等下次清理重试
     try:
-        _forward_via_ws_or_http(binding,
-                                '/cb/session/invalidate-chats',
-                                {'chat_ids': targets})
+        resp = _forward_via_ws_or_http(binding,
+                                       '/cb/session/invalidate-chats',
+                                       {'chat_ids': targets})
+        if not resp or not resp.get('ok'):
+            err_msg = (resp or {}).get('error', 'unknown error')
+            logger.error("[dissolve] invalidate-chats returned not-ok: %s", err_msg)
+            return {
+                'dissolved_items': [],
+                'skipped_items': skipped_items,
+                'failed': [{'chat_id': cid, 'error': 'pre-notify failed: %s' % err_msg} for cid in targets],
+            }
     except Exception as e:
         logger.error("[dissolve] invalidate-chats pre-notify failed, aborting: %s", e)
         return {
@@ -3357,21 +3375,21 @@ def _handle_reply_command(data: dict, args: str):
     binding = _get_binding_from_event(event)
     session_mode = binding.get('session_mode', '') if binding else ''
     if not parent_id and not (session_mode == 'group' and chat_type == 'group'):
-        _run_in_background(_send_reject_message, (chat_id, "`/reply` 指令仅支持在回复消息时使用，或在群聊模式的群聊中直接使用", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "`/reply` 指令仅支持在回复消息时使用，或在群聊模式的群聊中直接使用", message_id))
         return
 
     # 解析参数
     success, project_dir, cmd_arg, prompt = _parse_command_args(args)
     if not success:
-        _run_in_background(_send_reject_message, (chat_id, "参数格式错误，正确格式：`/reply [--cmd=0] prompt`", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "参数格式错误，正确格式：`/reply [--cmd=0] prompt`", message_id))
         return
 
     if project_dir:
-        _run_in_background(_send_reject_message, (chat_id, "`/reply` 不支持 `--dir` 参数，会话目录由原始 session 决定。请去掉 `--dir` 后重试", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "`/reply` 不支持 `--dir` 参数，会话目录由原始 session 决定。请去掉 `--dir` 后重试", message_id))
         return
 
     if not prompt:
-        _run_in_background(_send_reject_message, (chat_id, "请提供问题内容，格式：`/reply [--cmd=0] prompt`", message_id))
+        _run_in_background(_send_notice_message, (chat_id, "请提供问题内容，格式：`/reply [--cmd=0] prompt`", message_id))
         return
 
     # 解析 --cmd 参数（从 binding 获取命令列表）
@@ -3379,7 +3397,7 @@ def _handle_reply_command(data: dict, args: str):
     if cmd_arg:
         ok, result = _resolve_claude_command_from_binding(binding, cmd_arg)
         if not ok:
-            _run_in_background(_send_reject_message, (chat_id, result, message_id))
+            _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
         claude_command = result
 
@@ -3388,12 +3406,12 @@ def _handle_reply_command(data: dict, args: str):
     route_source = route_info['source']
 
     if SessionFacade.RouteSource.is_parent_not_found(route_source):
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, _SESSION_NOT_FOUND_HINT + "请重新发起 /new 指令。", message_id))
         return
 
     if not SessionFacade.RouteSource.is_resolved(route_source):
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, "无法找到对应的会话，请重新发起 /new 指令", message_id))
         return
 
@@ -3412,7 +3430,14 @@ def _handle_reply_command(data: dict, args: str):
                 session_id, claude_command or '(default)', _sanitize_user_content(prompt))
 
     # 转发到 Callback 后端
-    _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command))
+    # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
+    if route_info.get('new_session'):
+        chat_type = message.get('chat_type', '')
+        _run_in_background(_forward_new_request,
+                           (binding, session_id, session_project_dir, prompt,
+                            chat_id, message_id, chat_type, claude_command))
+    else:
+        _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command))
 
 
 def _handle_users_command(data: dict, args: str):
@@ -3587,12 +3612,12 @@ def _handle_groups_command(data: dict, args: str) -> None:
             try:
                 seqs = [int(x) for x in dissolve_args.split()]
             except ValueError:
-                _run_in_background(_send_reject_message,
+                _run_in_background(_send_notice_message,
                                    (chat_id, "格式错误，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
                 return
             payload = {'seqs': seqs}
         else:
-            _run_in_background(_send_reject_message,
+            _run_in_background(_send_notice_message,
                                (chat_id, "请指定要解散的群聊序号，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
             return
 
@@ -3611,12 +3636,12 @@ def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None
     gs_store = GroupSessionStore.get_instance()
 
     if not group_store or not gs_store:
-        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        _send_notice_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
         return
 
     owner_chats = group_store.get_chats_by_owner(owner_id) if owner_id else []
     if not owner_chats:
-        _send_reject_message(chat_id, "当前没有活跃的群聊会话", message_id)
+        _send_notice_message(chat_id, "当前没有活跃的群聊会话", message_id)
         return
 
     # 聚合：group_chat_store（seq + chat_id + created_at）+ group_session_store（project_dir + last_active_at）
@@ -3656,7 +3681,7 @@ def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None
         lines.append("**#%d** | %s | %s" % (e['seq'], proj, age))
 
     lines.append("\n解散群聊：`/groups dissolve 序号` 或 `/groups dissolve all`")
-    _send_reject_message(chat_id, '\n'.join(lines), message_id)
+    _send_notice_message(chat_id, '\n'.join(lines), message_id)
 
 
 def _dissolve_groups(binding: Dict[str, Any], payload: dict,
@@ -3676,7 +3701,7 @@ def _dissolve_groups(binding: Dict[str, Any], payload: dict,
     gs_store = GroupSessionStore.get_instance()
 
     if not group_store or not gs_store:
-        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        _send_notice_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
         return
 
     # 1) 根据 payload 解出目标 chat_ids（本地查询，零 RPC）
@@ -3698,7 +3723,7 @@ def _dissolve_groups(binding: Dict[str, Any], payload: dict,
                 target_chat_ids.append(cid)
 
     if not target_chat_ids:
-        _send_reject_message(chat_id, "没有找到可解散的群聊", message_id)
+        _send_notice_message(chat_id, "没有找到可解散的群聊", message_id)
         return
 
     # 2) 调 batch_dissolve_groups（先通知 callback 标记 dissolved，再飞书 API 解散 + 清 GroupChatStore）
@@ -3723,7 +3748,7 @@ def _dissolve_groups(binding: Dict[str, Any], payload: dict,
         parts.append("%d 个外部群聊已跳过" % len(skipped_items))
     msg = "，".join(parts) if parts else "没有找到可解散的群聊"
 
-    _send_reject_message(chat_id, msg, message_id)
+    _send_notice_message(chat_id, msg, message_id)
 
 
 def _handle_attach_command(data: dict, args: str) -> None:
@@ -3740,13 +3765,13 @@ def _handle_attach_command(data: dict, args: str) -> None:
     chat_type = message.get('chat_type', '')
 
     if chat_type != 'group':
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, "`/attach` 仅支持在群聊中使用", message_id))
         return
 
     prefix = args.strip()
     if len(prefix) < MIN_PREFIX_LEN:
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, f"用法：`/attach <session_id 前缀>`（至少 {MIN_PREFIX_LEN} 字符）",
                             message_id))
         return
@@ -3776,7 +3801,7 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
     group_store = GroupChatStore.get_instance()
     gs_store = GroupSessionStore.get_instance()
     if not group_store or not gs_store:
-        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        _send_notice_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
         return
 
     resp = _forward_via_ws_or_http(binding, '/cb/session/attach', {
@@ -3785,25 +3810,25 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
     })
 
     if not resp:
-        _send_reject_message(chat_id, "Callback 服务不可达", message_id)
+        _send_notice_message(chat_id, "Callback 服务不可达", message_id)
         return
 
     matched_ids = resp.get('matched_ids', [])
 
     if not matched_ids:
-        _send_reject_message(chat_id, f"未找到匹配的 session：`{prefix}`", message_id)
+        _send_notice_message(chat_id, f"未找到匹配的 session：`{prefix}`", message_id)
         return
 
     if len(matched_ids) > 1:
         preview = '、'.join(s[:12] + '…' for s in matched_ids[:3])
-        _send_reject_message(chat_id,
+        _send_notice_message(chat_id,
                              f"前缀匹配到多个 session（{preview}），请输入更长的前缀",
                              message_id)
         return
 
     # 唯一匹配已由 callback 侧执行绑定
     if not resp.get('attached'):
-        _send_reject_message(chat_id, "绑定失败，请查看日志", message_id)
+        _send_notice_message(chat_id, "绑定失败，请查看日志", message_id)
         return
 
     session_id = resp.get('session_id', '')
@@ -3836,7 +3861,7 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
     else:
         lines.append("⚠️ 当前会话模式非 group，后续会话通知会发送到本群，"
                      "但在本群直接发送消息（非回复）不会被自动路由到该 session")
-    _send_reject_message(chat_id, '\n'.join(lines), message_id)
+    _send_notice_message(chat_id, '\n'.join(lines), message_id)
 
 
 # =============================================================================
@@ -3862,7 +3887,7 @@ def _pick_mute_target(route_info: Dict[str, str], chat_id: str,
     hint = (_SESSION_NOT_FOUND_HINT
             if SessionFacade.RouteSource.is_parent_not_found(source)
             else _SESSION_UNRESOLVED_HINT)
-    _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+    _run_in_background(_send_notice_message, (chat_id, hint, message_id))
     return ''
 
 
@@ -3884,14 +3909,14 @@ def _handle_mute_command(data: dict, args: str) -> None:
 
     changed = SessionFacade.mute(binding, session_id)
     if changed is None:
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, "静音操作失败，请查看日志。", message_id))
         return
 
     sid_tag = f"session `{session_id[:8]}`"
     text = (f"已静音 {sid_tag}，后续消息将不再推送到此处。发送任意文字消息可自动解除静音。" if changed
             else f"{sid_tag} 已处于静音状态。")
-    _run_in_background(_send_reject_message, (chat_id, text, message_id))
+    _run_in_background(_send_notice_message, (chat_id, text, message_id))
 
 
 def _handle_unmute_command(data: dict, args: str) -> None:
@@ -3912,14 +3937,14 @@ def _handle_unmute_command(data: dict, args: str) -> None:
 
     changed = SessionFacade.unmute(binding, session_id)
     if changed is None:
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id, "解除静音失败，请查看日志。", message_id))
         return
 
     sid_tag = f"session `{session_id[:8]}`"
     text = (f"已解除 {sid_tag} 的静音。" if changed
             else f"{sid_tag} 当前未处于静音状态。")
-    _run_in_background(_send_reject_message, (chat_id, text, message_id))
+    _run_in_background(_send_notice_message, (chat_id, text, message_id))
 
 
 def _auto_unmute_if_needed(binding: Dict[str, Any], route_info: Dict[str, str],
@@ -3939,7 +3964,7 @@ def _auto_unmute_if_needed(binding: Dict[str, Any], route_info: Dict[str, str],
 
     result = SessionFacade.unmute(binding, session_id)
     if result is True:
-        _run_in_background(_send_reject_message,
+        _run_in_background(_send_notice_message,
                            (chat_id,
                             f"已自动解除 session `{session_id[:8]}` 的静音。",
                             message_id))
@@ -3947,6 +3972,92 @@ def _auto_unmute_if_needed(binding: Dict[str, Any], route_info: Dict[str, str],
         # callback 调用失败：静默跳过用户反馈（被动钩子），但打 warning 留痕便于排障
         logger.warning("[feishu] auto_unmute failed: session_id=%s chat_id=%s",
                        session_id, chat_id)
+
+
+def _handle_clear_command(data: dict, args: str) -> None:
+    """处理 /clear 命令：清空当前群聊会话，预创建新 session
+
+    仅支持 group 模式的群聊中使用。解绑旧 session 并预创建新 session（继承
+    project_dir + claude_command），下次发送消息自动启动新 Claude 进程。
+    """
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+    chat_type = message.get('chat_type', '')
+
+    if chat_type != 'group':
+        _run_in_background(_send_notice_message,
+                           (chat_id, "`/clear` 仅支持在群聊中使用", message_id))
+        return
+
+    binding = _get_binding_from_event(event)
+    if not binding:
+        _run_in_background(_send_notice_message,
+                           (chat_id, "您尚未注册，无法使用此功能", message_id))
+        return
+
+    session_mode = binding.get('session_mode', 'message')
+    if session_mode != 'group':
+        _run_in_background(_send_notice_message,
+                           (chat_id, "`/clear` 仅在群聊模式下可用", message_id))
+        return
+
+    from services.group_session_store import GroupSessionStore
+    gs_store = GroupSessionStore.get_instance()
+    owner_id = binding.get('_owner_id', '')
+
+    if not gs_store or not owner_id:
+        _run_in_background(_send_notice_message,
+                           (chat_id, "存储服务未就绪，请稍后重试", message_id))
+        return
+
+    current = gs_store.get(owner_id, chat_id)
+    if not current:
+        _run_in_background(_send_notice_message,
+                           (chat_id, "当前群聊没有活跃的会话", message_id))
+        return
+
+    # 幂等：上次 /clear 后还没发消息，不重复 clone
+    if current.get('new_session'):
+        _run_in_background(_send_notice_message,
+                           (chat_id, "会话上下文已清空，下次发送消息将自动创建新 Claude 会话。",
+                            message_id))
+        return
+
+    old_session_id = current.get('session_id', '')
+    new_session_id = str(uuid.uuid4())
+
+    # 1. callback 侧创建新 session（继承旧 session 属性）
+    try:
+        resp = _forward_via_ws_or_http(binding, '/cb/session/clone', {
+            'old_session_id': old_session_id,
+            'new_session_id': new_session_id,
+            'chat_id': chat_id,
+        })
+    except Exception as e:
+        logger.error("[feishu] /clear clone failed: %s", e)
+        _run_in_background(_send_notice_message,
+                           (chat_id, "清空会话失败，请稍后重试", message_id))
+        return
+
+    if not resp or not resp.get('ok'):
+        logger.error("[feishu] /clear clone returned error: %s", resp)
+        _run_in_background(_send_notice_message,
+                           (chat_id, "清空会话失败，请稍后重试", message_id))
+        return
+
+    project_dir = resp.get('project_dir', '')
+
+    # 2. 替换网关侧路由映射（新 session + new_session 标志）
+    gs_store.save(owner_id, chat_id, new_session_id,
+                  project_dir=project_dir, new_session=True)
+
+    logger.info("[feishu] /clear: owner=%s chat=%s old=%s new=%s",
+                owner_id, chat_id, old_session_id[:8], new_session_id[:8])
+    _run_in_background(_send_notice_message,
+                       (chat_id, "会话上下文已清空，下次发送消息将自动创建新 Claude 会话。",
+                        message_id))
 
 
 # =============================================================================
@@ -3959,6 +4070,7 @@ _COMMANDS = {
     'new': (_handle_new_command, False, "发起新的 Claude 会话\n格式：`/new --dir=/path/to/project [--cmd=0] prompt` 或回复消息时 `/new prompt`"),
     'reply': (_handle_reply_command, False, "回复消息时指定 Claude Command 继续会话\n格式：`/reply [--cmd=0] prompt`\n仅支持在回复消息时使用"),
     'attach': (_handle_attach_command, False, "将指定 session 绑定到当前群聊\n格式：`/attach <session_id 前缀>`（至少 8 字符）\n仅支持在群聊中使用"),
+    'clear': (_handle_clear_command, False, "清空当前群聊会话\n解绑当前会话，下次发消息自动创建新会话\n仅在群聊模式下可用"),
     'mute': (_handle_mute_command, False, "静音当前会话，后续消息不再推送\n格式：`/mute`（发送任意文字消息可自动解除）"),
     'unmute': (_handle_unmute_command, False, "解除当前会话静音\n格式：`/unmute`"),
     'users': (_handle_users_command, True, "查看已注册用户和在线状态"),

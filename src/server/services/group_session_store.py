@@ -152,11 +152,16 @@ class GroupSessionStore:
     # =========================================================================
 
     def save(self, owner_id: str, chat_id: str, session_id: str,
-             project_dir: str = '') -> bool:
+             project_dir: str = '', new_session: bool = False) -> bool:
         """保存或覆盖 (owner_id, chat_id) 的 session 绑定
 
         同 (owner_id, chat_id) 下新来的 session 会直接替换旧的（/new 覆盖 /
         /attach 切换）。新记录的 last_active_at 初始化为当前时间。
+
+        Args:
+            new_session: 标记该 session 尚未启动 Claude 进程，下次消息应走 /new
+                         而非 /continue。/clear 预创建 session 时设为 True，
+                         后续 _forward_new_request 中的 save() 不传此参数自动清除。
         """
         if not owner_id or not chat_id or not session_id:
             logger.warning("[group-session-store] save: missing owner_id/chat_id/session_id")
@@ -180,12 +185,15 @@ class GroupSessionStore:
                         logger.info("[group-session-store] Reclaimed stale chat row: "
                                     "owner=%s session=%s old_chat=%s -> new_chat=%s",
                                     owner_id, session_id, stale_chat_id, chat_id)
-                owner_bucket[chat_id] = {
+                entry = {
                     'session_id': session_id,
                     'project_dir': project_dir,
                     'last_active_at': now,
                     'created_at': created_at,
                 }
+                if new_session:
+                    entry['new_session'] = True
+                owner_bucket[chat_id] = entry
                 if not self._save(data):
                     return False
                 # 反向索引同步：清旧 + 写新

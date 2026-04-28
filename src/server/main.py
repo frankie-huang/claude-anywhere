@@ -322,7 +322,7 @@ def _cleanup_group_chats():
             return
 
         # 按 owner 遍历：每个 owner 只读一次 binding + 一次 session 数据
-        idle_by_owner: Dict[str, List] = {}
+        idle_by_owner: Dict[str, List[str]] = {}
         for owner_id, owner_bucket in all_groups.items():
             binding = binding_store.get(owner_id)
             if not binding:
