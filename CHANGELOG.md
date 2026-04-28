@@ -4,16 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
-### Added - 2026-04-21
+### Fixed - 2026-04-23
 
-#### 新增 `/attach` 命令：将指定 session 绑定到当前群聊
+#### 修复 AskUserQuestion 回答在分离部署下"请求不存在或已过期"的跨端查询 bug
 
-- 网关侧 `_handle_attach_command`：仅支持群聊使用，session_id 前缀至少 8 字符，唯一匹配时执行绑定；多匹配提示缩小前缀，无匹配明确反馈
-- Callback 侧 `/cb/session/attach`：纯数据层，复用 `SessionChatStore.save()` 自动处理 chat_id 迁移、dissolved 复活、反向索引维护与前任 active session 降级
-- 绑定成功后若原群为服务创建群聊，提示对应 seq 供手动 `/groups dissolve` 清理；附带自动解散阈值说明
-- `SessionChatStore.find_by_prefix()`：按前缀查询 session，不过滤 dissolved/过期，交由调用方决策
-- `GroupSeqStore.get_seq(chat_id)`：按 chat_id 反查 seq，补齐主键查询能力
-- `/groups` 命令改为非管理员专属：每个 owner 只能看/解散自己的群，权限天然隔离
+- 飞书卡片回调在**网关侧**进程处理，但 `_handle_ask_question_answer` 原先直接读本进程的 `RequestManager.get_request_data(request_id)` 获取 `questions_encoded`
+- `RequestManager` 只在 **callback 后端**（hooks 通过 Unix Socket 注册请求的进程）中持有数据，分离部署（`IS_CALLBACK_BACKEND=False`）时网关侧本地单例是空的，用户点"提交回答"必然得到"请求不存在或已过期"
+- 网关侧改为仅透传 `form_value` + `request_id` 到 `/cb/decision`，questions 解码与 answers 构造全部下沉到 callback 端完成
+- `_handle_ask_question_answer` 去掉本地 `RequestManager` 依赖及 `base64`/`questions` 解码逻辑，仅保留 toast 文案与卡片更新（两者都只依赖 form_value，不跨端）；新增私有 `_apply_custom_overrides` 集中处理"单选 custom 覆盖 select"的判定与清理（仅依赖 form_value 的字段命名约定）
+- callback 的 `/cb/decision` 在 `action=answer` 分支从 `RequestManager` 本地解码 `questions_encoded`；新增私有 `_extract_answers_from_form_value` 将 form_value 压扁为 `{question_text: answer}` 回给 Claude hook
+- `/cb/decision` 同步收紧：`action=answer` 只认 `form_value`，移除 `answers`/`questions` 入参（旧接口已无调用方）
+
+> ⚠️ 升级顺序：**先升级 callback 后端，再升级飞书网关**。`/cb/decision` 已不再接受旧的 `answers`/`questions` 字段，反序升级会导致旧网关提交的 answer 请求在新 callback 上失败。
+
+### Fixed - 2026-04-22
+
+#### 模板渲染改用字面替换，修复含反斜杠或 `&` 的 value 产出非法 JSON
+
+- `src/lib/feishu.sh` 的 `render_template` 原使用 awk `gsub` 做占位符替换，第二参数中 `\` 与 `&` 具有特殊语义
+- 旧实现仅预转义 `&`，当 value 含反斜杠（如 JSON 转义后的 `\\&`）时会被 `gsub` 解释为 `\&` 输出，生成非法 JSON 转义序列
+- 改为 `index` + `substr` 做字面拼接，不经过正则引擎
+- 顺带规避 `{{key}}` 中 `{` `}` 在部分 awk 实现下被当作 ERE 量词的风险
 
 ### Fixed - 2026-04-02
 

@@ -71,7 +71,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             - session_id: Claude 会话 ID (必需)
             - project_dir: 项目工作目录 (必需)
             - prompt: 用户的问题 (必需)
-            - chat_id: 群聊 ID (可选)
+            - chat_id: 飞书聊天 ID（网关调用时必传，飞书事件必定携带；非空时触发 dissolved 自动复活）
             - claude_command: 指定使用的 Claude 命令 (可选)
 
     Returns:
@@ -94,6 +94,16 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     if not prompt:
         return Response.error('Missing prompt')
 
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return Response.error('Session store not initialized')
+
+    # 校验 session 是否在 store 中有物理记录（含 dissolved，dissolved 由下方 save 自动复活）
+    # 同时缓存 session 数据，避免后续 get_command 重复读盘
+    session_data = session_store.get_session(session_id, include_dissolved=True)
+    if not session_data:
+        return Response.error('Session expired or not found, please /new')
+
     # 验证项目目录存在
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
@@ -104,22 +114,19 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
         if claude_command not in get_claude_commands():
             return Response.error('invalid claude_command')
 
-    # Command 优先级: 请求指定 > SessionChatStore session 记录 > 默认
+    # Command 优先级: 请求指定 > session 记录 > 默认
     if not claude_command:
-        session_store = SessionChatStore.get_instance()
-        if session_store:
-            claude_command = session_store.get_command(session_id) or ''
+        claude_command = session_data.get('claude_command', '')
 
     actual_cmd = _get_claude_command(claude_command)
     logger.info(f"[claude-continue] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
     # 更新 session 映射：刷新 claude_command 和 chat_id
     # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
+    # chat_id 来自飞书消息事件（P2P / 群聊均必定非空），非空 chat_id 自动清除 dissolved
+    session_store.save(session_id, chat_id, claude_command=actual_cmd)
     # 飞书发起的 prompt 已在飞书展示，标记跳过
-    store = SessionChatStore.get_instance()
-    if store:
-        store.save(session_id, chat_id, claude_command=actual_cmd)
-        store.set_skip_next_user_prompt(session_id)
+    session_store.set_skip_next_user_prompt(session_id)
 
     # 同步执行并检查（使用 resume 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,
@@ -362,9 +369,13 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         data: 请求数据
             - project_dir: 项目工作目录 (必需)
             - prompt: 用户的问题 (必需)
-            - chat_id: 群聊 ID (可选)
+            - chat_id: 飞书聊天 ID，通常非空（来自飞书事件，群聊或 P2P）；
+                仅 group 模式下从 P2P 发起 /new 时为空，
+                由本函数调 do_ensure_chat 建群后回填
             - message_id: 原始消息 ID (可选，用于飞书网关回复用户消息)
             - claude_command: 指定使用的 Claude 命令 (可选)
+            - skip_user_prompt: 是否跳过首条 UserPromptSubmit 通知 (默认 True)；
+                group 模式 P2P 建群分支需置 False，让 hook 把首条 prompt 补发到新群
 
     Returns:
         (success, response):
@@ -401,18 +412,32 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
 
     # 保存 session_id -> chat_id + claude_command 映射
     from config import FEISHU_SESSION_MODE
-    group_active = (FEISHU_SESSION_MODE == 'group')
-    store = SessionChatStore.get_instance()
-    if store:
-        store.save(session_id, chat_id, claude_command=actual_cmd,
-                   group_active=group_active, project_dir=project_dir)
-        logger.info(f"[claude-new] Saved mapping: {session_id} -> {chat_id or '(group pending)'}")
+    is_group_mode = (FEISHU_SESSION_MODE == 'group')
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return Response.error('Session store not initialized')
+
+    if is_group_mode and not chat_id:
+        # group 模式无 chat_id → 委托给 do_ensure_chat 创建群聊并绑定
+        from handlers.callback import do_ensure_chat
+        ok, ensure_result = do_ensure_chat(session_id, project_dir)
+        if not ok:
+            logger.warning("[claude-new] ensure-chat failed for %s: %s",
+                           session_id, ensure_result)
+            return Response.error(f'Failed to create group chat: {ensure_result}')
+        chat_id = ensure_result
+        logger.info("[claude-new] ensure-chat created group for %s: %s", session_id, chat_id)
+
+    # 写入 claude_command 等业务属性（与 do_ensure_chat 的"建群"职责解耦：
+    # group 分支补写、非 group 分支首次写，统一一处）
+    session_store.save(session_id, chat_id, claude_command=actual_cmd, project_dir=project_dir)
+    logger.info(f"[claude-new] Saved mapping: {session_id} -> {chat_id}")
 
     # 设置 skip_user_prompt 标志
     # 由调用方通过 skip_user_prompt 字段决定，不再根据 chat_id 是否为空判断
     skip_user_prompt = data.get('skip_user_prompt', True)
-    if skip_user_prompt and store:
-        store.set_skip_next_user_prompt(session_id)
+    if skip_user_prompt:
+        session_store.set_skip_next_user_prompt(session_id)
 
     # 同步执行并检查（使用 new 模式）
     result = _execute_and_check(session_id, project_dir, prompt, chat_id,

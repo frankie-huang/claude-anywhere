@@ -104,26 +104,25 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
         return (False, str(e))
 
 
-def create_feishu_group(name: str) -> Tuple[bool, str]:
+def create_feishu_group(session_id: str, project_dir: str) -> Tuple[bool, str]:
     """从 Callback 侧调用飞书网关，创建飞书群聊（兼容单机和分离部署）
 
-    owner_id 由各模式自行获取：
-    - 单机模式：从 FEISHU_OWNER_ID 配置读取
-    - 分离部署：网关从 binding 中的 owner_id 获取
+    群名统一由 gateway 根据 prefix + project_dir + 时间戳构造，调用方无需关心。
 
     Args:
-        name: 群聊名称
+        session_id: 关联的 session ID
+        project_dir: 项目目录
 
     Returns:
-        (success, chat_id or error)
+        (success, chat_id_or_error)
     """
-    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID
+    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID, FEISHU_GROUP_NAME_PREFIX
 
     if not IS_CALLBACK_BACKEND:
         # 单机模式：直接调用网关侧统一入口（创建 + 写归属记录一次完成）
         try:
             from handlers.feishu import create_group_chat_and_record
-            return create_group_chat_and_record(name, FEISHU_OWNER_ID)
+            return create_group_chat_and_record(FEISHU_OWNER_ID, session_id, project_dir, FEISHU_GROUP_NAME_PREFIX)
         except Exception as e:
             logger.warning("[create_feishu_group] create_group_chat_and_record unavailable: %s", e)
 
@@ -142,8 +141,9 @@ def create_feishu_group(name: str) -> Tuple[bool, str]:
 
         api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/create-group'
         data = {
-            'name': name,
-            'owner_id': FEISHU_OWNER_ID
+            'owner_id': FEISHU_OWNER_ID,
+            'session_id': session_id,
+            'project_dir': project_dir,
         }
         resp = post_json(api_url, data, auth_token=auth_token)
         if resp.get('success'):
@@ -152,61 +152,6 @@ def create_feishu_group(name: str) -> Tuple[bool, str]:
             return (False, resp.get('error', 'unknown'))
     except Exception as e:
         return (False, str(e))
-
-
-def dissolve_feishu_groups(chat_ids: List[str]) -> Dict[str, Any]:
-    """从 Callback 侧调用飞书网关解散飞书群聊（兼容单机和分离部署，支持批量）
-
-    归属判断由网关侧完成：非服务创建的群聊会被跳过（skipped_items），不视为失败。
-
-    Args:
-        chat_ids: 群聊 ID 列表
-
-    Returns:
-        {
-            'dissolved_items': List[str],     # 实际解散的 chat_id
-            'skipped_items': List[str],       # 非服务创建的 chat_id
-            'failed': List[{chat_id, error}]  # API 错误
-        }
-    """
-    if not chat_ids:
-        return {'dissolved_items': [], 'skipped_items': [], 'failed': []}
-
-    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID
-
-    if not IS_CALLBACK_BACKEND:
-        # 单机模式：直接调用网关侧函数（解散 + 清理归属记录）
-        try:
-            from handlers.feishu import batch_dissolve_groups
-            return batch_dissolve_groups(chat_ids, FEISHU_OWNER_ID)
-        except Exception as e:
-            logger.warning("[dissolve_feishu_groups] batch_dissolve_groups unavailable: %s", e)
-
-    # 分离部署模式（或单机 fallback）：通过网关批量转发
-    try:
-        from config import FEISHU_GATEWAY_URL
-        from services.auth_token_store import AuthTokenStore
-
-        if not FEISHU_GATEWAY_URL:
-            return {'dissolved_items': [], 'skipped_items': [],
-                    'failed': [{'chat_id': cid, 'error': 'no feishu service available'} for cid in chat_ids]}
-
-        store = AuthTokenStore.get_instance()
-        auth_token = store.get() if store else ''
-        if not auth_token:
-            return {'dissolved_items': [], 'skipped_items': [],
-                    'failed': [{'chat_id': cid, 'error': 'no auth_token available'} for cid in chat_ids]}
-
-        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/dissolve-groups'
-        resp = post_json(api_url, {'chat_ids': chat_ids, 'owner_id': FEISHU_OWNER_ID}, auth_token=auth_token)
-        return {
-            'dissolved_items': resp.get('dissolved_items', []),
-            'skipped_items': resp.get('skipped_items', []),
-            'failed': resp.get('failed', []),
-        }
-    except Exception as e:
-        return {'dissolved_items': [], 'skipped_items': [],
-                'failed': [{'chat_id': cid, 'error': str(e)} for cid in chat_ids]}
 
 
 def send_json(handler, status, data):

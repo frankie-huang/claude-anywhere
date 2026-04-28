@@ -20,16 +20,18 @@ POST 路由:
 - /cb/session/set-last-message-id: 设置 session 的最近消息 ID
 - /cb/session/check-skip-user-prompt: 检查并清除跳过用户 prompt 标志
 - /cb/session/ensure-chat: 确保 session 有 chat_id（group 模式懒创建群聊）
-- /cb/session/resolve-group-chat: 通过 chat_id 反查 session_id
+- /cb/session/get-info: 按 session_id 返回 session 权威字段（claude_command 等）
 - /cb/session/attach: 将指定 session 绑定到目标群聊
+- /cb/session/mute: 设置/解除/查询 session 静音状态
+- /cb/session/invalidate-chats: 标记所有引用该 chat_id 的记录为 dissolved 状态（gateway 解散群后调用）
 - /cb/claude/new: 新建 Claude 会话
 - /cb/claude/continue: 继续 Claude 会话
 - /cb/claude/recent-dirs: 获取近期工作目录
 - /cb/claude/browse-dirs: 浏览子目录
-- /cb/groups/list: 列出活跃群聊
-- /cb/groups/dissolve: 批量解散群聊
 """
 
+import base64
+import json
 import logging
 import os
 import threading
@@ -42,7 +44,7 @@ from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
 from handlers.claude import handle_continue_session, handle_new_session
-from handlers.utils import send_json, send_html_response, create_feishu_group, dissolve_feishu_groups
+from handlers.utils import send_json, send_html_response, create_feishu_group
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +295,64 @@ def handle_check_skip_user_prompt(data: Dict[str, Any], headers: Dict[str, str])
     return 200, {'skip': skip}
 
 
+def _extract_answers_from_form_value(form_value: Dict[str, Any],
+                                     questions: list) -> Dict[str, str]:
+    """按飞书卡片 form_value 约定（字段命名由 src/lib/feishu.sh 写死）构造 answers。
+
+    Args:
+        form_value: 飞书 card.action 回调里的 event.action.form_value 原值，按题
+            号索引编码（不含 question 原文）:
+
+                {
+                  "q_{i}_select": str | List[str],  # i 为题号（0-based）
+                                                     #   单选题 -> str（未选为 ""）
+                                                     #   多选题 -> List[str]（未选为 []）
+                  "q_{i}_custom": str                # 自定义输入框（未填为 ""）
+                }
+
+        questions: AskUserQuestion 的原始 questions 数组（Claude 工具协议），
+            每项至少含 `question` 字段用作 answers 的 key；数组顺序与
+            form_value 里的索引 i 一致。
+
+    Returns:
+        {question_text: answer_str} 字典，按 questions 顺序填充。
+
+        - 多选（select_value 是 list）：合并 select 选项 + custom 输入，
+          英文逗号 + 空格分隔，例：``"Python, TypeScript, 自定义内容"``
+        - 单选：custom 非空时优先用 custom（覆盖下拉），否则用 select；
+          两者都空则为 ``""``
+
+    最终被 Claude 模型消费（通过 hookSpecificOutput.decision.updatedInput 注入
+    AskUserQuestion 工具返回值）。
+
+    已知协议约束（不是本函数可改）:
+        - Claude Code 的 AskUserQuestion hook 协议要求 answers 的 value 为 str
+          （社区验证，见 openspec archive `add-ask-user-question-approval`），
+          多选答案按 ", " 拼接，不要改成 List[str] 或其它分隔符。
+        - 未验证场景：option label 或用户 custom 输入本身含 ", " 子串时，
+          Claude 侧如何解析多选答案未实测；理论上可能产生边界歧义，但也可能
+          Claude 会结合原 questions.options 反查消歧。遇到相关问题再补实验。
+          待 Claude Code 为 AskUserQuestion 提供独立 hook event 并支持结构化
+          answers 后可根治（参考 anthropics/claude-code#12605）。
+    """
+    answers: Dict[str, str] = {}
+    for i, q in enumerate(questions):
+        question_text = q.get('question', '')
+        select_value = form_value.get(f'q_{i}_select', '')
+        custom_value = form_value.get(f'q_{i}_custom', '')
+
+        if isinstance(select_value, list):
+            labels = list(select_value)
+            if custom_value:
+                labels.append(custom_value)
+            answer = ', '.join(labels) if labels else ''
+        else:
+            answer = custom_value if custom_value else (select_value or '')
+
+        answers[question_text] = answer
+    return answers
+
+
 def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """处理纯决策请求（供飞书网关或其他服务调用）
 
@@ -309,8 +369,8 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
             - action: 动作类型 (allow/always/deny/interrupt/answer)
             - request_id: 请求 ID
             - project_dir: 项目目录（可选，用于 always 写入规则）
-            - answers: AskUserQuestion 的答案字典（仅 action=answer 时使用）
-            - questions: AskUserQuestion 的原始问题数组（仅 action=answer 时使用）
+            - form_value: 飞书卡片 card.action 回调里的 form_value 原值，其具体
+              schema 由 action 决定（action=answer 时的格式见下方分支注释）
         headers: 请求头字典
     """
     # 验证 auth_token（飞书网关调用）
@@ -324,8 +384,7 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
     action = data.get('action', '')
     request_id = data.get('request_id', '')
     project_dir = data.get('project_dir', '')
-    answers = data.get('answers')
-    questions = data.get('questions')
+    form_value = data.get('form_value')
 
     logger.info("[cb/decision] action=%s, request_id=%s", action, request_id)
 
@@ -338,11 +397,71 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
             'message': '无效的请求参数'
         }
 
-    # 调用纯决策接口
-    success, decision, message = handle_decision(
-        request_id, action, project_dir,
-        answers=answers, questions=questions
-    )
+    if action == 'answer':
+        # action=answer 时 form_value 为 AskUserQuestion 卡片的表单提交值，
+        # schema（字段命名由 src/lib/feishu.sh 渲染时写死）:
+        #   {
+        #     "q_{i}_select": str | List[str],   # i 为题号（0-based）
+        #                                         #   单选题 -> str（未选为 ""）
+        #                                         #   多选题 -> List[str]（未选为 []）
+        #     "q_{i}_custom": str                 # 自定义输入框（未填为 ""）
+        #   }
+        # 不含 question 原文，只有索引；需要结合 RequestManager 里该 request 的
+        # questions_encoded（Claude AskUserQuestion 的原始 questions 数组 base64）
+        # 反查 question 原文后构造 answers: {question_text: answer_str}。
+        #
+        # 其它 action 类型（allow/always/deny/interrupt）目前不使用 form_value；
+        # 若未来新增用例，请在对应分支内补充自己的 schema 说明，避免混淆。
+        if form_value is None:
+            logger.warning("[cb/decision] answer action missing form_value: %s", request_id)
+            return 400, {
+                'success': False,
+                'decision': None,
+                'message': '缺少 form_value'
+            }
+        req_data = RequestManager.get_instance().get_request_data(request_id)
+        if not req_data:
+            logger.warning("[cb/decision] Request not found: %s", request_id)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '请求不存在或已过期'
+            }
+        questions_encoded = req_data.get('questions_encoded', '')
+        if not questions_encoded:
+            logger.warning("[cb/decision] No questions_encoded for request: %s", request_id)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据不存在'
+            }
+        try:
+            questions_json = base64.b64decode(questions_encoded.encode()).decode('utf-8')
+            questions = json.loads(questions_json)
+        except Exception as e:
+            logger.error("[cb/decision] Failed to decode questions: %s", e)
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据解析失败'
+            }
+        if not questions:
+            return 200, {
+                'success': False,
+                'decision': None,
+                'message': '问题数据不存在'
+            }
+        answers = _extract_answers_from_form_value(form_value, questions)
+        logger.info("[cb/decision] answers built from form_value: %s",
+                    json.dumps(answers, ensure_ascii=False))
+
+        success, decision, message = handle_decision(
+            request_id, action,
+            answers=answers, questions=questions
+        )
+    else:
+        # 其它 action（allow/always/deny/interrupt）：只需 project_dir，无需 answers/questions
+        success, decision, message = handle_decision(request_id, action, project_dir)
 
     logger.info(
         "[cb/decision] result: request_id=%s, success=%s, decision=%s, message=%s",
@@ -447,43 +566,46 @@ _ensure_chat_locks: Dict[str, threading.Lock] = {}
 _ensure_chat_global_lock = threading.Lock()
 
 
-def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """确保 session 有对应的 chat_id（group 模式下懒创建群聊）
+def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
+    """确保 session 有对应的 chat_id（group 模式下创建群聊）
 
-    调用方:
-    - 飞书网关 feishu.py: /new 命令处理后立即调用，创建失败仅 warning，不影响 session 创建
-    - Shell 脚本 feishu.sh (_resolve_chat_id): 启动时调用，返回空则 fallback 到 FEISHU_CHAT_ID
+    调用方（各自负责鉴权）:
+    - handle_ensure_chat (HTTP /cb/session/ensure-chat): Shell 脚本启动时调用，返回空则 fallback 到 FEISHU_CHAT_ID
+    - handle_new_session (claude.py): P2P /new（group 模式无 chat_id）时调用，失败则整个 /new 失败
+
+    流程：先调网关建群，成功后才 save session 记录。失败则不写入任何记录，
+    接受网关侧可能已建群的孤儿群（用户可通过 /groups dissolve 清理，
+    自动解散也会兜底回收）。
+
+    dissolved 的 session：get_session 过滤返回 None，走建群路径；
+    成功后 save(chat_id) 自动清除 dissolved（复活）。
+
+    Args:
+        session_id: Claude 会话 ID
+        project_dir: 项目工作目录（建群命名用，同时存入 session 字段）
+
+    Returns:
+        (ok, chat_id_or_error)
     """
-    from services.group_seq_store import GroupSeqStore
     from services.session_chat_store import SessionChatStore
-    from config import FEISHU_SESSION_MODE, FEISHU_GROUP_NAME_PREFIX
+    from config import FEISHU_SESSION_MODE
 
-    if not check_global_auth_token(headers, '/cb/session/ensure-chat'):
-        return 401, {'error': 'Unauthorized'}
-
-    session_id = data.get('session_id', '')
-    project_dir = data.get('project_dir', '')
-
-    if not session_id:
-        return 400, {'error': 'Missing session_id'}
-
-    seq_store = GroupSeqStore.get_instance()
     session_store = SessionChatStore.get_instance()
-    if not session_store or not seq_store:
-        return 500, {'error': 'Store not initialized'}
+    if not session_store:
+        return False, 'Store not initialized'
 
-    # 已有 chat_id 则直接返回
-    existing = session_store.get_chat_id(session_id)
-    if existing:
-        return 200, {'chat_id': existing}
-
-    # 判断是否需要创建群聊：正常流程中 session 由 handle_new_session 创建，
-    # group_active 字段一定存在。session 记录不存在时（存储异常、过期被清理等）
-    # 降级为全局配置，相当于将该 session 重新初始化为当前模式。
+    # 一次读取 session 数据，判断是否需要建群：
+    #   - session 存在且有 chat_id → 直接返回
+    #   - session 存在但无 chat_id → 正常态 session，无需建群
+    #   - session 不存在或 dissolved → 仅 group 模式才建群
     session_data = session_store.get_session(session_id)
-    group_active = session_data.get('group_active') if session_data else (FEISHU_SESSION_MODE == 'group')
-    if not group_active:
-        return 200, {'chat_id': ''}
+    if session_data:
+        chat_id = session_data.get('chat_id', '')
+        if chat_id:
+            return True, chat_id
+        return True, ''
+    if FEISHU_SESSION_MODE != 'group':
+        return True, ''
 
     # per-session 锁防止并发创建
     with _ensure_chat_global_lock:
@@ -495,40 +617,47 @@ def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
         # 二次检查（锁内）
         existing = session_store.get_chat_id(session_id)
         if existing:
-            return 200, {'chat_id': existing}
+            return True, existing
 
-        # 构建群聊名称：{前缀} - {目录名} - {MMdd HH:mm:ss}
-        dir_name = os.path.basename(project_dir) if project_dir else ''
-        if len(dir_name) > 30:
-            dir_name = dir_name[:29] + '\u2026'  # U+2026 "…" 省略号，单字符，截断后总长仍为 30
-        timestamp = time.strftime('%m%d %H:%M:%S')
-        if dir_name:
-            name = f"{FEISHU_GROUP_NAME_PREFIX} - {dir_name} - {timestamp}"
-        else:
-            name = f"{FEISHU_GROUP_NAME_PREFIX} - {timestamp}"
-
-        # 创建群聊
-        ok, result = create_feishu_group(name)
+        # 创建群聊（网关侧原子完成：建群 + 归属 + seq 分配 + 写 GroupSessionStore 路由）
+        # seq 在 group_store.allocate 内部自带 INFO 日志，此处不重复
+        ok, result = create_feishu_group(session_id, project_dir)
         if not ok:
             logger.error("[ensure-chat] Failed to create group: %s", result)
-            return 500, {'error': 'Failed to create group: %s' % result}
+            return False, result
 
         chat_id = result
-        # 顺序：allocate seq → save session。
-        # 若中间崩溃，留下"有 seq 无 session 引用"的孤儿群：/groups list 可见、
-        # _dissolve_idle_groups 按 seq.created_at 兜底回收，不会永久失控。
-        # 反过来先 save session 再 allocate 的话，中间崩溃会留下 group_active=True
-        # 但 seq 缺失的 session，/groups 命令看不到该群、无法在线管理。
-        seq = seq_store.allocate(chat_id)
-        session_store.save(session_id, chat_id, group_active=True, project_dir=project_dir)
-        logger.info("[ensure-chat] Created group #%d: session=%s, chat_id=%s", seq, session_id, chat_id)
+        # 建群成功才写 session 记录（新建或 dissolved 自动复活）
+        session_store.save(session_id, chat_id, project_dir=project_dir)
+        logger.info("[ensure-chat] Created group: session=%s, chat_id=%s",
+                    session_id, chat_id)
 
-        # 创建成功后清理 per-session 锁：chat_id 已持久化，
-        # 后续调用在锁外首次检查即命中，此锁不再被使用
+        # 创建成功后清理 per-session 锁
         with _ensure_chat_global_lock:
             _ensure_chat_locks.pop(session_id, None)
 
-        return 200, {'chat_id': chat_id}
+        return True, chat_id
+
+
+def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """确保 session 有对应的 chat_id（group 模式下懒创建群聊）
+
+    HTTP 路由鉴权后委托 do_ensure_chat，调用方详见其 docstring。
+    """
+    if not check_global_auth_token(headers, '/cb/session/ensure-chat'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '')
+    project_dir = data.get('project_dir', '')
+
+    if not session_id:
+        return 400, {'error': 'Missing session_id'}
+
+    ok, result = do_ensure_chat(session_id, project_dir)
+    if ok:
+        return 200, {'chat_id': result}
+    else:
+        return 500, {'error': 'Failed to create group: %s' % result}
 
 
 def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -549,14 +678,12 @@ def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
             'matched_ids': list[str],      # 前缀匹配到的全部 session_id
             'attached': bool,              # 是否执行了绑定（仅唯一匹配时为 True）
             'session_id': str,             # 绑定的 session_id（attached=True 时有值）
-            'original_chat_id': str,       # session 绑定前的 chat_id（attached=True 时有值）
-            'original_seq': int | None,    # 原群聊的 seq（仅当原群是服务创建时非 None）
-            'dissolve_days': int,          # FEISHU_GROUP_DISSOLVE_DAYS 配置值，0 表示未启用自动解散
+            'original_chat_id': str,       # session 绑定前的 chat_id（attached=True 时有值；
+                                           # 网关侧自己持有 GroupChatStore，能按此 id 自查 seq）
+            'project_dir': str,            # session 的工作目录（供 gateway 本地路由表写入）
         }
     """
     from services.session_chat_store import SessionChatStore
-    from services.group_seq_store import GroupSeqStore
-    from config import FEISHU_GROUP_DISSOLVE_DAYS
 
     if not check_global_auth_token(headers, '/cb/session/attach'):
         return 401, {'error': 'Unauthorized'}
@@ -567,18 +694,17 @@ def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
         return 400, {'error': 'Missing session_prefix or chat_id'}
 
     session_store = SessionChatStore.get_instance()
-    seq_store = GroupSeqStore.get_instance()
-    if not session_store or not seq_store:
+    if not session_store:
         return 500, {'error': 'Store not initialized'}
 
+    # find_by_prefix 含 dissolved（供 attach 复活）
     matches = session_store.find_by_prefix(prefix)
     result = {
         'matched_ids': list(matches.keys()),
         'attached': False,
         'session_id': '',
         'original_chat_id': '',
-        'original_seq': None,
-        'dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+        'project_dir': '',
     }
 
     if len(matches) != 1:
@@ -587,222 +713,144 @@ def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
     session_id, session_data = next(iter(matches.items()))
     original_chat_id = session_data.get('chat_id', '')
 
-    # 执行迁移（save 会自动处理 chat_id 变更、dissolved 复活、反向索引等）
-    session_store.save(session_id, target_chat_id, group_active=True)
-
-    # 仅当原群聊不同于目标群聊时才返回 seq，避免提示用户"孤儿群"实际是当前群
-    original_seq = None
-    if original_chat_id and original_chat_id != target_chat_id:
-        original_seq = seq_store.get_seq(original_chat_id)
+    # 执行迁移（save 传入非空 chat_id 自动清除 dissolved 复活）
+    session_store.save(session_id, target_chat_id)
 
     result.update({
         'attached': True,
         'session_id': session_id,
         'original_chat_id': original_chat_id,
-        'original_seq': original_seq,
+        # 供 gateway 写本地 GroupSessionStore
+        'project_dir': session_data.get('project_dir', ''),
     })
 
-    logger.info("[session-attach] %s: %s -> %s (original_seq=%s)",
-                session_id, original_chat_id or '-', target_chat_id, result['original_seq'])
+    logger.info("[session-attach] %s: %s -> %s",
+                session_id, original_chat_id or '-', target_chat_id)
     return 200, result
 
 
-def handle_resolve_group_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """通过 chat_id 反查 session_id
+def handle_session_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """管理 session 静音状态：mute / unmute / query
 
-    调用方 (均为飞书网关 feishu.py):
-    - 群聊普通消息处理: 通过 chat_id 找到对应 session，转发为 /continue
-    - /new 命令处理: 群聊中发起 /new 时，查询该群是否已绑定 session，继承工作目录和命令
+    调用方 (飞书网关 feishu.py):
+    - /mute 命令: action='mute'
+    - /unmute 命令 + 自动解除: action='unmute'
+    - 出站拦截（SessionFacade 缓存 miss 时回源）: action='query'
+
+    请求:
+        - session_id: 目标 session
+        - action: 'mute' | 'unmute' | 'query'
+
+    响应:
+        mute   -> {ok: True, changed: bool}  changed=True 表示本次新设置为静音；False 表示幂等（之前已静音）
+        unmute -> {ok: True, changed: bool}  changed=True 表示本次实际解除；False 表示幂等（之前就未静音）
+        query  -> {ok: True, muted: bool}    当前是否处于静音状态
     """
     from services.session_chat_store import SessionChatStore
 
-    if not check_global_auth_token(headers, '/cb/session/resolve-group-chat'):
+    if not check_global_auth_token(headers, '/cb/session/mute'):
         return 401, {'error': 'Unauthorized'}
 
-    chat_id = data.get('chat_id', '')
-    if not chat_id:
-        return 400, {'error': 'Missing chat_id'}
+    session_id = data.get('session_id', '').strip()
+    action = data.get('action', '').strip()
+    if not session_id or action not in ('mute', 'unmute', 'query'):
+        return 400, {'error': 'Missing session_id or invalid action'}
 
     store = SessionChatStore.get_instance()
     if not store:
         return 500, {'error': 'Store not initialized'}
 
-    session_id = store.get_session_by_chat_id(chat_id)
+    if action == 'query':
+        return 200, {'ok': True, 'muted': store.is_session_muted(session_id)}
+
+    if action == 'mute':
+        result = store.mute_session(session_id)
+        if result is None:
+            return 500, {'error': 'Failed to mute session'}
+        return 200, {'ok': True, 'changed': result}
+
+    # unmute —— store 同为 Optional[bool]，changed 语义一致
+    result = store.unmute_session(session_id)
+    if result is None:
+        return 500, {'error': 'Failed to unmute session'}
+    return 200, {'ok': True, 'changed': result}
+
+
+def handle_invalidate_chats(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """批量标记一组 chat_id 关联的 session 为 dissolved
+
+    调用方 (飞书网关 feishu.py):
+    - /groups dissolve 成功解散群后通知 callback
+    - 自动解散群后同样通知
+
+    语义：标记所有引用该 chat_id 的 session 为 dissolved=True，
+    保留 chat_id 字段作为历史信息。get_session 过滤 dissolved 后返回 None，
+    使 session 软失效——下次 ensure-chat 自动走重建路径，continue 直接报错
+    引导用户 /new。
+
+    请求:
+        - chat_ids: List[str]，被解散的群聊 ID 列表
+
+    响应:
+        {ok: True, invalidated: int}  invalidated 是被标记 dissolved 的 session 总数
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/invalidate-chats'):
+        return 401, {'error': 'Unauthorized'}
+
+    chat_ids = data.get('chat_ids') or []
+    if not isinstance(chat_ids, list):
+        return 400, {'error': 'chat_ids must be a list'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    total = 0
+    for cid in chat_ids:
+        if not cid:
+            continue
+        total += len(store.mark_dissolved(cid))
+    return 200, {'ok': True, 'invalidated': total}
+
+
+def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """按 session_id 返回 session 的权威字段
+
+    调用方 (飞书网关 feishu.py):
+    - /new 继承场景: 从消息上下文拿到 session_id 后，回源取 claude_command 等属性
+
+    请求:
+        - session_id: Claude 会话 ID
+
+    响应:
+        {project_dir: str, claude_command: str, chat_id: str, dissolved: bool}
+        session 不存在或已过期返回全空（非错误）
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/get-info'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '').strip()
     if not session_id:
-        return 200, {'session_id': '', 'project_dir': '', 'claude_command': ''}
+        return 400, {'error': 'Missing session_id'}
 
-    session_data = store.get_session(session_id)
-    project_dir = session_data.get('project_dir', '') if session_data else ''
-    claude_command = session_data.get('claude_command', '') if session_data else ''
-    return 200, {'session_id': session_id, 'project_dir': project_dir, 'claude_command': claude_command}
-
-
-def handle_groups_list(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """列出活跃群聊
-
-    调用方 (飞书网关 feishu.py):
-    - /groups 命令: _list_groups() 展示当前活跃群聊列表
-
-    数据源：
-    - GroupSeqStore：服务创建群聊的清单和 seq
-    - SessionChatStore：每个 chat_id 对应 session 的 project_dir 和最近活跃时间
-    """
-    from services.session_chat_store import SessionChatStore
-    from services.group_seq_store import GroupSeqStore
-
-    if not check_global_auth_token(headers, '/cb/groups/list'):
-        return 401, {'error': 'Unauthorized'}
-
-    seq_store = GroupSeqStore.get_instance()
-    session_store = SessionChatStore.get_instance()
-    if not seq_store or not session_store:
+    store = SessionChatStore.get_instance()
+    if not store:
         return 500, {'error': 'Store not initialized'}
 
-    chat_last_active = session_store.get_chat_last_active()
-    # 一次性拿全量 session，后续按 session_id 索引，避免循环内反复加锁读文件
-    sessions = session_store.get_all()
-
-    groups = []
-    for entry in seq_store.get_all():
-        chat_id = entry['chat_id']
-        # 查 active session 的 project_dir（仅用于展示）
-        project_dir = ''
-        session_id = session_store.get_session_by_chat_id(chat_id)
-        # 有 session_id 关联，说明该群聊有活跃会话；否则为孤儿群——可能是该群聊的
-        # 最近会话已被 attach 到其他群聊（group_active 转移）、session 记录已过期清理等
-        if session_id:
-            session_data = sessions.get(session_id)
-            if session_data:
-                project_dir = session_data.get('project_dir', '')
-        # 孤儿群（无活跃 session 关联）用 created_at 兜底
-        updated_at = chat_last_active.get(chat_id, entry.get('created_at', 0))
-        groups.append({
-            'chat_id': chat_id,
-            'group_seq': entry['seq'],
-            'project_dir': project_dir,
-            'updated_at': updated_at,
-        })
-    # 按 updated_at 降序（最近活跃的在前）
-    groups.sort(key=lambda x: x['updated_at'], reverse=True)
-    return 200, {'groups': groups}
-
-
-def dissolve_groups_by_targets(chat_ids: List[str]) -> Dict[str, Any]:
-    """批量解散群聊并清理相关 session 状态
-
-    调用方:
-    - handle_groups_dissolve(): /groups dissolve 命令，按序号或全部解散群聊
-    - _dissolve_idle_groups() (main.py): 自动解散空闲群聊
-
-    归属判断（是否服务创建）由网关侧 batch_dissolve_groups 完成，
-    callback 侧只负责 session 映射清理。
-
-    Args:
-        chat_ids: 待解散的群聊 ID 列表
-
-    Returns:
-        {'dissolved_count': int, 'dissolved_items': list, 'skipped_count': int,
-         'failed': list (optional)}
-    """
-    if not chat_ids:
-        return {'dissolved_count': 0, 'dissolved_items': [], 'skipped_count': 0}
-
-    from services.session_chat_store import SessionChatStore
-    from services.group_seq_store import GroupSeqStore
-
-    session_store = SessionChatStore.get_instance()
-    seq_store = GroupSeqStore.get_instance()
-    if not session_store or not seq_store:
-        return {
-            'dissolved_count': 0,
-            'dissolved_items': [],
-            'skipped_count': 0,
-            'failed': [{'chat_id': cid, 'error': 'Store not initialized'}
-                       for cid in chat_ids],
-        }
-
-    # 批量解散（网关内部按归属判断，非服务群聊会进入 skipped_items）
-    resp = dissolve_feishu_groups(chat_ids)
-    dissolved_items = resp['dissolved_items']
-    skipped_items = resp.get('skipped_items', [])
-    failed_items = resp.get('failed', [])
-
-    # 按 chat_id 批量标记所有相关 session 为 dissolved，并清理 GroupSeqStore 记录
-    for chat_id in dissolved_items:
-        session_store.mark_dissolved(chat_id)
-        seq_store.remove(chat_id)
-
-    # 脏 seq 清理：skipped = 网关 GroupChatStore 无该群归属（已解散/从未归属），
-    # callback 侧保留 seq 会被 /groups list、自动解散反复扫到
-    for chat_id in skipped_items:
-        if seq_store.remove(chat_id):
-            logger.info("[groups-dissolve] Purged dangling seq for chat_id=%s (gateway reported skipped)", chat_id)
-
-    logger.info("[groups-dissolve] Dissolved %d groups (skipped %d, failed %d)",
-                len(dissolved_items), len(skipped_items), len(failed_items))
-    result = {
-        'dissolved_count': len(dissolved_items),
-        'dissolved_items': dissolved_items,
-        'skipped_count': len(skipped_items),
+    # include_dissolved=True：只读属性继承场景，dissolved 不应阻断
+    item = store.get_session(session_id, include_dissolved=True)
+    if not item:
+        return 200, {'project_dir': '', 'claude_command': '', 'chat_id': '', 'dissolved': False}
+    return 200, {
+        'project_dir': item.get('project_dir', ''),
+        'claude_command': item.get('claude_command', ''),
+        'chat_id': item.get('chat_id', ''),
+        'dissolved': bool(item.get('dissolved')),
     }
-    if failed_items:
-        result['failed'] = failed_items
-    return result
-
-
-def handle_groups_dissolve(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """按 seqs 或 all 查询解散群聊（HTTP 路由 POST /cb/groups/dissolve）
-
-    调用方 (飞书网关 feishu.py):
-    - /groups dissolve 命令: _dissolve_groups() 按序号或全部解散群聊
-
-    请求 data:
-    - all: bool，true 表示解散全部活跃群聊
-    - seqs: List[int]，按 group_seq 序号解散（all 为 false 时必需）
-
-    响应 body:
-    - dissolved_count: int，成功解散数
-    - dissolved_items: List[str]，成功解散的 chat_id 列表
-    - skipped_count: int，跳过的外部群聊数
-    - failed: List[{seq, chat_id, error}]，失败明细（可选）
-    """
-    from services.session_chat_store import SessionChatStore
-    from services.group_seq_store import GroupSeqStore
-
-    if not check_global_auth_token(headers, '/cb/groups/dissolve'):
-        return 401, {'error': 'Unauthorized'}
-
-    session_store = SessionChatStore.get_instance()
-    seq_store = GroupSeqStore.get_instance()
-    if not session_store or not seq_store:
-        return 500, {'error': 'Store not initialized'}
-
-    # 确定目标 chat_id 列表，同时构建 chat_id → seq 快照用于 failed 回填
-    # 快照必须在 dissolve 前建立：dissolve 成功会 remove seq，事后回查拿不到
-    if data.get('all'):
-        entries = seq_store.get_all()
-        chat_ids = [entry['chat_id'] for entry in entries]
-        chat_to_seq = {entry['chat_id']: entry['seq'] for entry in entries}
-    else:
-        seqs = data.get('seqs', [])
-        if not seqs:
-            return 400, {'error': 'Missing seqs or all'}
-        # 走内存索引，零 I/O；同时 dict 自动去重，避免用户输入重复 seq 时下游幂等被重复触发
-        chat_to_seq = {}
-        for s in seqs:
-            cid = seq_store.get_chat_by_seq(s)
-            if cid:
-                chat_to_seq[cid] = s
-        chat_ids = list(chat_to_seq.keys())
-
-    result = dissolve_groups_by_targets(chat_ids)
-
-    # 回填 seq：网关侧返回的 failed 只带 chat_id，seq 是 callback 的业务概念，
-    # 在响应层按 chat_id 反查补齐，避免用户侧失败反馈丢失群聊序号。
-    if result.get('failed'):
-        for item in result['failed']:
-            item['seq'] = chat_to_seq.get(item.get('chat_id', ''), 0)
-    return 200, result
 
 
 # =============================================
@@ -821,15 +869,15 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/set-last-message-id': handle_set_last_message_id,
     '/cb/session/check-skip-user-prompt': handle_check_skip_user_prompt,
     '/cb/session/ensure-chat': handle_ensure_chat,
-    '/cb/session/resolve-group-chat': handle_resolve_group_chat,
+    '/cb/session/get-info': handle_get_session_info,
     '/cb/session/attach': handle_session_attach,
+    '/cb/session/mute': handle_session_mute,
+    '/cb/session/invalidate-chats': handle_invalidate_chats,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,
     '/cb/claude/record-dir-usage': handle_record_dir_usage,
     '/cb/claude/recent-dirs': handle_recent_dirs,
     '/cb/claude/browse-dirs': handle_browse_dirs,
-    '/cb/groups/list': handle_groups_list,
-    '/cb/groups/dissolve': handle_groups_dissolve,
 }
 
 # =============================================

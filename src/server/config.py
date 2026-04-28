@@ -336,3 +336,6 @@ FEISHU_SESSION_MODE = get_session_mode()
 # 群聊模式配置
 FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Claude')
 FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
+
+# Session 过期天数（统一，不区分 group/非 group）
+SESSION_EXPIRE_DAYS = get_config_positive_int('SESSION_EXPIRE_DAYS', 30)

@@ -183,24 +183,26 @@ render_template() {
             fi
         fi
 
-        # 转义 awk gsub 的特殊字符
-        # 注意: ENVIRON 传递的字符串中只有 & 是特殊字符(代表匹配内容)
-        # \ 不会被 gsub 特殊处理，所以只需转义 &
-        value=$(printf '%s' "$value" | sed 's/&/\\&/g')
-
-        # 使用 awk 进行替换
-        # 通过 ENVIRON 传递变量避免 shell 展开问题
+        # tr -c 将非 [a-zA-Z0-9_] 字符替换为 _，防止 key 注入 awk 代码
         local awk_key="TEMPLATE_KEY_$(echo "$key" | tr -c 'a-zA-Z0-9_' '_')"
         local awk_val="TEMPLATE_VAL_$(echo "$key" | tr -c 'a-zA-Z0-9_' '_')"
         export "$awk_key"="{{$key}}"
         export "$awk_val"="$value"
 
-        template_content=$(awk "
+        # 使用 awk index+substr 进行字面替换（避免 gsub 对 \ 和 & 的特殊解释）
+        # 通过 ENVIRON 传递变量避免 shell 展开问题
+        template_content=$(awk '
         {
-            gsub(ENVIRON[\"$awk_key\"], ENVIRON[\"$awk_val\"])
-            print
+            key = ENVIRON["'"$awk_key"'"]
+            val = ENVIRON["'"$awk_val"'"]
+            out = ""
+            while ((i = index($0, key)) > 0) {
+                out = out substr($0, 1, i-1) val
+                $0 = substr($0, i + length(key))
+            }
+            print out $0
         }
-        " <<< "$template_content")
+        ' <<< "$template_content")
 
         # 清理环境变量
         unset "$awk_key" "$awk_val"
@@ -939,7 +941,7 @@ _ensure_chat() {
 # ----------------------------------------------------------------------------
 # 功能: 按优先级确定消息发送的目标 chat_id
 #       1. 通过 session_id 查询已有的 chat_id
-#       2. 调用 ensure-chat（backend 根据 session 的 group_active 判断是否需要创建群聊）
+#       2. 调用 ensure-chat（group 模式下由 backend 懒创建群聊）
 #       3. 使用配置的 FEISHU_CHAT_ID 兜底
 #
 # 参数:
@@ -965,7 +967,7 @@ _resolve_chat_id() {
         fi
     fi
 
-    # 调用 ensure-chat（backend 根据 session 的 group_active 判断是否需要创建群聊）
+    # 调用 ensure-chat（group 模式下由 backend 懒创建群聊）
     # 仅 group 模式下调用，非 group 模式跳过避免无用 HTTP 请求
     if [ -n "$session_id" ]; then
         local session_mode

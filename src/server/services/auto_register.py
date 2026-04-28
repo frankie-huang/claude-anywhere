@@ -98,7 +98,11 @@ class AutoRegister:
 
     def _register(self):
         """执行注册"""
-        from config import FEISHU_REPLY_IN_THREAD, FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR, DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands
+        from config import (
+            FEISHU_REPLY_IN_THREAD, FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
+            DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
+            FEISHU_GROUP_DISSOLVE_DAYS, get_claude_commands
+        )
 
         logger.info(
             f"[auto-register] Starting registration in background: "
@@ -114,7 +118,9 @@ class AutoRegister:
             session_mode=FEISHU_SESSION_MODE,
             claude_commands=get_claude_commands(),
             default_chat_dir=DEFAULT_CHAT_DIR,
-            default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD
+            default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
+            group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
+            group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS
         )
 
         if success:
@@ -131,7 +137,9 @@ class AutoRegister:
         session_mode: str = '',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True
+        default_chat_follow_thread: bool = True,
+        group_name_prefix: Optional[str] = None,
+        group_dissolve_days: Optional[int] = None
     ) -> Tuple[bool, str]:
         """向飞书网关注册
 
@@ -143,6 +151,8 @@ class AutoRegister:
             claude_commands: 可用的 Claude 命令列表
             default_chat_dir: 默认聊天目录
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
+            group_name_prefix: 群聊名称前缀
+            group_dissolve_days: 群聊自动解散天数
 
         Returns:
             (success, message): success 表示是否成功，message 是响应消息或错误信息
@@ -163,6 +173,8 @@ class AutoRegister:
             request_data['default_chat_dir'] = default_chat_dir
         # 添加 default_chat_follow_thread
         request_data['default_chat_follow_thread'] = default_chat_follow_thread
+        request_data['group_name_prefix'] = group_name_prefix
+        request_data['group_dissolve_days'] = group_dissolve_days
 
         logger.info(f"[auto-register] Registering to gateway: {api_url}")
 

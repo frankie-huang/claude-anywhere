@@ -182,6 +182,8 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
         msg_claude_commands = msg.get('claude_commands')
         msg_default_chat_dir = msg.get('default_chat_dir', '')
         msg_default_chat_follow_thread = msg.get('default_chat_follow_thread', True)
+        msg_group_name_prefix = msg.get('group_name_prefix')
+        msg_group_dissolve_days = msg.get('group_dissolve_days')
 
         # 提取客户端携带的 auth_token（用于比对是否为同一终端）
         msg_auth_token = msg.get('auth_token', '')
@@ -213,7 +215,9 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
                     'session_mode': msg_session_mode,
                     'claude_commands': msg_claude_commands,
                     'default_chat_dir': msg_default_chat_dir,
-                    'default_chat_follow_thread': msg_default_chat_follow_thread
+                    'default_chat_follow_thread': msg_default_chat_follow_thread,
+                    'group_name_prefix': msg_group_name_prefix,
+                    'group_dissolve_days': msg_group_dissolve_days
                 })
 
                 # 发送新 token，等待消息循环中的 auth_ok_ack 完成认证
@@ -247,7 +251,9 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
                     session_mode=msg_session_mode,
                     claude_commands=msg_claude_commands,
                     default_chat_dir=msg_default_chat_dir,
-                    default_chat_follow_thread=msg_default_chat_follow_thread
+                    default_chat_follow_thread=msg_default_chat_follow_thread,
+                    group_name_prefix=msg_group_name_prefix,
+                    group_dissolve_days=msg_group_dissolve_days
                 )
                 if card_sent:
                     registry.set_card_cooldown(owner_id)
@@ -274,7 +280,9 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
             session_mode=msg_session_mode,
             claude_commands=msg_claude_commands,
             default_chat_dir=msg_default_chat_dir,
-            default_chat_follow_thread=msg_default_chat_follow_thread
+            default_chat_follow_thread=msg_default_chat_follow_thread,
+            group_name_prefix=msg_group_name_prefix,
+            group_dissolve_days=msg_group_dissolve_days
         )
         if card_sent:
             registry.set_card_cooldown(owner_id)
@@ -411,7 +419,9 @@ def _handle_ws_message(sock: socket.socket, owner_id: str, msg: Dict[str, Any], 
                         binding_params.get('session_mode', 'message'),
                         binding_params.get('claude_commands'),
                         binding_params.get('default_chat_dir', ''),
-                        binding_params.get('default_chat_follow_thread', True)
+                        binding_params.get('default_chat_follow_thread', True),
+                        binding_params.get('group_name_prefix'),
+                        binding_params.get('group_dissolve_days')
                     )
 
             # 原子地从 pending 升级为已认证连接

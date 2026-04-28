@@ -32,6 +32,8 @@ class BindingStore:
             "default_chat_dir": "/home/user/project",
             "default_chat_follow_thread": true,
             "default_chat_session_id": "uuid-xxx",
+            "group_name_prefix": "Claude",
+            "group_dissolve_days": 7,
             "updated_at": 1706745600,
             "registered_ip": "1.2.3.4"
         }
@@ -110,7 +112,9 @@ class BindingStore:
         session_mode: str = 'message',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True
+        default_chat_follow_thread: bool = True,
+        group_name_prefix: Optional[str] = None,
+        group_dissolve_days: Optional[int] = None
     ) -> bool:
         """创建或更新绑定
 
@@ -123,6 +127,8 @@ class BindingStore:
             claude_commands: 可用的 Claude 命令列表（从 Callback 后端传递）
             default_chat_dir: 默认聊天目录（从 Callback 后端传递）
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
+            group_name_prefix: 群聊名称前缀（None = 未传，保留旧值；显式值含 '' 原样写入）
+            group_dissolve_days: 群聊自动解散天数（None = 未传，保留旧值；显式值含 0 原样写入）
 
         Returns:
             是否保存成功
@@ -159,6 +165,15 @@ class BindingStore:
                     'updated_at': int(time.time()),
                     'registered_ip': registered_ip
                 }
+                # 群聊配置：None = 调用方未传，保留旧值；其他值（含 ''、0）显式写入
+                if group_name_prefix is not None:
+                    binding_data['group_name_prefix'] = group_name_prefix
+                elif existing and 'group_name_prefix' in existing:
+                    binding_data['group_name_prefix'] = existing['group_name_prefix']
+                if group_dissolve_days is not None:
+                    binding_data['group_dissolve_days'] = group_dissolve_days
+                elif existing and 'group_dissolve_days' in existing:
+                    binding_data['group_dissolve_days'] = existing['group_dissolve_days']
                 # 处理 default_chat_dir 及关联的 default_chat_session_id：
                 # - 传入非空值且与旧值相同：保留两者
                 # - 传入非空值且与旧值不同：更新目录，清除旧 session_id（已失效）

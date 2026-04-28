@@ -12,7 +12,6 @@ WebSocket 隧道支持：
     - 适用于 Callback 后端不可公网访问的场景（本地开发、内网部署）
 """
 
-import base64
 import copy
 import hmac
 import json
@@ -30,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from logging_config import setup_logging
 
 from handlers.utils import run_in_background as _run_in_background, post_json as _post_json
+from services.session_facade import SessionFacade
 
 logger = logging.getLogger(__name__)
 
@@ -426,43 +426,62 @@ def _handle_message_event(data: dict):
         _handle_command(data, command, args)
         return
 
-    # Group 模式：托管群聊中的非回复、非命令消息直接路由到对应 session
-    # 回复消息和命令（含 /reply）不在此处拦截，分别走各自的处理逻辑
-    session_mode = binding.get('session_mode', '')
-    if session_mode == 'group' and chat_type == 'group' and text.strip() and not parent_id:
-        resolve_resp = _resolve_group_chat_to_callback(binding, chat_id)
-        if resolve_resp.get('session_id'):
-            _run_in_background(_forward_continue_request,
-                               (binding, resolve_resp['session_id'],
-                                resolve_resp.get('project_dir', ''),
-                                text.strip(), chat_id, message_id))
-            return
-        # 非托管群聊，继续正常流程（parent_id 路由等）
-
-    # 检查是否是回复消息（用于继续会话）
-    if parent_id:
-        _handle_reply_message(data, parent_id, binding)
+    # 非命令消息：空内容早退（图片/贴图/非文字消息等均 text 为空）
+    # 不静默——bot 能收到消息即代表用户希望 bot 处理（用户可通过 FEISHU_AT_BOT_ONLY 等
+    # 配置限定接收范围）。空内容无法转给 Claude，直接告知用户避免"bot 收到却没反应"的疑惑。
+    prompt = text.strip()
+    if not prompt:
+        hint = "消息内容为空，无法继续会话" if parent_id else "消息内容为空，请发送文字消息与我对话"
+        _run_in_background(_send_reject_message, (chat_id, hint, message_id))
         return
 
-    # 非回复、非命令的普通消息
-    if text.strip():
-        default_chat_dir = binding.get('default_chat_dir', '')
+    # 路由到已有 session：优先 parent_id，其次 group 模式群聊 chat_id 反查
+    route_info = SessionFacade.resolve_from_message(data, binding)
+    route_source = route_info['source']
 
-        # 配置了默认聊天目录时，自动创建/继续会话
-        if default_chat_dir:
-            _handle_default_chat_message(data, text.strip(), binding)
-            return
+    # 若当前 session 处于静音状态，先自动解除（同步调用；解除失败不影响后续转发）
+    _auto_unmute_if_needed(binding, route_info, chat_id, message_id)
 
-        # 已注册但未配置默认目录：发送使用提示
-        owner_id = binding.get('_owner_id', '')
-        supported = _get_supported_commands(owner_id)
-        hint = "💡 我还不能直接对话哦，请通过以下方式使用：\n\n" \
-               "**发起新会话：**\n" \
-               "发送 `/new` 指令创建 Claude 会话\n\n" \
-               "**继续会话：**\n" \
-               "回复 Claude 的消息即可继续对话\n\n" \
-               "**支持的指令：**\n" + supported
-        _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+    if SessionFacade.RouteSource.is_parent_not_found(route_source):
+        _run_in_background(_send_reject_message,
+                           (chat_id,
+                            _SESSION_NOT_FOUND_HINT + "请稍后重试或重新发起 /new 指令。",
+                            message_id))
+        return
+
+    if SessionFacade.RouteSource.is_resolved(route_source):
+        logger.info("[feishu] Route to session (%s): session_id=%s, prompt=%s",
+                    route_source, route_info['session_id'], _sanitize_user_content(prompt))
+        # 刷新群聊活跃时间（供自动解散空闲判断）
+        if route_source == SessionFacade.RouteSource.GROUP_CHAT:
+            from services.group_session_store import GroupSessionStore
+            gs_store = GroupSessionStore.get_instance()
+            owner_id = binding.get('_owner_id', '')
+            if gs_store and owner_id:
+                gs_store.touch(owner_id, chat_id)
+        _run_in_background(_forward_continue_request,
+                           (binding, route_info['session_id'],
+                            route_info['project_dir'], prompt,
+                            chat_id, message_id))
+        return
+
+    # 未路由到已有 session：走默认聊天目录 / 使用提示
+    default_chat_dir = binding.get('default_chat_dir', '')
+    # 配置了默认聊天目录时，自动创建/继续会话
+    if default_chat_dir:
+        _handle_default_chat_message(data, prompt, binding)
+        return
+
+    # 已注册但未配置默认目录：发送使用提示
+    owner_id = binding.get('_owner_id', '')
+    supported = _get_supported_commands(owner_id)
+    hint = "💡 我还不能直接对话哦，请通过以下方式使用：\n\n" \
+           "**发起新会话：**\n" \
+           "发送 `/new` 指令创建 Claude 会话\n\n" \
+           "**继续会话：**\n" \
+           "回复 Claude 的消息即可继续对话\n\n" \
+           "**支持的指令：**\n" + supported
+    _run_in_background(_send_reject_message, (chat_id, hint, message_id))
 
 
 def _get_supported_commands(owner_id: str = '') -> str:
@@ -609,48 +628,6 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], project_dir: s
             logger.info(f"[default-chat] Persisted session {session_id} for {owner_id}")
 
     return session_id
-
-
-def _handle_reply_message(data: dict, parent_id: str, binding: Dict[str, Any]):
-    """处理用户回复消息，继续 Claude 会话
-
-    Args:
-        data: 飞书事件数据
-        parent_id: 被回复的消息 ID
-        binding: 用户绑定信息
-    """
-    from services.message_session_store import MessageSessionStore
-
-    event = data.get('event', {})
-    message = event.get('message', {})
-
-    message_id = message.get('message_id', '')
-    chat_id = message.get('chat_id', '')
-    # 直接使用上游解析好的 plain_text（已清理 @_user_1）
-    prompt = message.get('plain_text', '')
-
-    if not prompt:
-        logger.warning(f"[feishu] Reply message has no text content, parent_id={parent_id}")
-        _run_in_background(_send_reject_message, (chat_id, "消息内容为空，无法继续会话", message_id))
-        return
-
-    logger.info(f"[feishu] Reply message: parent_id={parent_id}, prompt={_sanitize_user_content(prompt)}")
-
-    # 查询映射
-    store = MessageSessionStore.get_instance()
-    if not store:
-        logger.warning("[feishu] MessageSessionStore not initialized")
-        _run_in_background(_send_reject_message, (chat_id, "会话存储服务未初始化，请稍后重试或联系管理员", message_id))
-        return
-
-    mapping = store.get(parent_id)
-    if not mapping:
-        logger.info(f"[feishu] No mapping found for parent_id={parent_id}, ignoring")
-        _run_in_background(_send_reject_message, (chat_id, "无法找到对应的会话（可能已过期或被清理），请重新发起 /new 指令", message_id))
-        return
-
-    # 在后台线程中转发到 Callback 后端
-    _run_in_background(_forward_continue_request, (binding, mapping['session_id'], mapping['project_dir'], prompt, chat_id, message_id))
 
 
 def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
@@ -850,7 +827,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
             if session_id:
                 message += f"\n🔑 Session: `{session_id}`"
             success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
-                                                           reply_in_thread=reply_in_thread)
+                                                          reply_in_thread=reply_in_thread)
             # 给发出的通知消息添加 Typing 表情，表示正在处理中
             if success and sent_message_id and add_typing:
                 service.add_reaction(sent_message_id, 'Typing')
@@ -871,14 +848,14 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
             if not success:
                 message = "⏳ Claude 正在处理您的问题，请稍候..."
                 success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
-                                                               reply_in_thread=reply_in_thread)
+                                                              reply_in_thread=reply_in_thread)
 
     elif status == 'completed':
         # 快速完成
         output = response.get('output', '')
         message = f"✅ Claude 已完成: {_sanitize_user_content(output, 50)}" if output else "✅ Claude 已完成"
         success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
-                                                       reply_in_thread=reply_in_thread)
+                                                      reply_in_thread=reply_in_thread)
 
     elif error:
         # 执行失败
@@ -928,7 +905,7 @@ def _send_error_notification(chat_id: str, error_msg: str, reply_to: Optional[st
     service = FeishuAPIService.get_instance()
     if service and service.enabled:
         success, sent_message_id = _send_text_message(service, chat_id, f"⚠️ {error_msg}", reply_to=reply_to,
-                                                       reply_in_thread=reply_in_thread)
+                                                      reply_in_thread=reply_in_thread)
 
         # 保存错误通知消息到 MessageSessionStore
         if success and sent_message_id and session_id and project_dir:
@@ -2033,6 +2010,53 @@ def _add_typing_reaction(card_message_id: str):
         service.add_reaction(card_message_id, 'Typing')
 
 
+def _apply_custom_overrides(form_value: Dict[str, Any]) -> Tuple[Dict[str, Any], List[int]]:
+    """让单选题的 q_{i}_custom 覆盖 q_{i}_select，返回清理后的 form_value 副本
+    和被覆盖的题号列表。
+
+    form_value 字段命名（q_{i}_select / q_{i}_custom）由 src/lib/feishu.sh
+    渲染卡片时写死。本函数集中处理该约定：
+
+    - **判定**：单选题同时有非空 q_{i}_select 和 q_{i}_custom 时视为"覆盖"。
+      多选题（select 值是 list）不存在覆盖语义；未选中（空串）也不算。
+    - **清理**：从 form_value 副本中剥离被覆盖题目的 q_{i}_select 字段，
+      使卡片更新时只回显用户最终的 custom 内容。
+    - **题号**：0-based 升序列表，供 toast 文案使用（展示时由调用方 +1
+      转成"第 X 题"）。
+
+    不修改入参；返回的是新的 dict。
+
+    Returns:
+        (cleaned_form_value, overridden_indices)
+    """
+    cleaned = dict(form_value)  # 浅拷贝
+    prefix, suffix = 'q_', '_select'
+    overridden = []
+    for key, value in cleaned.items():
+        # 只看 q_{i}_select 字段；q_{i}_custom 及其它键由各自消费方处理
+        if not (key.startswith(prefix) and key.endswith(suffix)):
+            continue
+        # value 是 list -> 多选题（不存在"custom 覆盖 select"的语义）
+        # value 为空串 -> 单选未选中，自然谈不上覆盖
+        if isinstance(value, list) or not value:
+            continue
+        # 防御：过滤形如 q_foo_select 的异常键，保证 idx 是纯数字
+        idx_str = key[len(prefix):-len(suffix)]
+        if not idx_str.isdigit():
+            continue
+        idx = int(idx_str)
+        # 同题 custom 非空，才算"自定义输入覆盖了下拉"
+        if cleaned.get(f'q_{idx}_custom', ''):
+            overridden.append(idx)
+    overridden.sort()
+
+    # 延迟到识别完成后再剥离 select，避免迭代 dict 时修改导致 RuntimeError
+    for idx in overridden:
+        cleaned.pop(f'q_{idx}_select', None)
+
+    return cleaned, overridden
+
+
 def _handle_ask_question_answer(request_id: str, form_value: dict, original_data: dict,
                                 card_message_id: str = '') -> Tuple[bool, dict]:
     """处理 AskUserQuestion 表单提交
@@ -2064,84 +2088,15 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             }
         }
 
-    # 从 RequestManager 获取原始请求数据（包含 questions）
-    from services.request_manager import RequestManager
-    request_manager = RequestManager.get_instance()
-    req_data = request_manager.get_request_data(request_id)
+    # 单选题若 custom 非空则覆盖下拉：清除对应 q_{i}_select 字段并收集题号，
+    # 用于卡片更新展示和 toast 文案（多选题不存在覆盖语义）。
+    form_value, overridden_questions = _apply_custom_overrides(form_value)
 
-    if not req_data:
-        logger.warning("[feishu] Request not found: %s", request_id)
-        return True, {
-            'toast': {
-                'type': TOAST_ERROR,
-                'content': '请求不存在或已过期'
-            }
-        }
-
-    # 解码 questions（base64 编码）
-    questions_encoded = req_data.get('questions_encoded', '')
-    questions = []
-    if questions_encoded:
-        try:
-            questions_json = base64.b64decode(questions_encoded.encode()).decode('utf-8')
-            questions = json.loads(questions_json)
-        except Exception as e:
-            logger.error("[feishu] Failed to decode questions: %s", e)
-            return True, {
-                'toast': {
-                    'type': TOAST_ERROR,
-                    'content': '问题数据解析失败'
-                }
-            }
-
-    if not questions:
-        logger.warning("[feishu] No questions found for request: %s", request_id)
-        return True, {
-            'toast': {
-                'type': TOAST_ERROR,
-                'content': '问题数据不存在'
-            }
-        }
-
-    # 浅拷贝 form_value，避免修改调用方传入的原始数据
-    form_value = dict(form_value)
-
-    # 从 form_value 中提取答案
-    answers = {}
-    overridden_questions = []  # 记录自定义内容覆盖了选项的单选题
-    for i, q in enumerate(questions):
-        question_text = q.get('question', '')
-        select_name = f'q_{i}_select'
-        custom_name = f'q_{i}_custom'
-
-        select_value = form_value.get(select_name, '')
-        custom_value = form_value.get(custom_name, '')
-
-        # 处理多选情况（select_value 可能是列表）
-        if isinstance(select_value, list):
-            # 多选：选中的选项 + 自定义输入全部作为答案
-            selected_labels = list(select_value)
-            if custom_value:
-                selected_labels.append(custom_value)
-            answer = ', '.join(selected_labels) if selected_labels else ''
-        else:
-            # 单选：自定义输入优先（因为下拉选中后无法清空）
-            if custom_value and select_value:
-                overridden_questions.append((i + 1, select_value))
-                form_value.pop(select_name, None)  # 清除下拉值，确保卡片更新时只显示自定义选项
-            answer = custom_value if custom_value else (select_value or '')
-
-        answers[question_text] = answer
-        logger.debug("[feishu] Question %d: '%s' -> '%s'", i, question_text, answer)
-
-    logger.info("[feishu] AskUserQuestion answers: %s", json.dumps(answers, ensure_ascii=False))
-
-    # 构建请求数据
+    # 构建请求数据：只透传 form_value，由 callback 端生成 answers/questions
     request_data = {
         'action': 'answer',
         'request_id': request_id,
-        'answers': answers,
-        'questions': questions
+        'form_value': form_value,
     }
 
     start_time = time.time()
@@ -2171,7 +2126,7 @@ def _handle_ask_question_answer(request_id: str, form_value: dict, original_data
             toast_content = message or '已提交回答'
             # 如果有单选题被自定义内容覆盖，在提示中告知用户
             if overridden_questions:
-                nums = '、'.join(f'第{qnum}题' for qnum, _ in overridden_questions)
+                nums = '、'.join(f'第{idx + 1}题' for idx in overridden_questions)
                 toast_content += f'（{nums}的自定义内容已覆盖选项）'
             logger.info("[feishu] AskUserQuestion succeeded: decision=%s, elapsed=%.0fms", decision, elapsed)
             # 决策成功后，异步添加 Typing 表情
@@ -2363,8 +2318,13 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             - callback_url: Callback 后端 URL（HTTP 模式）
             - owner_id: 飞书用户 ID
             - request_ip: 注册来源 IP（仅 approve_register 需要）
-            - reply_in_thread: 是否使用回复话题模式（仅 approve_register 需要）
+            - request_id: 注册请求 ID（WS 模式需要）
+            - session_mode: 会话模式 message/thread/group（仅 approve_register 需要）
             - claude_commands: 可用的 Claude 命令列表（仅 approve_register 需要）
+            - default_chat_dir: 默认聊天目录（仅 approve_register 需要）
+            - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（仅 approve_register 需要）
+            - group_name_prefix: 群聊名称前缀（仅 approve_register 需要）
+            - group_dissolve_days: 群聊自动解散天数（仅 approve_register 需要）
 
     Returns:
         (handled, response) - response 包含 toast 和可选的 card 更新
@@ -2382,6 +2342,8 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     claude_commands = value.get('claude_commands', None)
     default_chat_dir = value.get('default_chat_dir', '')
     default_chat_follow_thread = value.get('default_chat_follow_thread', True)
+    group_name_prefix = value.get('group_name_prefix')
+    group_dissolve_days = value.get('group_dissolve_days')
 
     # WebSocket 模式
     if mode == 'ws':
@@ -2392,7 +2354,9 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
                 session_mode=session_mode,
                 claude_commands=claude_commands,
                 default_chat_dir=default_chat_dir,
-                default_chat_follow_thread=default_chat_follow_thread
+                default_chat_follow_thread=default_chat_follow_thread,
+                group_name_prefix=group_name_prefix,
+                group_dissolve_days=group_dissolve_days
             )
         elif action == 'deny_register':
             logger.info("[feishu] WS registration denied: owner_id=%s, request_id=%s", owner_id, request_id)
@@ -2413,7 +2377,13 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     if action == 'approve_register':
         logger.info("[feishu] Registration approved: owner_id=%s, callback_url=%s, session_mode=%s", owner_id, callback_url, session_mode)
         return True, handle_authorization_decision(
-            callback_url, owner_id, request_ip, approved=True, session_mode=session_mode, claude_commands=claude_commands, default_chat_dir=default_chat_dir, default_chat_follow_thread=default_chat_follow_thread
+            callback_url, owner_id, request_ip, approved=True,
+            session_mode=session_mode,
+            claude_commands=claude_commands,
+            default_chat_dir=default_chat_dir,
+            default_chat_follow_thread=default_chat_follow_thread,
+            group_name_prefix=group_name_prefix,
+            group_dissolve_days=group_dissolve_days
         )
     elif action == 'deny_register':
         logger.info("[feishu] Registration denied: owner_id=%s", owner_id)
@@ -2578,51 +2548,9 @@ def _set_last_message_id_to_callback(binding: Dict[str, Any],
         return False
 
 
-def _ensure_chat_to_callback(binding: Dict[str, Any], session_id: str,
-                              project_dir: str = '') -> str:
-    """确保 session 有对应的群聊（调用 Callback 后端 /cb/session/ensure-chat）
-
-    Args:
-        binding: 绑定信息字典
-        session_id: Claude 会话 ID
-        project_dir: 项目工作目录（用于群聊命名）
-
-    Returns:
-        chat_id，失败返回空字符串
-    """
-    try:
-        resp = _forward_via_ws_or_http(
-            binding, '/cb/session/ensure-chat', {
-                'session_id': session_id,
-                'project_dir': project_dir
-            })
-        if resp and resp.get('chat_id'):
-            return resp['chat_id']
-        return ''
-    except Exception as e:
-        logger.error("[feishu] ensure-chat error: %s", e)
-        return ''
-
-
-def _resolve_group_chat_to_callback(binding: Dict[str, Any], chat_id: str) -> Dict[str, str]:
-    """通过 chat_id 反查群聊绑定的 session（调用 Callback 后端 /cb/session/resolve-group-chat）
-
-    Args:
-        binding: 绑定信息字典
-        chat_id: 飞书群聊 ID
-
-    Returns:
-        {'session_id': str, 'project_dir': str, 'claude_command': str}，失败返回空 dict
-    """
-    try:
-        resp = _forward_via_ws_or_http(
-            binding, '/cb/session/resolve-group-chat', {'chat_id': chat_id})
-        if resp and resp.get('session_id'):
-            return resp
-        return {}
-    except Exception as e:
-        logger.error("[feishu] resolve-group-chat error: %s", e)
-        return {}
+# 会话路由失败时的通用反馈文案（/mute /unmute / 主路由等场景共用）
+_SESSION_NOT_FOUND_HINT = "无法找到对应的会话（可能已过期、被清理或服务暂时不可用）。"
+_SESSION_UNRESOLVED_HINT = "无法确定目标会话，请在群聊中或回复某条会话消息时使用。"
 
 
 def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
@@ -2690,14 +2618,11 @@ def _handle_new_command(data: dict, args: str):
         data: 飞书事件数据
         args: 参数部分（不含 /new）
     """
-    from services.message_session_store import MessageSessionStore
-
     event = data.get('event', {})
     message = event.get('message', {})
 
     message_id = message.get('message_id', '')
     chat_id = message.get('chat_id', '')
-    parent_id = message.get('parent_id', '')
 
     # 解析指令参数（支持 --dir= 和 --cmd=）
     success, project_dir, cmd_arg, prompt = _parse_command_args(args)
@@ -2705,37 +2630,31 @@ def _handle_new_command(data: dict, args: str):
         _run_in_background(_send_reject_message, (chat_id, "参数格式错误，正确格式：`/new --dir=/path/to/project [--cmd=0] prompt`", message_id))
         return
 
-    # 解析 --cmd 参数（从 binding 获取命令列表）
     binding = _get_binding_from_event(event)
-    owner_id = binding.get('_owner_id', '') if binding else ''
+    if not binding:
+        _run_in_background(_send_reject_message, (chat_id, "您尚未注册，无法使用此功能", message_id))
+        return
+    owner_id = binding.get('_owner_id', '')
     msg_chat_type = message.get('chat_type', '')
 
     # 从上下文继承 project_dir 和 claude_command（用户未显式指定时）
-    # 优先级：--dir/--cmd 参数 > 回复消息关联的旧 session > 群聊绑定的旧 session > 默认值
-    # 仅在需要继承时才查询，避免不必要的 HTTP 请求
+    # 优先级：--dir/--cmd 参数 > 消息上下文解析到的旧 session > 默认值
     inherited_dir = ''
     inherited_cmd = ''
     need_inherit = not project_dir or not cmd_arg
 
-    if need_inherit and parent_id:
-        # 回复已有消息：从关联的 session 继承
-        store = MessageSessionStore.get_instance()
-        if not store:
-            _run_in_background(_send_reject_message, (chat_id, "服务未就绪，请稍后重试", message_id))
-            return
-        mapping = store.get(parent_id)
-        if mapping:
-            inherited_dir = mapping.get('project_dir', '')
-            from services.session_chat_store import SessionChatStore
-            session_store = SessionChatStore.get_instance()
-            if session_store:
-                inherited_cmd = session_store.get_command(mapping.get('session_id', '')) or ''
-    elif need_inherit and msg_chat_type == 'group' and chat_id and binding:
-        # 群聊场景：从当前群聊绑定的旧 session 继承
-        resolve_resp = _resolve_group_chat_to_callback(binding, chat_id)
-        if resolve_resp.get('session_id'):
-            inherited_dir = resolve_resp.get('project_dir', '')
-            inherited_cmd = resolve_resp.get('claude_command', '')
+    if need_inherit:
+        # 两条分支统一走 resolve_from_message：parent_id / group chat 的路由定位
+        route_info = SessionFacade.resolve_from_message(data, binding)
+        route_source = route_info.get('source', '')
+        if SessionFacade.RouteSource.is_resolved(route_source):
+            inherited_dir = route_info.get('project_dir', '')
+            # claude_command 本地路由 store 不存，回源 callback 拿权威值
+            # （/new 低频场景，1 次 RPC 可接受）
+            if not cmd_arg:
+                inherited_info = SessionFacade.fetch_session_info(
+                    binding, route_info.get('session_id', ''))
+                inherited_cmd = inherited_info.get('claude_command', '')
 
     # --cmd 参数优先，继承次之，binding 默认命令兜底
     if not cmd_arg and inherited_cmd:
@@ -2755,7 +2674,7 @@ def _handle_new_command(data: dict, args: str):
         logger.info(f"[feishu] /new inherited project_dir: {project_dir}")
 
     # 没有 --dir 但有 prompt：尝试使用用户的默认聊天目录
-    default_chat_dir = binding.get('default_chat_dir', '') if binding else ''
+    default_chat_dir = binding.get('default_chat_dir', '')
     if not project_dir and prompt and default_chat_dir:
         project_dir = default_chat_dir
         logger.info(f"[default-chat] /new using default dir: {default_chat_dir}")
@@ -2802,22 +2721,27 @@ def _forward_new_request(binding: dict, project_dir: str, prompt: str,
     reply_in_thread = _should_reply_in_thread(binding, project_dir)
     session_mode = binding.get('session_mode', '')
 
-    # 网关侧生成 session_id，供 ensure-chat 和 handle_new_session 共用
+    # 网关侧生成 session_id
     session_id = str(uuid.uuid4())
 
     # 确定目标 chat_id 和 skip_user_prompt
     target_chat_id = chat_id
     skip_user_prompt = True  # 默认跳过（飞书发起的 prompt 已在飞书展示）
 
-    if session_mode == 'group' and chat_type != 'group':
-        # P2P /new（group 模式）：先通过 ensure-chat 创建群聊
-        # prompt 未在新群展示，由 hook 发送，不跳过
-        target_chat_id = _ensure_chat_to_callback(binding, session_id, project_dir)
-        if target_chat_id:
-            logger.info("[feishu] Pre-created group chat for session %s: %s", session_id, target_chat_id)
-        else:
-            logger.warning("[feishu] Failed to pre-create group chat for session %s", session_id)
-        skip_user_prompt = False
+    if session_mode == 'group':
+        from services.group_session_store import GroupSessionStore
+        gs_store = GroupSessionStore.get_instance()
+        owner_id = binding.get('_owner_id', '')
+        if not gs_store or not owner_id:
+            _run_in_background(_send_reject_message, (chat_id, "存储服务未就绪，请稍后重试", message_id))
+            return ''
+        if chat_type != 'group':
+            # P2P /new（group 模式）：不预建群，让 callback ensure-chat 统一处理
+            target_chat_id = ''
+            skip_user_prompt = False  # prompt 未在新群展示，由 hook 发送
+        elif target_chat_id:
+            # 群内 /new：gateway 直接登记当前群的路由表（不调建群 API，群已存在）
+            gs_store.save(owner_id, target_chat_id, session_id, project_dir=project_dir)
 
     data = {
         'project_dir': project_dir,
@@ -2832,32 +2756,69 @@ def _forward_new_request(binding: dict, project_dir: str, prompt: str,
 
     # 新建会话时传递 reply_to，让第一条通知回复用户的 /new 消息
     # 后续通知会通过 last_message_id 链式回复
-    session_id = _forward_claude_request(binding, '/cb/claude/new',
-                                         data, chat_id, reply_to=message_id,
-                                         reply_in_thread=reply_in_thread)
-
-    return session_id
+    return _forward_claude_request(binding, '/cb/claude/new',
+                                   data, chat_id, reply_to=message_id,
+                                   reply_in_thread=reply_in_thread)
 
 
-def create_group_chat_and_record(name: str, owner_id: str) -> Tuple[bool, str]:
-    """创建飞书群聊并记录归属（网关侧群聊创建的唯一入口）
+def create_group_chat_and_record(owner_id: str, session_id: str, project_dir: str,
+                                 group_name_prefix: str) -> Tuple[bool, str]:
+    """创建飞书群聊并完成网关侧所有数据登记（群聊创建唯一入口）
 
-    所有创建路径都应走此函数，确保 GroupChatStore 与实际群聊一一对应，
-    避免"创建了但未记录 → 无法被 /groups dissolve 解散"的盲点。
+    所有创建路径都应走此函数，原子完成：
+        - 幂等检查：GroupSessionStore 已有该 session_id 的群则直接返回
+        - 调飞书 API 建群（name 由 group_name_prefix + project_dir + 时间戳构造）
+        - GroupChatStore.allocate（owner + seq）—— seq 落 store 即可，不回传调用方
+        - 若提供 session_id/project_dir，同步写 GroupSessionStore（chat → session 路由）
 
     调用方:
-    - handle_create_group(): 分离部署模式下 callback 经 HTTP 转发的创建请求
-    - handlers.utils.create_feishu_group(): 单机模式下 callback 直接调用
+    - handle_create_group() (HTTP): 分离部署 callback 经 HTTP 反向转发
+    - handlers.utils.create_feishu_group(): 单机模式 callback 直接调用
 
     Args:
-        name: 群聊名称
         owner_id: 归属 owner（飞书用户 ID），用于后续解散权限校验
+        session_id: 关联的 session ID（可选）；提供则写 GroupSessionStore
+        project_dir: session 工作目录（写 GroupSessionStore 时一并存）
+        group_name_prefix: 群名前缀；空串视为无前缀（不再兜底默认值，由调用方决定）
 
     Returns:
-        (success, chat_id or error_message)
+        (success, chat_id_or_error)
     """
     from services.feishu_api import FeishuAPIService
     from services.group_chat_store import GroupChatStore
+    from services.group_session_store import GroupSessionStore
+
+    # owner_id 是后续 allocate seq、写 GroupSessionStore、解散归属校验的必需上下文，
+    # 缺失则群只能在飞书端裸存、gateway 完全无记录，必须显式拒绝
+    if not owner_id:
+        return False, 'Missing owner_id'
+
+    group_store = GroupChatStore.get_instance()
+    gs_store = GroupSessionStore.get_instance()
+    if not group_store or not gs_store:
+        return False, 'Store not initialized'
+
+    # 幂等：如果当前 owner 下 GroupSessionStore 已有该 session_id 的群，直接返回
+    if session_id:
+        existing_chat_id = gs_store.find_by_session(owner_id, session_id)
+        if existing_chat_id:
+            logger.info("[create-group] Idempotent return: owner=%s session=%s -> chat=%s",
+                        owner_id, session_id, existing_chat_id)
+            return True, existing_chat_id
+
+    # 由 prefix + project_dir + 时间戳构造群名
+    dir_name = os.path.basename(project_dir) if project_dir else ''
+    if len(dir_name) > 30:
+        dir_name = dir_name[:29] + '\u2026'
+    timestamp = time.strftime('%m%d %H:%M:%S')
+    if group_name_prefix and dir_name:
+        name = f"{group_name_prefix} - {dir_name} - {timestamp}"
+    elif group_name_prefix:
+        name = f"{group_name_prefix} - {timestamp}"
+    elif dir_name:
+        name = f"{dir_name} - {timestamp}"
+    else:
+        name = timestamp
 
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
@@ -2868,50 +2829,63 @@ def create_group_chat_and_record(name: str, owner_id: str) -> Tuple[bool, str]:
         return False, result
 
     chat_id = result
-    group_store = GroupChatStore.get_instance()
-    if group_store and owner_id:
-        # save 失败只记 ERROR 日志、不阻断调用方，已创建的群不回滚
-        group_store.save(chat_id, owner_id)
+    seq = group_store.allocate(owner_id, chat_id)
+    if not seq:
+        logger.warning("[feishu] group_store.allocate failed for owner=%s chat=%s, "
+                       "group created on Feishu but not tracked locally", owner_id, chat_id)
+
+    # 同步写 chat → session 路由（如果调用方提供了 session_id）
+    if session_id:
+        gs_store.save(owner_id, chat_id, session_id, project_dir=project_dir)
+
     return True, chat_id
 
 
 def handle_create_group(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict]:
     """处理 /gw/feishu/create-group 请求，创建飞书群聊
 
+    群名由 gateway 根据 binding 中的 group_name_prefix 与请求中的 project_dir
+    统一构造，请求方无需也无法自定义。
+
     Args:
         binding: 绑定信息（由调用方鉴权后传入，包含 owner_id）
-        data: 请求 JSON 数据
-            - name: 群聊名称（必需）
+        data: 请求 JSON 数据（session_id、project_dir）
 
     Returns:
         (handled, response)
     """
-    name = data.get('name', '')
     owner_id = binding.get('_owner_id', '')
+    session_id = data.get('session_id', '')
+    project_dir = data.get('project_dir', '')
+    group_name_prefix = binding.get('group_name_prefix', '')
 
-    if not name:
-        return True, {'success': False, 'error': 'Missing name'}
-
-    ok, result = create_group_chat_and_record(name, owner_id)
+    ok, result = create_group_chat_and_record(
+        owner_id, session_id, project_dir, group_name_prefix)
     if ok:
         return True, {'success': True, 'chat_id': result}
     else:
         return True, {'success': False, 'error': result}
 
 
-def batch_dissolve_groups(chat_ids: List[str], owner_id: str) -> Dict[str, Any]:
+def batch_dissolve_groups(binding: Dict[str, Any],
+                          chat_ids: List[str]) -> Dict[str, Any]:
     """批量解散群聊并清理归属记录（网关侧核心函数）
 
-    只解散 GroupChatStore 中归属于指定 owner 的群聊。
+    只解散 GroupChatStore 中归属于 binding owner 的群聊。
     非服务创建的群聊（不在 store 中或归属其他 owner）直接跳过，不视为失败。
 
+    执行顺序：先通知 callback 标记 dissolved，再调飞书 API 解散。
+    这样即使飞书 API 失败，session 被标记 dissolved 但群仍存活——
+    用户下次在群内交互时 continue/ensure-chat 会自动复活 session（自愈）。
+    反之若先解散再通知，通知失败会导致 session 指向已解散群且无法自愈。
+
     调用方:
-    - handle_dissolve_groups(): 网关 HTTP 路由，鉴权后调用
-    - dissolve_feishu_groups(): Callback 侧单机模式直接调用
+    - _dissolve_groups(): /groups dissolve 命令
+    - main.py _cleanup_group_chats(): 定时清理空闲群聊
 
     Args:
+        binding: 绑定信息（包含 _owner_id，用于归属校验和 callback 通知）
         chat_ids: 待解散的群聊 ID 列表
-        owner_id: 当前 owner ID，用于归属校验
 
     Returns:
         {
@@ -2920,6 +2894,15 @@ def batch_dissolve_groups(chat_ids: List[str], owner_id: str) -> Dict[str, Any]:
             'failed': List[{'chat_id', 'error'}],  # 真正的 API 错误
         }
     """
+    owner_id = binding.get('_owner_id', '')
+    if not owner_id:
+        logger.warning("[batch-dissolve] owner_id is empty, refusing %d chat(s)", len(chat_ids))
+        return {
+            'dissolved_items': [],
+            'skipped_items': [],
+            'failed': [{'chat_id': cid, 'error': 'owner_id not configured'} for cid in chat_ids],
+        }
+
     from services.feishu_api import FeishuAPIService
     from services.group_chat_store import GroupChatStore
 
@@ -2938,26 +2921,37 @@ def batch_dissolve_groups(chat_ids: List[str], owner_id: str) -> Dict[str, Any]:
             'skipped_items': [],
             'failed': [{'chat_id': cid, 'error': 'GroupChatStore not initialized'} for cid in chat_ids],
         }
+    my_chats = {item['chat_id'] for item in group_store.get_chats_by_owner(owner_id)}
 
-    if not owner_id:
-        # owner_id 为空是配置/调用层 bug。返回 failed 而非 skipped_items，避免
-        # callback 侧对 skipped 的清理逻辑（seq_store.remove）被整批触发，
-        # 误把 seq_store 里所有相关 chat_id 清空而永久丢失管理能力。
-        logger.warning("[batch-dissolve] owner_id is empty, refusing %d chat(s)", len(chat_ids))
-        return {
-            'dissolved_items': [],
-            'skipped_items': [],
-            'failed': [{'chat_id': cid, 'error': 'owner_id not configured'} for cid in chat_ids],
-        }
-    my_chats = set(group_store.get_by_owner(owner_id))
-
-    dissolved_items = []
+    # 1) 按归属过滤
+    targets = []
     skipped_items = []
-    failed = []
     for cid in chat_ids:
         if cid not in my_chats:
             skipped_items.append(cid)
-            continue
+        else:
+            targets.append(cid)
+
+    if not targets:
+        return {'dissolved_items': [], 'skipped_items': skipped_items, 'failed': []}
+
+    # 2) 先通知 callback 标记 dissolved；失败则中止，等下次清理重试
+    try:
+        _forward_via_ws_or_http(binding,
+                                '/cb/session/invalidate-chats',
+                                {'chat_ids': targets})
+    except Exception as e:
+        logger.error("[dissolve] invalidate-chats pre-notify failed, aborting: %s", e)
+        return {
+            'dissolved_items': [],
+            'skipped_items': skipped_items,
+            'failed': [{'chat_id': cid, 'error': 'pre-notify failed: %s' % e} for cid in targets],
+        }
+
+    # 3) 再调飞书 API 解散 + 清 GroupChatStore
+    dissolved_items = []
+    failed = []
+    for cid in targets:
         ok, err = service.dissolve_group_chat(cid)
         if ok:
             group_store.remove(cid)
@@ -2966,44 +2960,6 @@ def batch_dissolve_groups(chat_ids: List[str], owner_id: str) -> Dict[str, Any]:
             failed.append({'chat_id': cid, 'error': err})
 
     return {'dissolved_items': dissolved_items, 'skipped_items': skipped_items, 'failed': failed}
-
-
-def handle_dissolve_groups(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict]:
-    """处理 /gw/feishu/dissolve-groups 请求，批量解散飞书群聊
-
-    Args:
-        binding: 绑定信息（由调用方鉴权后传入）
-        data: 请求 JSON 数据
-            - chat_ids: 群聊 ID 列表（必需）
-
-    Returns:
-        (handled, response)
-        response: {
-            'success': bool,
-            'dissolved_count': int,
-            'dissolved_items': List[str],
-            'skipped_items': List[str],
-            'failed': List[{chat_id, error}]  # optional
-        }
-    """
-    chat_ids = data.get('chat_ids', [])
-    if not chat_ids:
-        return True, {'success': False, 'error': 'Missing chat_ids'}
-
-    owner_id = binding.get('_owner_id', '')
-    result = batch_dissolve_groups(chat_ids, owner_id)
-
-    # success 表示请求已处理完成（dissolved=0 但 skipped>0 也是合法业务结果），
-    # 仅在参数校验失败（上面的 missing chat_ids）时为 False
-    response = {
-        'success': True,
-        'dissolved_count': len(result['dissolved_items']),
-        'dissolved_items': result['dissolved_items'],
-        'skipped_items': result['skipped_items'],
-    }
-    if result['failed']:
-        response['failed'] = result['failed']
-    return True, response
 
 
 def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict]:
@@ -3052,6 +3008,13 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
     if not owner_id:
         logger.warning("[feishu] /gw/feishu/send: missing owner_id")
         return True, {'success': False, 'error': 'Missing owner_id'}
+
+    # 静音拦截：session 处于静音状态则直接丢弃消息（Claude 依然正常处理用户消息，仅出站静默）
+    # 稳态下命中 SessionFacade 内存缓存，零 RPC；重启后首次查询才回源 callback
+    if session_id and SessionFacade.is_muted(binding, session_id):
+        logger.debug("[feishu] /gw/feishu/send muted: session_id=%s chat_id=%s",
+                     session_id, chat_id)
+        return True, {'success': True, 'muted': True}
 
     # 确定 receive_id 和 receive_id_type
     # 优先级：传入的 chat_id > owner_id
@@ -3157,6 +3120,13 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
         msg_store = MessageSessionStore.get_instance()
         if msg_store:
             msg_store.save(sent_message_id, session_id, project_dir)
+
+    # 出站到群聊时刷新活跃时间（用户终端对话也会触发 hook 通知到群）
+    if success and receive_id_type == 'chat_id' and receive_id and owner_id:
+        from services.group_session_store import GroupSessionStore
+        gs_store = GroupSessionStore.get_instance()
+        if gs_store:
+            gs_store.touch(owner_id, receive_id)
 
     # 通过 Callback 后端设置 last_message_id
     if sent_message_id and session_id and project_dir and binding:
@@ -3375,8 +3345,6 @@ def _handle_reply_command(data: dict, args: str):
         data: 飞书事件数据
         args: 参数部分（不含 /reply）
     """
-    from services.message_session_store import MessageSessionStore
-
     event = data.get('event', {})
     message = event.get('message', {})
 
@@ -3415,32 +3383,33 @@ def _handle_reply_command(data: dict, args: str):
             return
         claude_command = result
 
-    # 路由 session：回复消息走 parent_id 查询，无 parent_id 时 group 模式走 resolve-group-chat
-    session_id = ''
-    session_project_dir = ''
+    # 路由 session（统一走 SessionFacade）
+    route_info = SessionFacade.resolve_from_message(data, binding)
+    route_source = route_info['source']
 
-    if parent_id:
-        store = MessageSessionStore.get_instance()
-        if not store:
-            _run_in_background(_send_reject_message, (chat_id, "会话存储服务未初始化，请稍后重试或联系管理员", message_id))
-            return
-        mapping = store.get(parent_id)
-        if not mapping:
-            _run_in_background(_send_reject_message, (chat_id, "无法找到对应的会话（可能已过期或被清理），请重新发起 /new 指令", message_id))
-            return
-        session_id = mapping.get('session_id', '')
-        session_project_dir = mapping.get('project_dir', '')
-    elif session_mode == 'group' and chat_type == 'group':
-        resolve_resp = _resolve_group_chat_to_callback(binding, chat_id)
-        if resolve_resp.get('session_id'):
-            session_id = resolve_resp['session_id']
-            session_project_dir = resolve_resp.get('project_dir', '')
-
-    if not session_id:
-        _run_in_background(_send_reject_message, (chat_id, "无法找到对应的会话（可能已过期或被清理），请重新发起 /new 指令", message_id))
+    if SessionFacade.RouteSource.is_parent_not_found(route_source):
+        _run_in_background(_send_reject_message,
+                           (chat_id, _SESSION_NOT_FOUND_HINT + "请重新发起 /new 指令。", message_id))
         return
 
-    logger.info(f"[feishu] /reply command: session={session_id}, cmd={claude_command or '(default)'}, prompt={_sanitize_user_content(prompt)}")
+    if not SessionFacade.RouteSource.is_resolved(route_source):
+        _run_in_background(_send_reject_message,
+                           (chat_id, "无法找到对应的会话，请重新发起 /new 指令", message_id))
+        return
+
+    session_id = route_info['session_id']
+    session_project_dir = route_info.get('project_dir', '')
+
+    # 刷新群聊活跃时间（供自动解散空闲判断）
+    if route_source == SessionFacade.RouteSource.GROUP_CHAT:
+        from services.group_session_store import GroupSessionStore
+        gs_store = GroupSessionStore.get_instance()
+        owner_id = binding.get('_owner_id', '') if binding else ''
+        if gs_store and owner_id:
+            gs_store.touch(owner_id, chat_id)
+
+    logger.info("[feishu] /reply command: session=%s, cmd=%s, prompt=%s",
+                session_id, claude_command or '(default)', _sanitize_user_content(prompt))
 
     # 转发到 Callback 后端
     _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command))
@@ -3633,84 +3602,126 @@ def _handle_groups_command(data: dict, args: str) -> None:
 
 
 def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None:
-    """列出当前 owner 的活跃群聊"""
+    """列出当前 owner 的活跃群聊（数据全来自 gateway 本地 store，零 RPC）"""
     from services.group_chat_store import GroupChatStore
+    from services.group_session_store import GroupSessionStore
 
-    resp = _forward_via_ws_or_http(binding, '/cb/groups/list', {})
-    groups = resp.get('groups', []) if resp else []
-
-    # 标注哪些群聊是服务创建的（可解散），哪些是用户已有群聊（不可解散）
+    owner_id = binding.get('_owner_id', '')
     group_store = GroupChatStore.get_instance()
-    service_chats = set()
-    if group_store:
-        owner_id = binding.get('_owner_id', '')
-        if owner_id:
-            service_chats = set(group_store.get_by_owner(owner_id))
+    gs_store = GroupSessionStore.get_instance()
 
-    if not groups:
+    if not group_store or not gs_store:
+        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        return
+
+    owner_chats = group_store.get_chats_by_owner(owner_id) if owner_id else []
+    if not owner_chats:
         _send_reject_message(chat_id, "当前没有活跃的群聊会话", message_id)
         return
 
-    import time as _time
-    lines = ["**活跃群聊列表** (%d 个)\n" % len(groups)]
-    dissolvable_count = 0
-    for g in groups:
-        seq = g.get('group_seq', '?')
-        proj = os.path.basename(g.get('project_dir', '')) or '-'
-        updated = g.get('updated_at', 0)
-        age = ''
-        if updated:
-            delta = int(_time.time()) - updated
-            if delta < 60:
-                age = "刚刚"
-            elif delta < 3600:
-                age = "%d 分钟前" % (delta // 60)
-            elif delta < 86400:
-                age = "%d 小时前" % (delta // 3600)
-            else:
-                age = "%d 天前" % (delta // 86400)
-        is_dissolvable = g.get('chat_id') in service_chats
-        if is_dissolvable:
-            dissolvable_count += 1
-        tag = "" if is_dissolvable else " | (外部群聊)"
-        lines.append("**#%s** | %s | %s%s" % (seq, proj, age, tag))
+    # 聚合：group_chat_store（seq + chat_id + created_at）+ group_session_store（project_dir + last_active_at）
+    now = int(time.time())
+    gs_data = gs_store.get_by_owner(owner_id)
 
-    if dissolvable_count > 0:
-        lines.append("\n解散群聊：`/groups dissolve 序号` 或 `/groups dissolve all`")
-        lines.append("注：标注 (外部群聊) 的不可解散")
-    else:
-        lines.append("\n注：全部为外部群聊，不可通过 `/groups dissolve` 解散")
+    def _format_age(delta: int) -> str:
+        if delta < 60:
+            return "刚刚"
+        if delta < 3600:
+            return "%d 分钟前" % (delta // 60)
+        if delta < 86400:
+            return "%d 小时前" % (delta // 3600)
+        return "%d 天前" % (delta // 86400)
+
+    entries = []
+    for item in owner_chats:
+        cid = item['chat_id']
+        seq = item['seq']
+        created_at = item.get('created_at', 0)
+        gs_item = gs_data.get(cid) or {}
+        project_dir = gs_item.get('project_dir', '')
+        last_active_at = gs_item.get('last_active_at', created_at)
+        entries.append({
+            'chat_id': cid,
+            'seq': seq,
+            'project_dir': project_dir,
+            'last_active_at': last_active_at,
+        })
+    # 按 last_active_at 降序（最近活跃的在前）
+    entries.sort(key=lambda x: x['last_active_at'], reverse=True)
+
+    lines = ["**活跃群聊列表** (%d 个)\n" % len(entries)]
+    for e in entries:
+        proj = os.path.basename(e['project_dir']) or '-'
+        age = _format_age(now - e['last_active_at']) if e['last_active_at'] else ''
+        lines.append("**#%d** | %s | %s" % (e['seq'], proj, age))
+
+    lines.append("\n解散群聊：`/groups dissolve 序号` 或 `/groups dissolve all`")
     _send_reject_message(chat_id, '\n'.join(lines), message_id)
 
 
 def _dissolve_groups(binding: Dict[str, Any], payload: dict,
                      chat_id: str, message_id: str) -> None:
-    """解散当前 owner 的指定群聊
+    """解散当前 owner 的指定群聊（网关主导）
 
-    将用户参数（seqs/all）转发给 callback 的 /cb/groups/dissolve：
-    - callback 按序号查出对应的 (session_id, chat_id)，调用 dissolve_feishu_groups
-    - 归属判断（服务创建 + owner 校验）在网关侧 batch_dissolve_groups 内完成
+    执行顺序：
+        1. gateway 本地定位目标 chat_ids（按 seqs 或 all）
+        2. 调 batch_dissolve_groups（先通知 callback 标记 dissolved，再飞书 API 解散 + 清 GroupChatStore）
+        3. 清 GroupSessionStore 对应条目
     """
-    resp = _forward_via_ws_or_http(binding, '/cb/groups/dissolve', payload)
-    dissolved = resp.get('dissolved_count', 0) if resp else 0
-    skipped = resp.get('skipped_count', 0) if resp else 0
-    failed = resp.get('failed', []) if resp else []
+    from services.group_chat_store import GroupChatStore
+    from services.group_session_store import GroupSessionStore
 
-    if dissolved == 0 and not failed:
-        # 无解散无失败：走"没找到"兜底，保留 skipped 附注
-        msg = "没有找到可解散的群聊"
-        if skipped > 0:
-            msg += "（%d 个外部群聊已跳过）" % skipped
+    owner_id = binding.get('_owner_id', '')
+    group_store = GroupChatStore.get_instance()
+    gs_store = GroupSessionStore.get_instance()
+
+    if not group_store or not gs_store:
+        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        return
+
+    # 1) 根据 payload 解出目标 chat_ids（本地查询，零 RPC）
+    owner_chats = group_store.get_chats_by_owner(owner_id) if owner_id else []
+    seq_to_chat = {item['seq']: item['chat_id'] for item in owner_chats}
+
+    target_chat_ids: List[str] = []
+    if payload.get('all'):
+        target_chat_ids = [item['chat_id'] for item in owner_chats]
     else:
-        # 并列列出各类计数，逗号分隔，避免标题与括号重复
-        parts = []
-        if dissolved > 0:
-            parts.append("已解散 %d 个群聊" % dissolved)
-        if failed:
-            parts.append("%d 个解散失败（见服务日志）" % len(failed))
-        if skipped > 0:
-            parts.append("%d 个外部群聊已跳过" % skipped)
-        msg = "，".join(parts)
+        # seqs 由 _handle_groups_command 上游 int() 校验，此处防御性跳过非法值
+        seqs = payload.get('seqs') or []
+        for seq in seqs:
+            try:
+                cid = seq_to_chat.get(int(seq))
+            except (TypeError, ValueError):
+                continue
+            if cid:
+                target_chat_ids.append(cid)
+
+    if not target_chat_ids:
+        _send_reject_message(chat_id, "没有找到可解散的群聊", message_id)
+        return
+
+    # 2) 调 batch_dissolve_groups（先通知 callback 标记 dissolved，再飞书 API 解散 + 清 GroupChatStore）
+    result = batch_dissolve_groups(binding, target_chat_ids)
+    dissolved_items = result.get('dissolved_items', [])
+    failed = result.get('failed', [])
+    # skipped_items 理论上不会出现（我们已按 owner 过滤），但兜底收敛
+    skipped_items = result.get('skipped_items', [])
+
+    # 3) 清 GroupSessionStore 对应条目
+    if dissolved_items and owner_id:
+        for cid in dissolved_items:
+            gs_store.remove(owner_id, cid)
+
+    # 4) 组合用户反馈
+    parts = []
+    if dissolved_items:
+        parts.append("已解散 %d 个群聊" % len(dissolved_items))
+    if failed:
+        parts.append("%d 个解散失败（见服务日志）" % len(failed))
+    if skipped_items:
+        parts.append("%d 个外部群聊已跳过" % len(skipped_items))
+    msg = "，".join(parts) if parts else "没有找到可解散的群聊"
 
     _send_reject_message(chat_id, msg, message_id)
 
@@ -3750,16 +3761,24 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
 
     Callback 响应结构：
         {
-            'matched_ids': list[str],      # 前缀匹配到的全部 session_id
-            'attached': bool,              # 是否执行了绑定（仅唯一匹配时为 True）
-            'session_id': str,             # 绑定的 session_id（attached=True 时有值）
-            'original_chat_id': str,       # session 绑定前的 chat_id（attached=True 时有值）
-            'original_seq': int | None,    # 原群聊的 seq，非 None 时提示用户可手动解散孤儿群；
-                                           # 为 None 的情况：session 原来无 chat_id / 原群非服务创建 /
-                                           # 原群就是当前群（attach 到自己所在群）
-            'dissolve_days': int,          # 自动解散阈值（天），0 表示未启用自动解散
+            'matched_ids': list[str],
+            'attached': bool,
+            'session_id': str,
+            'original_chat_id': str,
+            'project_dir': str,
         }
+
+    dissolve_days 从 gateway 本地 binding 读取，不再经 callback 传递。
     """
+    from services.group_chat_store import GroupChatStore
+    from services.group_session_store import GroupSessionStore
+
+    group_store = GroupChatStore.get_instance()
+    gs_store = GroupSessionStore.get_instance()
+    if not group_store or not gs_store:
+        _send_reject_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
+        return
+
     resp = _forward_via_ws_or_http(binding, '/cb/session/attach', {
         'session_prefix': prefix,
         'chat_id': chat_id,
@@ -3788,15 +3807,146 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
         return
 
     session_id = resp.get('session_id', '')
-    original_seq = resp.get('original_seq')
-    dissolve_days = resp.get('dissolve_days', 0)
-    lines = [f"✅ Session `{session_id[:8]}…` 已绑定到当前群聊"]
-    if original_seq is not None:
-        hint = f"💡 原群聊 #{original_seq} 已成为孤儿群，可按需通过 `/groups dissolve {original_seq}` 手动解散"
-        if dissolve_days > 0:
-            hint += f"（空闲超过 {dissolve_days} 天也会被自动解散）"
-        lines.append(hint)
+    original_chat_id = resp.get('original_chat_id', '')
+    dissolve_days = binding.get('group_dissolve_days', 0) or 0
+
+    # gateway 自查原群 seq（attach 到自己所在群时 original==target，不提示孤儿群）
+    original_seq: Optional[int] = None
+    if original_chat_id and original_chat_id != chat_id:
+        original_seq = group_store.get_seq(original_chat_id)
+
+    session_mode = binding.get('session_mode', '') if binding else ''
+    is_group_mode = (session_mode == 'group')
+    owner_id = binding.get('_owner_id', '') if binding else ''
+
+    # 同步 gateway 侧 GroupSessionStore（仅 group 模式需要路由表）：
+    # save 内部会自动清理本 session 的旧 chat 映射（若仍指向本 session），
+    # 不需要外部显式 remove（避免误删已被其他 session 接管的映射）
+    if is_group_mode and owner_id:
+        gs_store.save(owner_id, chat_id, session_id, project_dir=resp.get('project_dir', ''))
+
+    # 构造反馈
+    lines = [f"✅ Session `{session_id[:8]}` 已绑定到当前群聊"]
+    if is_group_mode:
+        if original_seq is not None:
+            hint = f"💡 原群聊 #{original_seq} 已成为孤儿群，可按需通过 `/groups dissolve {original_seq}` 手动解散"
+            if dissolve_days > 0:
+                hint += f"（空闲超过 {dissolve_days} 天也会被自动解散）"
+            lines.append(hint)
+    else:
+        lines.append("⚠️ 当前会话模式非 group，后续会话通知会发送到本群，"
+                     "但在本群直接发送消息（非回复）不会被自动路由到该 session")
     _send_reject_message(chat_id, '\n'.join(lines), message_id)
+
+
+# =============================================================================
+# 静音：/mute /unmute 命令 + 自动解除
+# =============================================================================
+# mute 状态由 SessionFacade 管理：callback 端 session_chat_store 为权威源，
+# gateway 端本地缓存（write-through + lazy read-through）。
+# handle_send_message 的出站拦截稳态下命中缓存零 RPC。
+
+def _pick_mute_target(route_info: Dict[str, str], chat_id: str,
+                      message_id: str) -> str:
+    """从已解析好的 route_info 中提取目标 session_id，无法解析时给用户反馈
+
+    仅用于用户主动命令（/mute、/unmute）。被动钩子（auto_unmute）自己内联判断，
+    不经过此函数。
+
+    Returns:
+        解析成功返回 session_id，失败返回 ''
+    """
+    source = route_info.get('source', '')
+    if SessionFacade.RouteSource.is_resolved(source):
+        return route_info.get('session_id', '')
+    hint = (_SESSION_NOT_FOUND_HINT
+            if SessionFacade.RouteSource.is_parent_not_found(source)
+            else _SESSION_UNRESOLVED_HINT)
+    _run_in_background(_send_reject_message, (chat_id, hint, message_id))
+    return ''
+
+
+def _handle_mute_command(data: dict, args: str) -> None:
+    """处理 /mute 命令：静音当前会话"""
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+
+    binding = _get_binding_from_event(event)
+    if not binding:
+        return
+
+    route_info = SessionFacade.resolve_from_message(data, binding)
+    session_id = _pick_mute_target(route_info, chat_id, message_id)
+    if not session_id:
+        return
+
+    changed = SessionFacade.mute(binding, session_id)
+    if changed is None:
+        _run_in_background(_send_reject_message,
+                           (chat_id, "静音操作失败，请查看日志。", message_id))
+        return
+
+    sid_tag = f"session `{session_id[:8]}`"
+    text = (f"已静音 {sid_tag}，后续消息将不再推送到此处。发送任意文字消息可自动解除静音。" if changed
+            else f"{sid_tag} 已处于静音状态。")
+    _run_in_background(_send_reject_message, (chat_id, text, message_id))
+
+
+def _handle_unmute_command(data: dict, args: str) -> None:
+    """处理 /unmute 命令：解除静音"""
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+
+    binding = _get_binding_from_event(event)
+    if not binding:
+        return
+
+    route_info = SessionFacade.resolve_from_message(data, binding)
+    session_id = _pick_mute_target(route_info, chat_id, message_id)
+    if not session_id:
+        return
+
+    changed = SessionFacade.unmute(binding, session_id)
+    if changed is None:
+        _run_in_background(_send_reject_message,
+                           (chat_id, "解除静音失败，请查看日志。", message_id))
+        return
+
+    sid_tag = f"session `{session_id[:8]}`"
+    text = (f"已解除 {sid_tag} 的静音。" if changed
+            else f"{sid_tag} 当前未处于静音状态。")
+    _run_in_background(_send_reject_message, (chat_id, text, message_id))
+
+
+def _auto_unmute_if_needed(binding: Dict[str, Any], route_info: Dict[str, str],
+                           chat_id: str, message_id: str) -> None:
+    """非命令消息到达入口：若当前 session 处于静音则解除并提示
+
+    使用主路由已解析好的 route_info，避免重复解析。作为被动钩子，对
+    PARENT_NOT_FOUND / UNRESOLVED 均静默跳过，不给用户报错。
+    """
+    if not binding:
+        return
+    if not SessionFacade.RouteSource.is_resolved(route_info.get('source', '')):
+        return
+    session_id = route_info.get('session_id', '')
+    if not session_id:
+        return
+
+    result = SessionFacade.unmute(binding, session_id)
+    if result is True:
+        _run_in_background(_send_reject_message,
+                           (chat_id,
+                            f"已自动解除 session `{session_id[:8]}` 的静音。",
+                            message_id))
+    elif result is None:
+        # callback 调用失败：静默跳过用户反馈（被动钩子），但打 warning 留痕便于排障
+        logger.warning("[feishu] auto_unmute failed: session_id=%s chat_id=%s",
+                       session_id, chat_id)
 
 
 # =============================================================================
@@ -3809,6 +3959,12 @@ _COMMANDS = {
     'new': (_handle_new_command, False, "发起新的 Claude 会话\n格式：`/new --dir=/path/to/project [--cmd=0] prompt` 或回复消息时 `/new prompt`"),
     'reply': (_handle_reply_command, False, "回复消息时指定 Claude Command 继续会话\n格式：`/reply [--cmd=0] prompt`\n仅支持在回复消息时使用"),
     'attach': (_handle_attach_command, False, "将指定 session 绑定到当前群聊\n格式：`/attach <session_id 前缀>`（至少 8 字符）\n仅支持在群聊中使用"),
+    'mute': (_handle_mute_command, False, "静音当前会话，后续消息不再推送\n格式：`/mute`（发送任意文字消息可自动解除）"),
+    'unmute': (_handle_unmute_command, False, "解除当前会话静音\n格式：`/unmute`"),
     'users': (_handle_users_command, True, "查看已注册用户和在线状态"),
     'groups': (_handle_groups_command, False, "管理群聊会话\n`/groups` 列表 | `/groups dissolve 1 2` 解散 | `/groups dissolve all` 全部解散"),
 }
+
+
+# 模块加载末尾：注入 SessionFacade 的下游依赖（避免 services -> handlers 循环 import）
+SessionFacade.configure(forward_fn=_forward_via_ws_or_http)
