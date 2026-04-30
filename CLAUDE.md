@@ -74,6 +74,25 @@ def foo(name: str, count: int = 0) -> bool:  # 内联注解
 
 **原则**：修改 Shell 脚本时，始终考虑两种系统的兼容性。
 
+### 新增配置项的归属判断
+
+新增配置项时，必须先判断该配置是**全局配置**还是 **per-user 配置**：
+
+- **全局配置**：所有用户共享，只在 `config.py` 中读取（如 `FEISHU_APP_ID`、`CALLBACK_SERVER_PORT`）
+- **per-user 配置**：每个用户独立设置，需要通过注册流程写入 `BindingStore`，网关根据用户的 binding 读取（如 `session_mode`、`at_bot_only`、`group_dissolve_days`）
+
+**判断标准**：如果不同用户可能需要不同的值，就是 per-user 配置。
+
+per-user 配置的完整链路（以 `at_bot_only` 为例）：
+1. `config.py` — 定义全局默认值
+2. `auto_register.py` / `ws_tunnel_client.py` — callback 端注册时传给网关
+3. `register.py` — HTTP 注册入口提取并透传
+4. `ws_handler.py` — WS 注册入口提取并透传
+5. `binding_store.py` — 存储到 binding
+6. `feishu.py` — 从 `binding.get('xxx')` 读取（而非全局 config）
+
+**检查方法**：透传完成后，用已有的同类参数（如 `group_dissolve_days`）全局 grep，确认每个出现位置都有对应的新参数。注意不要遗漏 `feishu.py` 中的卡片回调入口（`handle_card_action_register`）。
+
 ### 环境变量读取方式
 
 **Bash 脚本中读取配置：**

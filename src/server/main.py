@@ -30,6 +30,7 @@ import socketserver
 import sys
 import threading
 import time
+from typing import Dict, List
 
 # 将 shared 目录加入模块搜索路径（供本进程所有模块使用）
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'shared'))
@@ -48,11 +49,13 @@ from services.request_manager import RequestManager
 from services.card_cache import CardCache
 from services.feishu_api import FeishuAPIService
 from services.message_session_store import MessageSessionStore
+from services.group_session_store import GroupSessionStore
 from services.dir_history_store import DirHistoryStore
 from services.binding_store import BindingStore
 from handlers.http_handler import HttpRequestHandler
 from services.auth_token_store import AuthTokenStore
 from services.session_chat_store import SessionChatStore
+from services.group_chat_store import GroupChatStore
 from services.ws_registry import WebSocketRegistry
 
 # =============================================================================
@@ -250,6 +253,10 @@ def run_cleanup_thread():
         while True:
             time.sleep(3600)  # 1 小时
             _cleanup_expired_data()
+            # 群聊自动解散数据源在 gateway 侧（GroupChatStore + GroupSessionStore），
+            # 仅 gateway / 单机部署执行；分离部署的 callback 端没有这两个 store，跳过
+            if not IS_CALLBACK_BACKEND:
+                _cleanup_group_chats()
 
     # 启动三个独立的清理线程
     for target in (cleanup_disconnected_loop, cleanup_pending_loop, cleanup_expired_loop):
@@ -265,7 +272,7 @@ def _cleanup_expired_data():
     | Store                | 文件名                  | 过期时间 | Lazy | 定期 | 说明                     |
     |----------------------|-------------------------|----------|------|------|--------------------------|
     | MessageSessionStore  | message_sessions.json   | 7 天     | ✅   | ✅   | 本函数清理                |
-    | SessionChatStore     | session_chats.json      | 7 天     | ✅   | ✅   | 本函数清理                |
+    | SessionChatStore     | session_chats.json      | 30 天    | ✅   | ✅   | 本函数清理                |
     | BindingStore         | bindings.json           | 无       | ❌   | ❌   | 需先实现自动续期机制       |
     | DirHistoryStore      | dir_history.json        | 30 天    | ✅   | ❌   | 写入时清理，死数据无害     |
     | AuthTokenStore       | auth_token.json         | 无       | ❌   | ❌   | 单条记录，每次注册覆盖     |
@@ -283,11 +290,81 @@ def _cleanup_expired_data():
             logger.info(f"[cleanup] Cleaned {expired_count} expired session mappings")
 
     # 清理 session_chats
-    chat_store = SessionChatStore.get_instance()
-    if chat_store:
-        expired_count = chat_store.cleanup_expired()
+    session_store = SessionChatStore.get_instance()
+    if session_store:
+        expired_count = session_store.cleanup_expired()
         if expired_count > 0:
             logger.info(f"[cleanup] Cleaned {expired_count} expired chat mappings")
+
+
+def _cleanup_group_chats():
+    """群聊空闲自动解散维护（cleanup_expired_loop 每小时一次）。
+
+    网关主导，数据源完全来自 gateway 侧 GroupChatStore + GroupSessionStore。
+    解散阈值从每个 owner 的 BindingStore 记录读取（per-binding `group_dissolve_days`）：
+      - binding 不存在 → 跳过（GroupChatStore 里出现未注册 owner 是脏数据）
+      - days <= 0 → 该 owner 显式禁用自动解散，跳过
+      - 否则按该值判断空闲
+    """
+    try:
+        from handlers.feishu import batch_dissolve_groups
+
+        group_store = GroupChatStore.get_instance()
+        gs_store = GroupSessionStore.get_instance()
+        binding_store = BindingStore.get_instance()
+        if not group_store or not gs_store or not binding_store:
+            return
+
+        now = time.time()
+
+        all_groups = group_store.get_all()
+        if not all_groups:
+            return
+
+        # 按 owner 遍历：每个 owner 只读一次 binding + 一次 session 数据
+        idle_by_owner: Dict[str, List[str]] = {}
+        for owner_id, owner_bucket in all_groups.items():
+            binding = binding_store.get(owner_id)
+            if not binding:
+                continue
+            dissolve_days = binding.get('group_dissolve_days', 0) or 0
+            if dissolve_days <= 0:
+                continue
+            sessions = gs_store.get_by_owner(owner_id)
+            for item in owner_bucket.values():
+                chat_id = item.get('chat_id', '')
+                if not chat_id:
+                    continue
+                gs_item = sessions.get(chat_id) or {}
+                last_active = gs_item.get('last_active_at', item.get('created_at', 0))
+                if now - last_active >= dissolve_days * 86400:
+                    idle_by_owner.setdefault(owner_id, []).append(chat_id)
+
+        if not idle_by_owner:
+            return
+
+        for owner_id, chat_ids in idle_by_owner.items():
+            binding = binding_store.get(owner_id)
+            if not binding:
+                continue
+            result = batch_dissolve_groups(binding, chat_ids)
+            dissolved_items = result.get('dissolved_items', [])
+            failed = result.get('failed', [])
+            skipped = result.get('skipped_items', [])
+            if failed:
+                logger.warning("[cleanup] Failed to dissolve %d group chats for owner=%s: %s",
+                               len(failed), owner_id, failed)
+            if skipped:
+                logger.info("[cleanup] Skipped %d group chats for owner=%s",
+                            len(skipped), owner_id)
+            if dissolved_items:
+                for cid in dissolved_items:
+                    gs_store.remove(owner_id, cid)
+                logger.info("[cleanup] Auto-dissolved %d idle group chats for owner=%s",
+                            len(dissolved_items), owner_id)
+    except Exception:
+        logger.exception("[cleanup] Error in group chat cleanup")
+
 
 # =============================================================================
 # 多线程 HTTP 服务器
@@ -396,6 +473,10 @@ def main():
     MessageSessionStore.initialize(runtime_dir)
     logger.info(f"MessageSessionStore initialized with runtime_dir={runtime_dir}")
 
+    # 初始化 GroupSessionStore（群聊 chat_id → 活跃 session 的本地路由表）
+    GroupSessionStore.initialize(runtime_dir)
+    logger.info(f"GroupSessionStore initialized with runtime_dir={runtime_dir}")
+
     # 初始化 DirHistoryStore（用于记录目录使用历史）
     DirHistoryStore.initialize(runtime_dir)
     logger.info(f"DirHistoryStore initialized with runtime_dir={runtime_dir}")
@@ -409,8 +490,12 @@ def main():
     logger.info(f"AuthTokenStore initialized with runtime_dir={runtime_dir}")
 
     # 初始化 SessionChatStore（callback 后端存储 session_id -> chat_id 映射）
-    SessionChatStore.initialize(runtime_dir)
-    logger.info(f"SessionChatStore initialized with runtime_dir={runtime_dir}")
+    from config import SESSION_EXPIRE_DAYS
+    SessionChatStore.initialize(runtime_dir, expire_seconds=SESSION_EXPIRE_DAYS * 86400)
+    logger.info(f"SessionChatStore initialized with runtime_dir={runtime_dir}, expire={SESSION_EXPIRE_DAYS}d")
+
+    GroupChatStore.initialize(runtime_dir)
+    logger.info(f"GroupChatStore initialized with runtime_dir={runtime_dir}")
 
     # 初始化 WebSocketRegistry（用于 WS 隧道连接管理）
     WebSocketRegistry.initialize()
@@ -467,13 +552,20 @@ def main():
         if FEISHU_GATEWAY_MODE == 'ws':
             # WS 隧道模式：客户端主动连接网关，适用于本地开发（callback 不可公网访问）
             from services.ws_tunnel_client import start_ws_tunnel_client
-            from config import FEISHU_REPLY_IN_THREAD, DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands
+            from config import (FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
+                                FEISHU_SESSION_MODE,
+                                DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands,
+                                FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS)
             start_ws_tunnel_client(
                 FEISHU_GATEWAY_URL, FEISHU_OWNER_ID,
                 reply_in_thread=FEISHU_REPLY_IN_THREAD,
+                at_bot_only=FEISHU_AT_BOT_ONLY,
+                session_mode=FEISHU_SESSION_MODE,
                 claude_commands=get_claude_commands(),
                 default_chat_dir=DEFAULT_CHAT_DIR,
-                default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD
+                default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
+                group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
+                group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS
             )
             logger.info("WebSocket tunnel client started, gateway: %s", FEISHU_GATEWAY_URL)
         elif CALLBACK_SERVER_URL:

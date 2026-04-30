@@ -98,7 +98,12 @@ class AutoRegister:
 
     def _register(self):
         """执行注册"""
-        from config import FEISHU_REPLY_IN_THREAD, DEFAULT_CHAT_DIR, DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands
+        from config import (
+            FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
+            FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
+            DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
+            FEISHU_GROUP_DISSOLVE_DAYS, get_claude_commands
+        )
 
         logger.info(
             f"[auto-register] Starting registration in background: "
@@ -111,9 +116,13 @@ class AutoRegister:
             self._owner_id,
             register_url,
             reply_in_thread=FEISHU_REPLY_IN_THREAD,
+            at_bot_only=FEISHU_AT_BOT_ONLY,
+            session_mode=FEISHU_SESSION_MODE,
             claude_commands=get_claude_commands(),
             default_chat_dir=DEFAULT_CHAT_DIR,
-            default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD
+            default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
+            group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
+            group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS
         )
 
         if success:
@@ -127,9 +136,13 @@ class AutoRegister:
         owner_id: str,
         register_url: str,
         reply_in_thread: bool = False,
+        at_bot_only: Optional[bool] = None,
+        session_mode: str = '',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True
+        default_chat_follow_thread: bool = True,
+        group_name_prefix: Optional[str] = None,
+        group_dissolve_days: Optional[int] = None
     ) -> Tuple[bool, str]:
         """向飞书网关注册
 
@@ -138,9 +151,12 @@ class AutoRegister:
             owner_id: 飞书用户 ID
             register_url: 飞书网关注册接口完整 URL（已包含 /gw/register）
             reply_in_thread: 是否使用回复话题模式
+            at_bot_only: 群聊 @bot 过滤
             claude_commands: 可用的 Claude 命令列表
             default_chat_dir: 默认聊天目录
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
+            group_name_prefix: 群聊名称前缀
+            group_dissolve_days: 群聊自动解散天数
 
         Returns:
             (success, message): success 表示是否成功，message 是响应消息或错误信息
@@ -150,7 +166,9 @@ class AutoRegister:
         request_data = {
             'callback_url': callback_url,
             'owner_id': owner_id,
-            'reply_in_thread': reply_in_thread
+            'reply_in_thread': reply_in_thread,
+            'at_bot_only': at_bot_only,
+            'session_mode': session_mode
         }
         # 添加 claude_commands（如果提供）
         if claude_commands:
@@ -160,6 +178,8 @@ class AutoRegister:
             request_data['default_chat_dir'] = default_chat_dir
         # 添加 default_chat_follow_thread
         request_data['default_chat_follow_thread'] = default_chat_follow_thread
+        request_data['group_name_prefix'] = group_name_prefix
+        request_data['group_dissolve_days'] = group_dissolve_days
 
         logger.info(f"[auto-register] Registering to gateway: {api_url}")
 

@@ -4,6 +4,78 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-04-30
+
+#### 新增 FEISHU_AT_BOT_ONLY 配置：群聊 @bot 过滤
+
+- 新增 `FEISHU_AT_BOT_ONLY` per-user 配置项（默认 `false`），控制群聊中是否仅响应 @bot 的消息
+- 设为 `true` 时，群聊中非 @bot 的消息（含命令）静默忽略；P2P 单聊不受影响
+- 若飞书应用未开通"获取群组中所有消息"权限，效果等同 `true`
+- 配置通过注册链路（HTTP / WS / 自动注册）透传至 BindingStore，每个用户独立生效
+
+#### 飞书群聊模式（Group Chat Mode）
+
+新增 `FEISHU_SESSION_MODE` 配置项，支持三种会话消息隔离方式：
+
+- **message**（默认）：普通消息模式，所有消息在同一聊天中
+- **thread**：话题模式，消息回复到话题详情中（向后兼容 `FEISHU_REPLY_IN_THREAD=true`）
+- **group**：群聊模式，每个 Claude 会话自动创建独立飞书群聊
+
+**群聊生命周期管理：**
+
+- 自动创建群聊：`/new` 或 Shell 脚本启动时通过 `ensure-chat` 懒创建，群名格式 `{前缀} - {目录名} - {时间}`
+- 自动解散：空闲超过 `FEISHU_GROUP_DISSOLVE_DAYS` 天的群聊自动解散（每小时检查）
+- 手动解散：`/groups dissolve 1 2 3` 按序号解散或 `/groups dissolve all` 全部解散
+- 群聊列表：`/groups` 列出当前用户所有活跃群聊（序号、目录、活跃时间）
+
+**新增用户命令：**
+
+- `/attach <session_id 前缀>` — 将 session 绑定到当前群聊（跨群迁移会话）
+- `/clear` — 清空当前群聊会话上下文，下次发消息自动创建新 Claude 会话
+- `/mute` — 静音当前会话，后续消息不再推送（发任意文字消息自动解除）
+- `/unmute` — 手动解除静音
+- `/groups` — 管理群聊（列表 / 解散）
+
+**消息路由统一（SessionFacade）：**
+
+- 新增 `SessionFacade` 统一入站消息路由门面：parent_id 回复 → group chat_id 反查 → 默认聊天目录
+- group 模式群内消息自动路由到对应 session，无需回复特定消息
+- 出站消息静音拦截：`/mute` 后 Claude 继续运行但消息不推送到飞书
+
+**Session 管理增强：**
+
+- `dissolved` 标记：群解散后 session 软失效，`ensure-chat` 自动重建，`/attach` 自动复活
+- `muted` 标记：出站消息拦截，稳态下命中内存缓存零 RPC
+- `/clear` 通过 session clone 继承旧 session 的 `project_dir` + `claude_command`
+- Session 过期时间从 7 天调整为可配置的 `SESSION_EXPIRE_DAYS`（默认 30 天）
+
+**新增存储层：**
+
+- `GroupChatStore`（`group_chats.json`）：群聊归属 + per-owner 序号（seq），网关侧
+- `GroupSessionStore`（`group_sessions.json`）：chat_id → 活跃 session 路由表，网关侧
+- `TTLCache`（内存）：通用 TTL 缓存工具类
+
+**飞书 API 新增能力：**
+
+- `create_group_chat()`：创建群聊 + 拉入用户（需 `im:chat` 权限）
+- `add_chat_members()`：添加群成员
+- `dissolve_group_chat()`：解散群聊
+- `patch_card()`：更新已发送的卡片消息
+- `_is_at_bot()`：通过 mentions 精确检测消息是否 @了机器人
+
+**注册链路升级：**
+
+- 整个注册链路（HTTP / WS / 自动注册）中 `reply_in_thread` 参数升级为 `session_mode`
+- 透传 `group_name_prefix` 和 `group_dissolve_days` 到 BindingStore
+- 向后兼容旧客户端的 `reply_in_thread` 字段（自动映射为 `session_mode=thread`）
+
+**新增配置项：**
+
+- `FEISHU_SESSION_MODE`：会话模式（message / thread / group）
+- `FEISHU_GROUP_NAME_PREFIX`：群聊名称前缀（默认 `Claude`）
+- `FEISHU_GROUP_DISSOLVE_DAYS`：群聊空闲自动解散天数（默认 0 = 不自动解散）
+- `SESSION_EXPIRE_DAYS`：Session 过期天数（默认 30）
+
 ### Fixed - 2026-04-23
 
 #### 修复 AskUserQuestion 回答在分离部署下"请求不存在或已过期"的跨端查询 bug

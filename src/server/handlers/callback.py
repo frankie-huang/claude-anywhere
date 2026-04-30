@@ -14,11 +14,16 @@ GET 路由:
 POST 路由:
 - /cb/register: 接收飞书网关通知的 auth_token
 - /cb/check-owner: 验证 owner_id 是否属于该 Callback 后端
+- /cb/decision: 接收飞书网关转发的决策请求
 - /cb/session/get-chat-id: 根据 session_id 获取 chat_id
 - /cb/session/get-last-message-id: 获取 session 的最近消息 ID
 - /cb/session/set-last-message-id: 设置 session 的最近消息 ID
 - /cb/session/check-skip-user-prompt: 检查并清除跳过用户 prompt 标志
-- /cb/decision: 接收飞书网关转发的决策请求
+- /cb/session/ensure-chat: 确保 session 有 chat_id（group 模式懒创建群聊）
+- /cb/session/get-info: 按 session_id 返回 session 权威字段（claude_command 等）
+- /cb/session/attach: 将指定 session 绑定到目标群聊
+- /cb/session/mute: 设置/解除/查询 session 静音状态
+- /cb/session/invalidate-chats: 标记所有引用该 chat_id 的记录为 dissolved 状态（gateway 解散群后调用）
 - /cb/claude/new: 新建 Claude 会话
 - /cb/claude/continue: 继续 Claude 会话
 - /cb/claude/recent-dirs: 获取近期工作目录
@@ -29,7 +34,9 @@ import base64
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, Tuple
+import threading
+import time
+from typing import Any, Callable, Dict, List, Tuple
 
 from services.auth_token import check_global_auth_token
 from services.request_manager import RequestManager
@@ -37,7 +44,7 @@ from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
 from handlers.claude import handle_continue_session, handle_new_session
-from handlers.utils import send_json, send_html_response
+from handlers.utils import send_json, send_html_response, create_feishu_group
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +205,7 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     store = SessionChatStore.get_instance()
     chat_id = ''
     if store:
-        chat_id = store.get(session_id) or ''
+        chat_id = store.get_chat_id(session_id) or ''
 
     return 200, {'chat_id': chat_id}
 
@@ -546,6 +553,363 @@ def handle_browse_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
 
 
 # =============================================
+# 群聊管理路由
+# =============================================
+
+# ensure-chat 并发锁：防止同一 session 同时创建多个群聊
+# 注意：创建失败时故意不清理 per-session 锁。如果失败时也 pop，会出现竞态：
+#   线程 B 持有旧锁对象等待中 → A 失败 pop 锁 → C 进来创建新锁 →
+#   B 和 C 持有不同锁对象，互斥失效，导致同一 session 重复创建群聊。
+# 失败后锁保留在 dict 中，后续线程复用同一把锁，保证互斥正确。
+# 只有成功路径（chat_id 已持久化）才清理，因为后续调用在锁外首次检查即命中。
+_ensure_chat_locks: Dict[str, threading.Lock] = {}
+_ensure_chat_global_lock = threading.Lock()
+
+
+def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
+    """确保 session 有对应的 chat_id（group 模式下创建群聊）
+
+    调用方（各自负责鉴权）:
+    - handle_ensure_chat (HTTP /cb/session/ensure-chat): Shell 脚本启动时调用，返回空则 fallback 到 FEISHU_CHAT_ID
+    - handle_new_session (claude.py): P2P /new（group 模式无 chat_id）时调用，失败则整个 /new 失败
+
+    流程：先调网关建群，成功后才 save session 记录。失败则不写入任何记录，
+    接受网关侧可能已建群的孤儿群（用户可通过 /groups dissolve 清理，
+    自动解散也会兜底回收）。
+
+    dissolved 的 session：get_session 过滤返回 None，走建群路径；
+    成功后 save(chat_id) 自动清除 dissolved（复活）。
+
+    Args:
+        session_id: Claude 会话 ID
+        project_dir: 项目工作目录（建群命名用，同时存入 session 字段）
+
+    Returns:
+        (ok, chat_id_or_error)
+    """
+    from services.session_chat_store import SessionChatStore
+    from config import FEISHU_SESSION_MODE
+
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return False, 'Store not initialized'
+
+    # 一次读取 session 数据，判断是否需要建群：
+    #   - session 存在且有 chat_id → 直接返回
+    #   - session 存在但无 chat_id → 正常态 session，无需建群
+    #   - session 不存在或 dissolved → 仅 group 模式才建群
+    session_data = session_store.get_session(session_id)
+    if session_data:
+        chat_id = session_data.get('chat_id', '')
+        if chat_id:
+            return True, chat_id
+        return True, ''
+    if FEISHU_SESSION_MODE != 'group':
+        return True, ''
+
+    # per-session 锁防止并发创建
+    with _ensure_chat_global_lock:
+        if session_id not in _ensure_chat_locks:
+            _ensure_chat_locks[session_id] = threading.Lock()
+        lock = _ensure_chat_locks[session_id]
+
+    with lock:
+        # 二次检查（锁内）
+        existing = session_store.get_chat_id(session_id)
+        if existing:
+            return True, existing
+
+        # 创建群聊（网关侧原子完成：建群 + 归属 + seq 分配 + 写 GroupSessionStore 路由）
+        # seq 在 group_store.allocate 内部自带 INFO 日志，此处不重复
+        ok, result = create_feishu_group(session_id, project_dir)
+        if not ok:
+            logger.error("[ensure-chat] Failed to create group: %s", result)
+            return False, result
+
+        chat_id = result
+        # 建群成功才写 session 记录（新建或 dissolved 自动复活）
+        session_store.save(session_id, chat_id, project_dir=project_dir)
+        logger.info("[ensure-chat] Created group: session=%s, chat_id=%s",
+                    session_id, chat_id)
+
+        # 创建成功后清理 per-session 锁
+        with _ensure_chat_global_lock:
+            _ensure_chat_locks.pop(session_id, None)
+
+        return True, chat_id
+
+
+def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """确保 session 有对应的 chat_id（group 模式下懒创建群聊）
+
+    HTTP 路由鉴权后委托 do_ensure_chat，调用方详见其 docstring。
+    """
+    if not check_global_auth_token(headers, '/cb/session/ensure-chat'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '')
+    project_dir = data.get('project_dir', '')
+
+    if not session_id:
+        return 400, {'error': 'Missing session_id'}
+
+    ok, result = do_ensure_chat(session_id, project_dir)
+    if ok:
+        return 200, {'chat_id': result}
+    else:
+        return 500, {'error': 'Failed to create group: %s' % result}
+
+
+def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """按前缀查找 session 并在唯一匹配时绑定到目标群聊
+
+    callback 只负责数据层：返回匹配情况和绑定结果，不生成用户提示。
+    网关侧根据 matched_ids 和 attached 自行构造反馈消息。
+
+    调用方 (飞书网关 feishu.py):
+    - /attach 命令: _handle_attach_command() 用户在群聊中执行
+
+    请求:
+        - session_prefix: session_id 前缀
+        - chat_id: 目标群聊 ID
+
+    响应:
+        {
+            'matched_ids': list[str],      # 前缀匹配到的全部 session_id
+            'attached': bool,              # 是否执行了绑定（仅唯一匹配时为 True）
+            'session_id': str,             # 绑定的 session_id（attached=True 时有值）
+            'original_chat_id': str,       # session 绑定前的 chat_id（attached=True 时有值；
+                                           # 网关侧自己持有 GroupChatStore，能按此 id 自查 seq）
+            'project_dir': str,            # session 的工作目录（供 gateway 本地路由表写入）
+        }
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/attach'):
+        return 401, {'error': 'Unauthorized'}
+
+    prefix = data.get('session_prefix', '').strip()
+    target_chat_id = data.get('chat_id', '').strip()
+    if not prefix or not target_chat_id:
+        return 400, {'error': 'Missing session_prefix or chat_id'}
+
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return 500, {'error': 'Store not initialized'}
+
+    # find_by_prefix 含 dissolved（供 attach 复活）
+    matches = session_store.find_by_prefix(prefix)
+    result = {
+        'matched_ids': list(matches.keys()),
+        'attached': False,
+        'session_id': '',
+        'original_chat_id': '',
+        'project_dir': '',
+    }
+
+    if len(matches) != 1:
+        return 200, result
+
+    session_id, session_data = next(iter(matches.items()))
+    original_chat_id = session_data.get('chat_id', '')
+
+    # 执行迁移（save 传入非空 chat_id 自动清除 dissolved 复活）
+    session_store.save(session_id, target_chat_id)
+
+    result.update({
+        'attached': True,
+        'session_id': session_id,
+        'original_chat_id': original_chat_id,
+        # 供 gateway 写本地 GroupSessionStore
+        'project_dir': session_data.get('project_dir', ''),
+    })
+
+    logger.info("[session-attach] %s: %s -> %s",
+                session_id, original_chat_id or '-', target_chat_id)
+    return 200, result
+
+
+def handle_session_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """管理 session 静音状态：mute / unmute / query
+
+    调用方 (飞书网关 feishu.py):
+    - /mute 命令: action='mute'
+    - /unmute 命令 + 自动解除: action='unmute'
+    - 出站拦截（SessionFacade 缓存 miss 时回源）: action='query'
+
+    请求:
+        - session_id: 目标 session
+        - action: 'mute' | 'unmute' | 'query'
+
+    响应:
+        mute   -> {ok: True, changed: bool}  changed=True 表示本次新设置为静音；False 表示幂等（之前已静音）
+        unmute -> {ok: True, changed: bool}  changed=True 表示本次实际解除；False 表示幂等（之前就未静音）
+        query  -> {ok: True, muted: bool}    当前是否处于静音状态
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/mute'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '').strip()
+    action = data.get('action', '').strip()
+    if not session_id or action not in ('mute', 'unmute', 'query'):
+        return 400, {'error': 'Missing session_id or invalid action'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    if action == 'query':
+        return 200, {'ok': True, 'muted': store.is_session_muted(session_id)}
+
+    if action == 'mute':
+        result = store.mute_session(session_id)
+        if result is None:
+            return 500, {'error': 'Failed to mute session'}
+        return 200, {'ok': True, 'changed': result}
+
+    # unmute —— store 同为 Optional[bool]，changed 语义一致
+    result = store.unmute_session(session_id)
+    if result is None:
+        return 500, {'error': 'Failed to unmute session'}
+    return 200, {'ok': True, 'changed': result}
+
+
+def handle_invalidate_chats(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """批量标记一组 chat_id 关联的 session 为 dissolved
+
+    调用方 (飞书网关 feishu.py):
+    - /groups dissolve 成功解散群后通知 callback
+    - 自动解散群后同样通知
+
+    语义：标记所有引用该 chat_id 的 session 为 dissolved=True，
+    保留 chat_id 字段作为历史信息。get_session 过滤 dissolved 后返回 None，
+    使 session 软失效——下次 ensure-chat 自动走重建路径，continue 直接报错
+    引导用户 /new。
+
+    请求:
+        - chat_ids: List[str]，被解散的群聊 ID 列表
+
+    响应:
+        {ok: True, invalidated: int}  invalidated 是被标记 dissolved 的 session 总数
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/invalidate-chats'):
+        return 401, {'error': 'Unauthorized'}
+
+    chat_ids = data.get('chat_ids') or []
+    if not isinstance(chat_ids, list):
+        return 400, {'error': 'chat_ids must be a list'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    total = 0
+    for cid in chat_ids:
+        if not cid:
+            continue
+        total += len(store.mark_dissolved(cid))
+    return 200, {'ok': True, 'invalidated': total}
+
+
+def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """按 session_id 返回 session 的权威字段
+
+    调用方 (飞书网关 feishu.py):
+    - /new 继承场景: 从消息上下文拿到 session_id 后，回源取 claude_command 等属性
+
+    请求:
+        - session_id: Claude 会话 ID
+
+    响应:
+        {project_dir: str, claude_command: str, chat_id: str, dissolved: bool}
+        session 不存在或已过期返回全空（非错误）
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/get-info'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '').strip()
+    if not session_id:
+        return 400, {'error': 'Missing session_id'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    # include_dissolved=True：只读属性继承场景，dissolved 不应阻断
+    item = store.get_session(session_id, include_dissolved=True)
+    if not item:
+        return 200, {'project_dir': '', 'claude_command': '', 'chat_id': '', 'dissolved': False}
+    return 200, {
+        'project_dir': item.get('project_dir', ''),
+        'claude_command': item.get('claude_command', ''),
+        'chat_id': item.get('chat_id', ''),
+        'dissolved': bool(item.get('dissolved')),
+    }
+
+
+def handle_session_clone(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """以旧 session 为模板创建新 session 记录（/clear 用）
+
+    从旧 session 继承 project_dir + claude_command，创建新 session 记录绑定到 chat_id。
+    旧 session 不受影响（不标记 dissolved，不杀进程）。
+
+    调用方 (飞书网关 feishu.py):
+    - /clear 命令: 预创建新 session，等待下一条消息启动 Claude 进程
+
+    请求:
+        - old_session_id: 旧 Claude 会话 ID（用于读取继承属性）
+        - new_session_id: 新 Claude 会话 ID（由网关生成）
+        - chat_id: 飞书群聊 ID
+
+    响应:
+        {ok: true, project_dir: str}
+        旧 session 不存在时仍创建新记录（继承属性为空）
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/clone'):
+        return 401, {'error': 'Unauthorized'}
+
+    old_session_id = data.get('old_session_id', '').strip()
+    new_session_id = data.get('new_session_id', '').strip()
+    chat_id = data.get('chat_id', '').strip()
+
+    if not new_session_id:
+        return 400, {'error': 'Missing new_session_id'}
+    if not chat_id:
+        return 400, {'error': 'Missing chat_id'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    # 从旧 session 读取继承属性（允许 dissolved，只读不改）
+    project_dir = ''
+    claude_command = ''
+    if old_session_id:
+        old_item = store.get_session(old_session_id, include_dissolved=True)
+        if old_item:
+            project_dir = old_item.get('project_dir', '')
+            claude_command = old_item.get('claude_command', '')
+
+    # 创建新 session 记录
+    ok = store.save(new_session_id, chat_id,
+                    project_dir=project_dir, claude_command=claude_command)
+    if not ok:
+        return 500, {'error': 'Failed to save new session'}
+
+    logger.info("[session-clone] Cloned %s -> %s (chat=%s, dir=%s, cmd=%s)",
+                old_session_id, new_session_id, chat_id, project_dir, claude_command)
+    return 200, {'ok': True, 'project_dir': project_dir}
+
+
+# =============================================
 # POST 路由表 — 纯函数签名: (data, headers) → (status, body)
 # =============================================
 
@@ -555,11 +919,17 @@ PostRouteHandler = Callable[[Dict[str, Any], Dict[str, str]], Tuple[int, Dict[st
 BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/register': handle_register_callback_route,
     '/cb/check-owner': handle_check_owner_id_route,
+    '/cb/decision': handle_callback_decision,
     '/cb/session/get-chat-id': handle_get_chat_id,
     '/cb/session/get-last-message-id': handle_get_last_message_id,
     '/cb/session/set-last-message-id': handle_set_last_message_id,
     '/cb/session/check-skip-user-prompt': handle_check_skip_user_prompt,
-    '/cb/decision': handle_callback_decision,
+    '/cb/session/ensure-chat': handle_ensure_chat,
+    '/cb/session/get-info': handle_get_session_info,
+    '/cb/session/attach': handle_session_attach,
+    '/cb/session/mute': handle_session_mute,
+    '/cb/session/clone': handle_session_clone,
+    '/cb/session/invalidate-chats': handle_invalidate_chats,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,
     '/cb/claude/record-dir-usage': handle_record_dir_usage,

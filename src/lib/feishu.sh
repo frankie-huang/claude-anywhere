@@ -883,6 +883,114 @@ _get_chat_id() {
 }
 
 # ----------------------------------------------------------------------------
+# _ensure_chat - 确保 session 有对应的 chat_id（group 模式下懒创建群聊）
+# ----------------------------------------------------------------------------
+# 功能: 调用 Callback 后端的 /cb/session/ensure-chat 接口
+#       如果 session 已有 chat_id 则直接返回，否则在 group 模式下创建群聊
+#
+# 参数:
+#   $1 - session_id   Claude 会话 ID
+#   $2 - project_dir  项目工作目录（用于群聊命名）
+#
+# 输出:
+#   echos 返回: chat_id 字符串，失败返回空字符串
+# ----------------------------------------------------------------------------
+_ensure_chat() {
+    local session_id="$1"
+    local project_dir="$2"
+
+    if [ -z "$session_id" ]; then
+        echo ""
+        return 0
+    fi
+
+    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
+    callback_url=$(echo "$callback_url" | sed 's:/*$::')
+
+    local escaped_project_dir
+    escaped_project_dir=$(json_escape "$project_dir")
+
+    local response
+    response=$(_do_curl_post "${callback_url}/cb/session/ensure-chat" \
+        "{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_project_dir\"}" \
+        "cb/session/ensure-chat" \
+        "$(_get_auth_token)")
+
+    local http_code
+    http_code=$(echo "$response" | head -n 1)
+    response=$(echo "$response" | sed '1d')
+
+    if [ "$http_code" != "200" ]; then
+        echo ""
+        return 0
+    fi
+
+    local chat_id
+    chat_id=$(json_get "$response" "chat_id")
+    chat_id=$(echo "$chat_id" | sed 's/^"//;s/"$//')
+
+    if [ -n "$chat_id" ] && [ "$chat_id" != "null" ] && [ "$chat_id" != "''" ]; then
+        echo "$chat_id"
+    else
+        echo ""
+    fi
+}
+
+# ----------------------------------------------------------------------------
+# _resolve_chat_id - 解析 session 对应的 chat_id
+# ----------------------------------------------------------------------------
+# 功能: 按优先级确定消息发送的目标 chat_id
+#       1. 通过 session_id 查询已有的 chat_id
+#       2. 调用 ensure-chat（group 模式下由 backend 懒创建群聊）
+#       3. 使用配置的 FEISHU_CHAT_ID 兜底
+#
+# 参数:
+#   $1 - session_id   Claude 会话 ID（可选）
+#   $2 - project_dir  项目工作目录（创建群聊时用于命名）
+#
+# 输出:
+#   echos 返回: chat_id 字符串，无法确定时返回空字符串
+# ----------------------------------------------------------------------------
+_resolve_chat_id() {
+    local session_id="$1"
+    local project_dir="$2"
+
+    local chat_id=""
+
+    # 优先通过 session_id 查询已有的 chat_id
+    if [ -n "$session_id" ]; then
+        chat_id=$(_get_chat_id "$session_id")
+        if [ -n "$chat_id" ]; then
+            log "Found chat_id for session: $chat_id"
+            echo "$chat_id"
+            return 0
+        fi
+    fi
+
+    # 调用 ensure-chat（group 模式下由 backend 懒创建群聊）
+    # 仅 group 模式下调用，非 group 模式跳过避免无用 HTTP 请求
+    if [ -n "$session_id" ]; then
+        local session_mode
+        session_mode=$(get_config "FEISHU_SESSION_MODE" "message")
+        if [ "$session_mode" = "group" ]; then
+            chat_id=$(_ensure_chat "$session_id" "$project_dir")
+            if [ -n "$chat_id" ]; then
+                log "Ensured chat for session: $chat_id"
+                echo "$chat_id"
+                return 0
+            fi
+        fi
+    fi
+
+    # 兜底：使用配置的 FEISHU_CHAT_ID
+    chat_id=$(get_config "FEISHU_CHAT_ID" "")
+    if [ -n "$chat_id" ]; then
+        log "Using configured FEISHU_CHAT_ID: $chat_id"
+    fi
+    echo "$chat_id"
+}
+
+# ----------------------------------------------------------------------------
 # _get_last_message_id - 根据 session_id 获取最近一条消息 ID
 # ----------------------------------------------------------------------------
 # 功能: 调用 Callback 后端的 /cb/session/get-last-message-id 接口查询 session 的最近消息
@@ -1449,22 +1557,9 @@ _send_feishu_card_http_endpoint() {
         return 1
     fi
 
-    # 获取 chat_id（优先使用 session 对应的 chat_id）
-    local chat_id=""
-    if [ -n "$session_id" ]; then
-        chat_id=$(_get_chat_id "$session_id")
-        if [ -n "$chat_id" ]; then
-            log "Found chat_id for session: $chat_id"
-        fi
-    fi
-
-    # 如果没有找到 chat_id，使用配置的 FEISHU_CHAT_ID
-    if [ -z "$chat_id" ]; then
-        chat_id=$(get_config "FEISHU_CHAT_ID" "")
-        if [ -n "$chat_id" ]; then
-            log "Using configured FEISHU_CHAT_ID: $chat_id"
-        fi
-    fi
+    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
+    local chat_id
+    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""
@@ -1635,22 +1730,9 @@ send_feishu_post() {
         return 1
     fi
 
-    # 获取 chat_id（优先使用 session 对应的 chat_id）
-    local chat_id=""
-    if [ -n "$session_id" ]; then
-        chat_id=$(_get_chat_id "$session_id")
-        if [ -n "$chat_id" ]; then
-            log "Found chat_id for session: $chat_id"
-        fi
-    fi
-
-    # 如果没有找到 chat_id，使用配置的 FEISHU_CHAT_ID
-    if [ -z "$chat_id" ]; then
-        chat_id=$(get_config "FEISHU_CHAT_ID" "")
-        if [ -n "$chat_id" ]; then
-            log "Using configured FEISHU_CHAT_ID: $chat_id"
-        fi
-    fi
+    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
+    local chat_id
+    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""

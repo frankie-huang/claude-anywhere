@@ -6,7 +6,7 @@ import shlex
 import threading
 import urllib.request
 
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from config import CALLBACK_PAGE_CLOSE_DELAY
 
@@ -46,7 +46,7 @@ def post_json(url, data, auth_token=None, timeout=10):
 
 
 def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
-    """从 Callback 侧发送文本消息到飞书（兼容单机和分离部署）
+    """从 Callback 侧调用飞书网关，发送文本消息（兼容单机和分离部署）
 
     优先使用 FeishuAPIService 直接发送（单机模式），
     不可用时通过网关 /gw/feishu/send 转发（分离部署模式）。
@@ -58,21 +58,24 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
     Returns:
         (success, message_id or error)
     """
-    # 方式 1：直接通过 FeishuAPIService 发送（单机模式）
-    try:
-        from services.feishu_api import FeishuAPIService
-        service = FeishuAPIService.get_instance()
-        if service and service.enabled:
-            success, result = service.send_text(
-                text,
-                receive_id=chat_id,
-                receive_id_type='chat_id'
-            )
-            return (success, result)
-    except Exception as e:
-        logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+    from config import IS_CALLBACK_BACKEND
 
-    # 方式 2：通过网关转发（分离部署模式）
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接通过 FeishuAPIService 发送
+        try:
+            from services.feishu_api import FeishuAPIService
+            service = FeishuAPIService.get_instance()
+            if service and service.enabled:
+                success, result = service.send_text(
+                    text,
+                    receive_id=chat_id,
+                    receive_id_type='chat_id'
+                )
+                return (success, result)
+        except Exception as e:
+            logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关转发
     try:
         from config import FEISHU_GATEWAY_URL, FEISHU_OWNER_ID
         from services.auth_token_store import AuthTokenStore
@@ -95,6 +98,56 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
         resp = post_json(api_url, data, auth_token=auth_token)
         if resp.get('success'):
             return (True, resp.get('data', {}).get('message_id', ''))
+        else:
+            return (False, resp.get('error', 'unknown'))
+    except Exception as e:
+        return (False, str(e))
+
+
+def create_feishu_group(session_id: str, project_dir: str) -> Tuple[bool, str]:
+    """从 Callback 侧调用飞书网关，创建飞书群聊（兼容单机和分离部署）
+
+    群名统一由 gateway 根据 prefix + project_dir + 时间戳构造，调用方无需关心。
+
+    Args:
+        session_id: 关联的 session ID
+        project_dir: 项目目录
+
+    Returns:
+        (success, chat_id_or_error)
+    """
+    from config import IS_CALLBACK_BACKEND, FEISHU_OWNER_ID, FEISHU_GROUP_NAME_PREFIX
+
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接调用网关侧统一入口（创建 + 写归属记录一次完成）
+        try:
+            from handlers.feishu import create_group_chat_and_record
+            return create_group_chat_and_record(FEISHU_OWNER_ID, session_id, project_dir, FEISHU_GROUP_NAME_PREFIX)
+        except Exception as e:
+            logger.warning("[create_feishu_group] create_group_chat_and_record unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关转发
+    try:
+        from config import FEISHU_GATEWAY_URL
+        from services.auth_token_store import AuthTokenStore
+
+        if not FEISHU_GATEWAY_URL:
+            return (False, 'no feishu service available')
+
+        store = AuthTokenStore.get_instance()
+        auth_token = store.get() if store else ''
+        if not auth_token:
+            return (False, 'no auth_token available')
+
+        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/create-group'
+        data = {
+            'owner_id': FEISHU_OWNER_ID,
+            'session_id': session_id,
+            'project_dir': project_dir,
+        }
+        resp = post_json(api_url, data, auth_token=auth_token)
+        if resp.get('success'):
+            return (True, resp.get('chat_id', ''))
         else:
             return (False, resp.get('error', 'unknown'))
     except Exception as e:

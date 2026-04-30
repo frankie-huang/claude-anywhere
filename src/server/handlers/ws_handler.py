@@ -175,10 +175,16 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
     # === 处理 register 消息 ===
     if msg_type == 'register':
         # 提取 register 消息中的配置参数
-        msg_reply_in_thread = msg.get('reply_in_thread', False)
+        msg_at_bot_only = msg.get('at_bot_only')
+        # 入口转换：优先使用 session_mode，旧客户端用 reply_in_thread 映射
+        msg_session_mode = msg.get('session_mode', '')
+        if not msg_session_mode or msg_session_mode not in ('message', 'thread', 'group'):
+            msg_session_mode = 'thread' if msg.get('reply_in_thread', False) else 'message'
         msg_claude_commands = msg.get('claude_commands')
         msg_default_chat_dir = msg.get('default_chat_dir', '')
         msg_default_chat_follow_thread = msg.get('default_chat_follow_thread', True)
+        msg_group_name_prefix = msg.get('group_name_prefix')
+        msg_group_dissolve_days = msg.get('group_dissolve_days')
 
         # 提取客户端携带的 auth_token（用于比对是否为同一终端）
         msg_auth_token = msg.get('auth_token', '')
@@ -207,10 +213,13 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
                 registry.set_pending_auth_token(owner_id, request_id, new_token)
                 registry.set_pending_binding_params(owner_id, request_id, {
                     'client_ip': client_ip,
-                    'reply_in_thread': msg_reply_in_thread,
+                    'at_bot_only': msg_at_bot_only,
+                    'session_mode': msg_session_mode,
                     'claude_commands': msg_claude_commands,
                     'default_chat_dir': msg_default_chat_dir,
-                    'default_chat_follow_thread': msg_default_chat_follow_thread
+                    'default_chat_follow_thread': msg_default_chat_follow_thread,
+                    'group_name_prefix': msg_group_name_prefix,
+                    'group_dissolve_days': msg_group_dissolve_days
                 })
 
                 # 发送新 token，等待消息循环中的 auth_ok_ack 完成认证
@@ -241,10 +250,13 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
                 from handlers.register import handle_ws_rebind_registration
                 card_sent = handle_ws_rebind_registration(
                     owner_id, request_id, client_ip, old_ip,
-                    reply_in_thread=msg_reply_in_thread,
+                    at_bot_only=msg_at_bot_only,
+                    session_mode=msg_session_mode,
                     claude_commands=msg_claude_commands,
                     default_chat_dir=msg_default_chat_dir,
-                    default_chat_follow_thread=msg_default_chat_follow_thread
+                    default_chat_follow_thread=msg_default_chat_follow_thread,
+                    group_name_prefix=msg_group_name_prefix,
+                    group_dissolve_days=msg_group_dissolve_days
                 )
                 if card_sent:
                     registry.set_card_cooldown(owner_id)
@@ -268,10 +280,13 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
         from handlers.register import handle_ws_registration
         card_sent = handle_ws_registration(
             owner_id, request_id, client_ip,
-            reply_in_thread=msg_reply_in_thread,
+            at_bot_only=msg_at_bot_only,
+            session_mode=msg_session_mode,
             claude_commands=msg_claude_commands,
             default_chat_dir=msg_default_chat_dir,
-            default_chat_follow_thread=msg_default_chat_follow_thread
+            default_chat_follow_thread=msg_default_chat_follow_thread,
+            group_name_prefix=msg_group_name_prefix,
+            group_dissolve_days=msg_group_dissolve_days
         )
         if card_sent:
             registry.set_card_cooldown(owner_id)
@@ -405,10 +420,13 @@ def _handle_ws_message(sock: socket.socket, owner_id: str, msg: Dict[str, Any], 
                     store.upsert(
                         owner_id, 'ws://tunnel', auth_token,
                         binding_params.get('client_ip', ''),
-                        binding_params.get('reply_in_thread', False),
+                        binding_params.get('at_bot_only'),
+                        binding_params.get('session_mode', 'message'),
                         binding_params.get('claude_commands'),
                         binding_params.get('default_chat_dir', ''),
-                        binding_params.get('default_chat_follow_thread', True)
+                        binding_params.get('default_chat_follow_thread', True),
+                        binding_params.get('group_name_prefix'),
+                        binding_params.get('group_dissolve_days')
                     )
 
             # 原子地从 pending 升级为已认证连接

@@ -27,10 +27,14 @@ class BindingStore:
             "callback_url": "https://callback.example.com",
             "auth_token": "abc123.def456",
             "reply_in_thread": true,
+            "at_bot_only": false,
+            "session_mode": "message",
             "claude_commands": ["claude", "claude --model opus"],
             "default_chat_dir": "/home/user/project",
             "default_chat_follow_thread": true,
             "default_chat_session_id": "uuid-xxx",
+            "group_name_prefix": "Claude",
+            "group_dissolve_days": 7,
             "updated_at": 1706745600,
             "registered_ip": "1.2.3.4"
         }
@@ -106,10 +110,13 @@ class BindingStore:
         callback_url: str,
         auth_token: str,
         registered_ip: str = '',
-        reply_in_thread: bool = False,
+        at_bot_only: Optional[bool] = None,
+        session_mode: str = 'message',
         claude_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True
+        default_chat_follow_thread: bool = True,
+        group_name_prefix: Optional[str] = None,
+        group_dissolve_days: Optional[int] = None
     ) -> bool:
         """创建或更新绑定
 
@@ -118,10 +125,13 @@ class BindingStore:
             callback_url: Callback 后端 URL
             auth_token: 认证令牌
             registered_ip: 注册来源 IP
-            reply_in_thread: 是否使用回复话题模式
+            at_bot_only: 群聊 @bot 过滤（None = 未传，保留旧值；True/False 显式写入）
+            session_mode: 会话模式，message/thread/group
             claude_commands: 可用的 Claude 命令列表（从 Callback 后端传递）
             default_chat_dir: 默认聊天目录（从 Callback 后端传递）
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
+            group_name_prefix: 群聊名称前缀（None = 未传，保留旧值；显式值含 '' 原样写入）
+            group_dissolve_days: 群聊自动解散天数（None = 未传，保留旧值；显式值含 0 原样写入）
 
         Returns:
             是否保存成功
@@ -144,15 +154,38 @@ class BindingStore:
                     )
                 # 处理 claude_commands：过滤空字符串，为空时默认 ["claude"]
                 valid_commands = [c for c in (claude_commands or []) if c and c.strip()]
+                # 校验 session_mode（入口处已做 reply_in_thread → session_mode 转换，
+                # 此处为防御性校验，防止未来新调用方传入非法值）
+                if session_mode not in ('message', 'thread', 'group'):
+                    session_mode = 'message'
                 binding_data = {
                     'callback_url': callback_url,
                     'auth_token': auth_token,
-                    'reply_in_thread': reply_in_thread,
+                    'reply_in_thread': (session_mode == 'thread'),  # 兼容旧版读取
+                    'session_mode': session_mode,
                     'default_chat_follow_thread': default_chat_follow_thread,
                     'claude_commands': valid_commands or ['claude'],
                     'updated_at': int(time.time()),
                     'registered_ip': registered_ip
                 }
+                # at_bot_only：None = 调用方未传，保留旧值；True/False 显式写入
+                if at_bot_only is not None:
+                    binding_data['at_bot_only'] = bool(at_bot_only)
+                elif existing and 'at_bot_only' in existing:
+                    binding_data['at_bot_only'] = existing['at_bot_only']
+                # 群聊配置：None = 调用方未传，保留旧值；其他值（含 ''、0）显式写入
+                if group_name_prefix is not None:
+                    binding_data['group_name_prefix'] = group_name_prefix
+                elif existing and 'group_name_prefix' in existing:
+                    binding_data['group_name_prefix'] = existing['group_name_prefix']
+                if group_dissolve_days is not None:
+                    try:
+                        group_dissolve_days = int(group_dissolve_days)
+                    except (TypeError, ValueError):
+                        group_dissolve_days = 0
+                    binding_data['group_dissolve_days'] = group_dissolve_days
+                elif existing and 'group_dissolve_days' in existing:
+                    binding_data['group_dissolve_days'] = existing['group_dissolve_days']
                 # 处理 default_chat_dir 及关联的 default_chat_session_id：
                 # - 传入非空值且与旧值相同：保留两者
                 # - 传入非空值且与旧值不同：更新目录，清除旧 session_id（已失效）

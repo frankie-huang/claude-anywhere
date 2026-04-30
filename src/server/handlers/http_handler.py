@@ -12,6 +12,7 @@ POST 路由：
     - /gw/*: 飞书网关侧路由
         - /gw/register: Callback 后端注册
         - /gw/feishu/send: 发送飞书消息
+        - /gw/feishu/create-group: 创建飞书群聊
     - /cb/*: Callback 后端侧路由（通过路由表分发）
 """
 
@@ -21,7 +22,8 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 from services.auth_token import verify_owner_based_auth_token
-from handlers.feishu import handle_feishu_request, handle_send_message
+from handlers.feishu import (handle_feishu_request, handle_send_message,
+                             handle_create_group)
 from handlers.register import handle_register_request
 from handlers.utils import send_json, send_html_response
 from handlers.ws_handler import handle_ws_tunnel
@@ -148,6 +150,15 @@ class HttpRequestHandler(BaseHTTPRequestHandler):
             handled, response = handle_send_message(binding, data)
             send_json(self, 200 if response.get('success') else 400, response)
             return
+
+        if path == '/gw/feishu/create-group':
+            binding = verify_owner_based_auth_token(self, data, '/gw/feishu/create-group')
+            if binding is None:
+                return
+            handled, response = handle_create_group(binding, data)
+            send_json(self, 200 if response.get('success') else 400, response)
+            return
+
 
         # ===== Callback 后端侧路由 =====
         route_handler = BACKEND_ROUTES.get(path)
