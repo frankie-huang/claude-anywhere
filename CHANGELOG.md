@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added - 2026-04-30
 
+#### 新增 CLAUDE_ARGS_TEMPLATE 配置：CLI 包装器参数模板
+
+- 新增 `CLAUDE_ARGS_TEMPLATE` 配置项（默认 `{cmd} {args}`），支持自定义 Claude 命令行参数的拼接方式
+- 用于兼容第三方 CLI wrapper 的参数语法（如需要用 `-a` 将所有参数打包为单个字符串传入的场景）
+- 支持裸占位符（`{args}` 展开为独立参数）和引号占位符（`"{args}"` 打包为单个 shell 参数）
+- 重构命令构建逻辑：从字符串拼接改为 argv 列表 + 模板展开，shell quoting 统一由 `_expand_template` 处理
+
 #### 新增 FEISHU_AT_BOT_ONLY 配置：群聊 @bot 过滤
 
 - 新增 `FEISHU_AT_BOT_ONLY` per-user 配置项（默认 `false`），控制群聊中是否仅响应 @bot 的消息
