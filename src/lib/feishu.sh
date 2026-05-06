@@ -46,6 +46,9 @@ if ! type json_init &> /dev/null; then
     source "${BASH_SOURCE[0]%/*}/json.sh"
 fi
 
+# muted session 哨兵值：_get_chat_id / _resolve_chat_id 返回此值表示 session 已静音，调用方应跳过发送
+readonly MUTED_SENTINEL="__MUTED__"
+
 # 初始化 JSON 解析器
 json_init >/dev/null 2>&1 || true
 
@@ -846,6 +849,7 @@ _get_bot_open_id() {
 # ----------------------------------------------------------------------------
 _get_chat_id() {
     local session_id="$1"
+    local project_dir="${2:-}"
 
     if [ -z "$session_id" ]; then
         echo ""
@@ -853,12 +857,22 @@ _get_chat_id() {
     fi
 
     # 调用 Callback 后端的 /cb/session/get-chat-id 接口查询
+    # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
+    local request_body
+    if [ -n "$project_dir" ]; then
+        local escaped_dir
+        escaped_dir=$(json_escape "$project_dir")
+        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\"}"
+    else
+        request_body="{\"session_id\":\"$session_id\"}"
+    fi
+
     local response
     response=$(_do_curl_post "${callback_url}/cb/session/get-chat-id" \
-        "{\"session_id\":\"$session_id\"}" \
+        "$request_body" \
         "cb/session/get-chat-id" \
         "$(_get_auth_token)")
 
@@ -867,6 +881,14 @@ _get_chat_id() {
     response=$(echo "$response" | sed '1d')
 
     if [ "$http_code" != "200" ]; then
+        return 0
+    fi
+
+    # 检查 muted 状态：muted 的 session 直接返回哨兵值，跳过后续发送
+    local muted
+    muted=$(json_get "$response" "muted")
+    if [ "$muted" = "true" ]; then
+        echo "$MUTED_SENTINEL"
         return 0
     fi
 
@@ -959,7 +981,12 @@ _resolve_chat_id() {
 
     # 优先通过 session_id 查询已有的 chat_id
     if [ -n "$session_id" ]; then
-        chat_id=$(_get_chat_id "$session_id")
+        chat_id=$(_get_chat_id "$session_id" "$project_dir")
+        if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+            log "Session muted, skipping send: $session_id"
+            echo "$MUTED_SENTINEL"
+            return 0
+        fi
         if [ -n "$chat_id" ]; then
             log "Found chat_id for session: $chat_id"
             echo "$chat_id"
@@ -1344,7 +1371,7 @@ _send_via_http_endpoint() {
 # ----------------------------------------------------------------------------
 # _record_dir_usage - 记录目录使用（内部函数）
 # ----------------------------------------------------------------------------
-# 功能: 调用 Callback 后端的 /cb/claude/record-dir-usage 接口记录目录使用次数
+# 功能: 调用 Callback 后端的 /cb/directory/record-usage 接口记录目录使用次数
 #       后台静默执行，失败不阻塞主流程
 #
 # 参数:
@@ -1360,9 +1387,9 @@ _record_dir_usage() {
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
-    _do_curl_post "${callback_url}/cb/claude/record-dir-usage" \
+    _do_curl_post "${callback_url}/cb/directory/record-usage" \
         "$(json_build_object "project_dir" "$project_dir")" \
-        "cb/record-dir-usage" \
+        "cb/directory/record-usage" \
         "$(_get_auth_token)" >/dev/null 2>&1 || true
 }
 
@@ -1411,11 +1438,12 @@ send_feishu_card() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url)"
+    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url chat_id)"
     local webhook_url="${vals[0]:-}"
     local session_id="${vals[1]:-}"
     local project_dir="${vals[2]:-}"
     local callback_url="${vals[3]:-}"
+    local chat_id="${vals[4]:-}"
     [ -z "$webhook_url" ] && webhook_url=$(get_config "FEISHU_WEBHOOK_URL" "")
 
     # 记录卡片内容到日志
@@ -1442,8 +1470,8 @@ send_feishu_card() {
 
         # 构建传递给 _send_feishu_card_http_endpoint 的 options
         local http_options=""
-        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ]; then
-            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url")
+        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ] || [ -n "$chat_id" ]; then
+            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url" "chat_id" "$chat_id")
         fi
 
         error_msg=$(_send_feishu_card_http_endpoint "$card_json" "$target_url" "$http_options")
@@ -1538,10 +1566,11 @@ _send_feishu_card_http_endpoint() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" session_id project_dir callback_url)"
+    done <<< "$(json_get_multi "$options" session_id project_dir callback_url chat_id)"
     local session_id="${vals[0]:-}"
     local project_dir="${vals[1]:-}"
     local callback_url="${vals[2]:-}"
+    local chat_id="${vals[3]:-}"
 
     # 提取 card 内容
     local card_content
@@ -1557,9 +1586,17 @@ _send_feishu_card_http_endpoint() {
         return 1
     fi
 
-    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
-    local chat_id
-    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    # chat_id 由调用方通过 _resolve_chat_id 预解析后透传
+    # 未传入时兜底查询（兼容旧调用方式）
+    if [ -z "$chat_id" ]; then
+        chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    fi
+
+    # muted session：跳过发送，直接返回成功
+    if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping card send: $session_id"
+        return 0
+    fi
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""
@@ -1701,10 +1738,11 @@ send_feishu_post() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" project_dir session_id callback_url)"
+    done <<< "$(json_get_multi "$options" project_dir session_id callback_url chat_id)"
     local project_dir="${vals[0]:-}"
     local session_id="${vals[1]:-}"
     local callback_url="${vals[2]:-}"
+    local chat_id="${vals[3]:-}"
 
     local send_mode
     send_mode=$(get_config "FEISHU_SEND_MODE" "webhook")
@@ -1730,9 +1768,17 @@ send_feishu_post() {
         return 1
     fi
 
-    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
-    local chat_id
-    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    # chat_id 由调用方通过 _resolve_chat_id 预解析后透传
+    # 未传入时兜底查询（兼容旧调用方式）
+    if [ -z "$chat_id" ]; then
+        chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    fi
+
+    # muted session：跳过发送，直接返回成功
+    if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping post send: $session_id"
+        return 0
+    fi
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""

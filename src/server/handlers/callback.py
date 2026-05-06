@@ -5,7 +5,7 @@ POST 路由处理函数签名统一为 (data, headers) → Tuple[int, Dict[str, 
 返回 (HTTP 状态码, 响应 body)，不依赖 HTTP handler 实例。
 HTTP 和 WS 两种模式均可直接调用。
 
-存储器归属: SessionChatStore, AuthTokenStore, DirHistoryStore
+存储器归属: SessionChatStore, AuthTokenStore, DirectoryStore
 
 GET 路由:
 - /status: 获取服务状态（含 WebSocket 连接状态）
@@ -23,11 +23,13 @@ POST 路由:
 - /cb/session/get-info: 按 session_id 返回 session 权威字段（claude_command 等）
 - /cb/session/attach: 将指定 session 绑定到目标群聊
 - /cb/session/mute: 设置/解除/查询 session 静音状态
+- /cb/session/clone: 克隆 session 属性到新 session
 - /cb/session/invalidate-chats: 标记所有引用该 chat_id 的记录为 dissolved 状态（gateway 解散群后调用）
 - /cb/claude/new: 新建 Claude 会话
 - /cb/claude/continue: 继续 Claude 会话
-- /cb/claude/recent-dirs: 获取近期工作目录
-- /cb/claude/browse-dirs: 浏览子目录
+- /cb/directory/record-usage: 记录目录使用
+- /cb/directory/recent-dirs: 获取近期工作目录
+- /cb/directory/browse-dirs: 浏览子目录
 """
 
 import base64
@@ -192,7 +194,12 @@ def handle_claude_continue(data: Dict[str, Any], headers: Dict[str, str]) -> Tup
 
 
 def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """根据 session_id 获取对应的 chat_id（客户端调用）"""
+    """根据 session_id 获取对应的 chat_id（客户端调用）
+
+    当 session 在 store 中不存在且传入了 project_dir 时，检查该目录是否被 mute。
+    如果命中 mute 目录，自动创建 muted session 记录并返回 muted: true，
+    使终端发起的会话自动继承目录的 mute 状态。
+    """
     from services.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/get-chat-id'):
@@ -203,11 +210,32 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
         return 400, {'chat_id': None}
 
     store = SessionChatStore.get_instance()
-    chat_id = ''
-    if store:
-        chat_id = store.get_chat_id(session_id) or ''
+    if not store:
+        logger.error("[callback] handle_get_chat_id: SessionChatStore not initialized")
+        return 500, {'chat_id': '', 'muted': False}
 
-    return 200, {'chat_id': chat_id}
+    chat_id = store.get_active_chat_id(session_id)   # 过滤 dissolved + expired（已解散群无可用 chat_id）
+    muted = store.is_session_muted(session_id)       # 仅过滤 expired（mute 是 session 维度，与群解散无关）
+
+    # 目录级 mute 自动继承：仅对真正不存在（非 dissolved）的新 session 生效
+    if not chat_id and not muted and store.get_session(session_id, include_dissolved=True) is None:
+        project_dir = data.get('project_dir', '').strip()
+        if project_dir:
+            from services.directory_store import DirectoryStore
+            dir_store = DirectoryStore.get_instance()
+            if dir_store and dir_store.is_dir_muted(project_dir):
+                # 创建 muted session 记录（只写 project_dir + muted，无 chat_id）
+                if not store.save(session_id, '', project_dir=project_dir):
+                    logger.error("[callback] Auto-muted session %s: save failed", session_id)
+                    return 200, {'chat_id': '', 'muted': False}
+                if store.mute_session(session_id) is None:
+                    logger.error("[callback] Auto-muted session %s: mute failed", session_id)
+                    return 200, {'chat_id': '', 'muted': False}
+                muted = True
+                logger.info("[callback] Auto-muted session %s (dir muted: %s)",
+                            session_id, project_dir)
+
+    return 200, {'chat_id': chat_id, 'muted': muted}
 
 
 def handle_get_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -257,19 +285,19 @@ def handle_set_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) ->
 
 def handle_record_dir_usage(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """记录目录使用（供 feishu.sh 调用）"""
-    if not check_global_auth_token(headers, '/cb/claude/record-dir-usage'):
+    if not check_global_auth_token(headers, '/cb/directory/record-usage'):
         return 401, {'error': 'Unauthorized'}
 
     project_dir = data.get('project_dir', '')
     if not project_dir:
         return 400, {'error': 'Missing project_dir'}
 
-    from services.dir_history_store import DirHistoryStore
-    store = DirHistoryStore.get_instance()
+    from services.directory_store import DirectoryStore
+    store = DirectoryStore.get_instance()
     if store:
         store.record_usage(project_dir)
         return 200, {'success': True}
-    return 500, {'error': 'DirHistoryStore not initialized'}
+    return 500, {'error': 'DirectoryStore not initialized'}
 
 
 def handle_check_skip_user_prompt(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -478,7 +506,7 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
 
 def handle_recent_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """获取近期常用工作目录列表"""
-    if not check_global_auth_token(headers, '/cb/claude/recent-dirs'):
+    if not check_global_auth_token(headers, '/cb/directory/recent-dirs'):
         return 401, {'error': 'Unauthorized'}
 
     try:
@@ -486,8 +514,8 @@ def handle_recent_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     except (TypeError, ValueError):
         limit = 5
 
-    from services.dir_history_store import DirHistoryStore
-    store = DirHistoryStore.get_instance()
+    from services.directory_store import DirectoryStore
+    store = DirectoryStore.get_instance()
     recent_dirs = store.get_recent_dirs(limit) if store else []
 
     return 200, {'dirs': recent_dirs}
@@ -495,7 +523,7 @@ def handle_recent_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
 
 def handle_browse_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """浏览指定路径下的子目录"""
-    if not check_global_auth_token(headers, '/cb/claude/browse-dirs'):
+    if not check_global_auth_token(headers, '/cb/directory/browse-dirs'):
         return 401, {'error': 'Unauthorized'}
 
     # 解析参数
@@ -594,17 +622,14 @@ def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
     if not session_store:
         return False, 'Store not initialized'
 
-    # 一次读取 session 数据，判断是否需要建群：
-    #   - session 存在且有 chat_id → 直接返回
-    #   - session 存在但无 chat_id → 正常态 session，无需建群
-    #   - session 不存在或 dissolved → 仅 group 模式才建群
+    # 1. 有可用 chat_id → 直接返回
+    chat_id = session_store.get_active_chat_id(session_id)
+    if chat_id:
+        return True, chat_id
+    # 2. session 存在但无 chat_id（P2P 正常态）或非 group 模式 → 无需建群
+    # 3. session 不存在或 dissolved → 仅 group 模式才建群
     session_data = session_store.get_session(session_id)
-    if session_data:
-        chat_id = session_data.get('chat_id', '')
-        if chat_id:
-            return True, chat_id
-        return True, ''
-    if FEISHU_SESSION_MODE != 'group':
+    if session_data or FEISHU_SESSION_MODE != 'group':
         return True, ''
 
     # per-session 锁防止并发创建
@@ -615,7 +640,7 @@ def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
 
     with lock:
         # 二次检查（锁内）
-        existing = session_store.get_chat_id(session_id)
+        existing = session_store.get_active_chat_id(session_id)
         if existing:
             return True, existing
 
@@ -730,35 +755,43 @@ def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
 
 
 def handle_session_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    """管理 session 静音状态：mute / unmute / query
+    """管理 session 静音状态：mute / unmute / query / list
 
     调用方 (飞书网关 feishu.py):
     - /mute 命令: action='mute'
     - /unmute 命令 + 自动解除: action='unmute'
     - 出站拦截（SessionFacade 缓存 miss 时回源）: action='query'
+    - /mute list: action='list'
 
     请求:
-        - session_id: 目标 session
-        - action: 'mute' | 'unmute' | 'query'
+        - session_id: 目标 session（list 操作可省略）
+        - action: 'mute' | 'unmute' | 'query' | 'list'
 
     响应:
-        mute   -> {ok: True, changed: bool}  changed=True 表示本次新设置为静音；False 表示幂等（之前已静音）
-        unmute -> {ok: True, changed: bool}  changed=True 表示本次实际解除；False 表示幂等（之前就未静音）
-        query  -> {ok: True, muted: bool}    当前是否处于静音状态
+        mute   -> {ok: True, changed: bool}
+        unmute -> {ok: True, changed: bool}
+        query  -> {ok: True, muted: bool}
+        list   -> {ok: True, sessions: [{session_id, project_dir, chat_id}, ...]}
     """
     from services.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/mute'):
         return 401, {'error': 'Unauthorized'}
 
-    session_id = data.get('session_id', '').strip()
     action = data.get('action', '').strip()
-    if not session_id or action not in ('mute', 'unmute', 'query'):
-        return 400, {'error': 'Missing session_id or invalid action'}
+    if action not in ('mute', 'unmute', 'query', 'list'):
+        return 400, {'error': 'Invalid action'}
 
     store = SessionChatStore.get_instance()
     if not store:
         return 500, {'error': 'Store not initialized'}
+
+    if action == 'list':
+        return 200, {'ok': True, 'sessions': store.list_muted_sessions()}
+
+    session_id = data.get('session_id', '').strip()
+    if not session_id:
+        return 400, {'error': 'Missing session_id'}
 
     if action == 'query':
         return 200, {'ok': True, 'muted': store.is_session_muted(session_id)}
@@ -773,6 +806,55 @@ def handle_session_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[
     result = store.unmute_session(session_id)
     if result is None:
         return 500, {'error': 'Failed to unmute session'}
+    return 200, {'ok': True, 'changed': result}
+
+
+def handle_directory_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """管理目录静音状态：mute / unmute / query / list
+
+    请求:
+        - project_dir: 目标目录（list 操作可省略）
+        - action: 'mute' | 'unmute' | 'query' | 'list'
+
+    响应:
+        mute   -> {ok: True, changed: bool}
+        unmute -> {ok: True, changed: bool}
+        query  -> {ok: True, muted: bool}
+        list   -> {ok: True, dirs: [{project_dir, muted_at}, ...]}
+    """
+    from services.directory_store import DirectoryStore
+
+    if not check_global_auth_token(headers, '/cb/directory/mute'):
+        return 401, {'error': 'Unauthorized'}
+
+    action = data.get('action', '').strip()
+    if action not in ('mute', 'unmute', 'query', 'list'):
+        return 400, {'error': 'Invalid action'}
+
+    store = DirectoryStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    if action == 'list':
+        return 200, {'ok': True, 'dirs': store.list_muted_dirs()}
+
+    project_dir = data.get('project_dir', '').strip()
+    if not project_dir:
+        return 400, {'error': 'Missing project_dir'}
+
+    if action == 'query':
+        return 200, {'ok': True, 'muted': store.is_dir_muted(project_dir)}
+
+    if action == 'mute':
+        result = store.mute_dir(project_dir)
+        if result is None:
+            return 500, {'error': 'Failed to mute directory'}
+        return 200, {'ok': True, 'changed': result}
+
+    # unmute
+    result = store.unmute_dir(project_dir)
+    if result is None:
+        return 500, {'error': 'Failed to unmute directory'}
     return 200, {'ok': True, 'changed': result}
 
 
@@ -932,9 +1014,10 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/invalidate-chats': handle_invalidate_chats,
     '/cb/claude/new': handle_claude_new,
     '/cb/claude/continue': handle_claude_continue,
-    '/cb/claude/record-dir-usage': handle_record_dir_usage,
-    '/cb/claude/recent-dirs': handle_recent_dirs,
-    '/cb/claude/browse-dirs': handle_browse_dirs,
+    '/cb/directory/record-usage': handle_record_dir_usage,
+    '/cb/directory/recent-dirs': handle_recent_dirs,
+    '/cb/directory/browse-dirs': handle_browse_dirs,
+    '/cb/directory/mute': handle_directory_mute,
 }
 
 # =============================================

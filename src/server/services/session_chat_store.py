@@ -9,11 +9,11 @@
     - /cb/session/mute
     - /cb/session/invalidate-chats（gateway 解散群后调用，标记所有引用该 chat_id 的记录为 dissolved 状态）
 
-维护 session_id → session 语义数据（chat_id、claude_command、muted、dissolved、活跃时间等）。
+维护 session_id → session 语义数据（chat_id、claude_command、dissolved、muted_at、活跃时间等）。
 群聊层数据（chat_id ↔ session_id 反向索引、owner、seq、生命周期）由飞书网关侧
 GroupChatStore + GroupSessionStore 独立承担；本 store 只负责 session 自身属性。
 
-dissolved 标记：与 muted 同构的独立布尔字段，默认不存在。
+dissolved 标记：独立布尔字段，默认不存在。
     - 群解散时 gateway 调 /cb/session/invalidate-chats，本 store 设置 dissolved=True
     - get_session 过滤 dissolved 返回 None（软失效），上层落入"session 不存在"分支：
       ensure-chat 走重建、continue 报错引导 /new
@@ -50,7 +50,7 @@ class SessionChatStore:
                 "skip_next_user_prompt": true,     # 跳过下一条 UserPromptSubmit（飞书发起时设置，可选）
                 "updated_at": 1706745600,          # 最近更新时间戳
                 "project_dir": "/path/to/project", # 项目目录（可选）
-                "muted": true,                     # 出站静音标志（可选）
+                "muted_at": 1706745600,            # 出站静音时间戳（可选）
                 "dissolved": true                  # 群已解散标志（可选）
             }
         }
@@ -306,9 +306,9 @@ class SessionChatStore:
                 if not item:
                     logger.warning("[session-chat-store] mute_session: session not found: %s", session_id)
                     return None
-                if item.get('muted'):
+                if item.get('muted_at'):
                     return False
-                item['muted'] = True
+                item['muted_at'] = int(time.time())
                 data[session_id] = item
                 if not self._save(data):
                     return None
@@ -334,9 +334,9 @@ class SessionChatStore:
                 if not item:
                     logger.warning("[session-chat-store] unmute_session: session not found: %s", session_id)
                     return None
-                if not item.get('muted'):
+                if not item.get('muted_at'):
                     return False
-                del item['muted']
+                del item['muted_at']
                 data[session_id] = item
                 if not self._save(data):
                     return None
@@ -349,22 +349,44 @@ class SessionChatStore:
     def is_session_muted(self, session_id: str) -> bool:
         """检查 session 是否处于静音状态
 
-        muted 与 dissolved 独立：dissolved 表示群聊层失效，muted 表示用户业务层
-        意图（是否拦截出站）。dissolved 的 session 若仍被 mute，出站依然按用户
-        意图拦截——避免 dissolve 后消息漏到单聊。
+        过滤 expired（过期记录视为不存在），不过滤 dissolved：
+        dissolved 表示群聊层失效，muted 表示用户业务层意图（是否拦截出站）。
+        dissolved 的 session 若仍被 mute，出站依然按用户意图拦截——
+        避免 dissolve 后消息漏到单聊。
         """
         if not session_id:
             return False
+        # include_dissolved=True：dissolved 不影响 mute 意图
+        item = self.get_session(session_id, include_dissolved=True)
+        if not item:
+            return False
+        return bool(item.get('muted_at'))
+
+    def list_muted_sessions(self) -> List[Dict[str, Any]]:
+        """列出所有处于静音状态的 session
+
+        Returns:
+            [{'session_id': str, 'project_dir': str, 'chat_id': str, 'muted_at': int}, ...]
+            不过滤 expired（cleanup_expired 保留有 muted_at 的记录，用户可通过列表手动解除）。
+            包含 dissolved（dissolved 不影响 mute 状态）。
+        """
         with self._file_lock:
             try:
                 data = self._load()
-                item = data.get(session_id)
-                if not item:
-                    return False
-                return bool(item.get('muted'))
+                result = []
+                for session_id, item in data.items():
+                    if not item.get('muted_at'):
+                        continue
+                    result.append({
+                        'session_id': session_id,
+                        'project_dir': item.get('project_dir', ''),
+                        'chat_id': item.get('chat_id', ''),
+                        'muted_at': item.get('muted_at', 0),
+                    })
+                return sorted(result, key=lambda x: x['muted_at'], reverse=True)
             except Exception as e:
-                logger.error("[session-chat-store] Failed to check muted: %s", e)
-                return False
+                logger.error("[session-chat-store] Failed to list muted sessions: %s", e)
+                return []
 
     # =========================================================================
     # 读
@@ -372,9 +394,9 @@ class SessionChatStore:
 
     def get_session(self, session_id: str,
                     include_dissolved: bool = False) -> Optional[Dict[str, Any]]:
-        """获取 session 完整数据（含过期清理）
+        """获取 session 完整数据
 
-        不存在 / 过期均返回 None。
+        不存在 / 过期均返回 None，不主动删除（清理由 cleanup_expired 统一处理）。
         dissolved 默认也返回 None（软失效），传 include_dissolved=True 可读取。
         """
         with self._file_lock:
@@ -387,22 +409,20 @@ class SessionChatStore:
                     return None
                 if time.time() - item.get('updated_at', 0) > self._expire_seconds:
                     logger.info("[session-chat-store] Mapping expired: %s", session_id)
-                    del data[session_id]
-                    self._save(data)
                     return None
                 return dict(item)
             except Exception as e:
                 logger.error("[session-chat-store] Failed to get_session: %s", e)
                 return None
 
-    def get_chat_id(self, session_id: str) -> Optional[str]:
-        """获取 session 的 chat_id。不存在/过期返回 None；chat_id 为空也返回 None。
+    def get_active_chat_id(self, session_id: str) -> str:
+        """获取可用的发送目标 chat_id
 
-        过滤 dissolved：dissolved 的 chat_id 指向已解散群，返回会导致消息发往不存在的群。
+        过滤 expired + dissolved：过期或已解散群的 chat_id 不可用。
+        不存在/过期/dissolved/chat_id 为空 均返回空字符串。
         """
         item = self.get_session(session_id)
-        chat_id = item.get('chat_id') if item else None
-        return chat_id or None
+        return item.get('chat_id', '') if item else ''
 
     def get_last_message_id(self, session_id: str) -> str:
         """获取 session 的 last_message_id。不存在/过期返回空字符串。
@@ -440,7 +460,8 @@ class SessionChatStore:
     def cleanup_expired(self) -> int:
         """清理过期数据
 
-        超过 SESSION_EXPIRE_DAYS 的 session 直接删除（统一策略，不区分 group/非 group）。
+        超过 SESSION_EXPIRE_DAYS 且无 muted_at 的 session 删除。
+        有 muted_at 的记录保留——静音是用户主动意图，过期不应绕过静音。
 
         Returns:
             清理的条目数量
@@ -452,6 +473,7 @@ class SessionChatStore:
                 expired = [
                     sid for sid, item in data.items()
                     if now - item.get('updated_at', 0) > self._expire_seconds
+                    and not item.get('muted_at')
                 ]
                 if expired:
                     for sid in expired:

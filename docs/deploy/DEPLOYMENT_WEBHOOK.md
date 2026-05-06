@@ -18,6 +18,8 @@
 
 ## 模式简介
 
+> ⚠️ Webhook 模式不再维护，推荐使用 [OpenAPI 模式](DEPLOYMENT_OPENAPI.md)。
+
 Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简单的部署方式。
 
 ### 特点

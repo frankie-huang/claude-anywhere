@@ -331,12 +331,12 @@ Callback 后端 SHALL 提供 `/cb/claude/new` 端点，接收并处理新建会�
 
 ### Requirement: 路径浏览接口
 
-Callback 后端 SHALL 提供 `/cb/claude/browse-dirs` 端点，列出指定路径下的子目录。
+Callback 后端 SHALL 提供 `/cb/directory/browse-dirs` 端点，列出指定路径下的子目录。
 
 #### Scenario: 列出子目录
 
 - **GIVEN** Callback 后端正在运行
-- **WHEN** 收到 POST `/cb/claude/browse-dirs` 请求
+- **WHEN** 收到 POST `/cb/directory/browse-dirs` 请求
 - **AND** 请求包含 `{"path": "/home/user"}`
 - **THEN** 列出 `/home/user` 下的所有子目录（不含文件）
 - **AND** 过滤以 `.` 开头的隐藏目录
@@ -345,27 +345,27 @@ Callback 后端 SHALL 提供 `/cb/claude/browse-dirs` 端点，列出指定路�
 
 #### Scenario: 路径验证
 
-- **GIVEN** 收到 `/cb/claude/browse-dirs` 请求
+- **GIVEN** 收到 `/cb/directory/browse-dirs` 请求
 - **WHEN** path 不是绝对路径
 - **THEN** 返回 `400` 状态码
 - **AND** 返回 `{"error": "path must be absolute"}`
 
 #### Scenario: 路径不存在
 
-- **GIVEN** 收到 `/cb/claude/browse-dirs` 请求
+- **GIVEN** 收到 `/cb/directory/browse-dirs` 请求
 - **WHEN** path 不存在或无法访问
 - **THEN** 返回 `400` 状态码
 - **AND** 返回 `{"error": "path not found or not accessible"}`
 
 #### Scenario: 默认起始路径
 
-- **GIVEN** 收到 `/cb/claude/browse-dirs` 请求
+- **GIVEN** 收到 `/cb/directory/browse-dirs` 请求
 - **WHEN** 请求未包含 path 字段或 path 为空
 - **THEN** 默认使用 `/` 作为浏览起始路径
 
 #### Scenario: 认证保护
 
-- **GIVEN** 收到 `/cb/claude/browse-dirs` 请求
+- **GIVEN** 收到 `/cb/directory/browse-dirs` 请求
 - **WHEN** 请求缺少有效的 `X-Auth-Token`
 - **THEN** 返回 `401` 状态码
 - **AND** 拒绝请求
@@ -380,7 +380,7 @@ Callback 后端 SHALL 提供 `/cb/claude/browse-dirs` 端点，列出指定路�
 - **AND** 常用目录下拉框选择了 "/home/user"
 - **WHEN** 网关收到 form 提交回调
 - **AND** 触发按钮 name 为 `browse_dir_select_btn`
-- **THEN** 调用 Callback 后端 `/cb/claude/browse-dirs` 接口，路径为下拉框选中的值
+- **THEN** 调用 Callback 后端 `/cb/directory/browse-dirs` 接口，路径为下拉框选中的值
 - **AND** 返回更新后的卡片，custom_dir 输入框保持原值（如有）
 - **AND** 在下方新增子目录列表（`select_static`，name 为 `browse_result`）
 
@@ -398,7 +398,7 @@ Callback 后端 SHALL 提供 `/cb/claude/browse-dirs` 端点，列出指定路�
 - **AND** custom_dir 输入框值为 "/home/user"
 - **WHEN** 网关收到 form 提交回调
 - **AND** 触发按钮 name 为 `browse_custom_btn`
-- **THEN** 调用 Callback 后端 `/cb/claude/browse-dirs` 接口
+- **THEN** 调用 Callback 后端 `/cb/directory/browse-dirs` 接口
 - **AND** 返回更新后的卡片，custom_dir 输入框回填为当前浏览路径
 - **AND** 在下方新增子目录列表（`select_static`，name 为 `browse_result`）
 - **AND** 保持 prompt 输入框的原值（通过 default_value 回填）

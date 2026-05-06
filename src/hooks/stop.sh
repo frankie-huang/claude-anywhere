@@ -27,6 +27,186 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
 fi
 
 # =============================================================================
+# Markdown 预处理
+# 对 response_json 中的 texts 做飞书卡片兼容转换（单次子进程，单次 JSON 解析）
+#
+# 处理项（均跳过代码块）：
+#   1. 图片链接转文本   — ![alt](url) → [图片: alt](url)，飞书不支持会报错
+#   2. HTML 标签剥离   — 删除标签，保留标签间的文本内容
+#   3. 脚注定义展平    — 脚注定义行转为可见文本
+#   4. 标题降级（可选） — # 标题 → 加粗/emoji 格式，由 heading_style 控制
+#
+# HTML 标签剥离场景：
+#   ┌─────────────────────────┬──────────────────┬──────────────────┐
+#   │ HTML 标签               │ 转换结果         │ 说明             │
+#   ├─────────────────────────┼──────────────────┼──────────────────┤
+#   │ <summary>text</summary> │ **text**         │ 保留文本，转加粗 │
+#   │ <details>…</details>    │ (删除标签)       │ 保留内部内容     │
+#   │ <div>…</div>            │ (删除标签)       │ 保留内部内容     │
+#   │ <span>…</span>          │ (删除标签)       │ 保留内部内容     │
+#   │ <p>…</p>                │ (删除标签)       │ 保留内部内容     │
+#   │ <br>                    │ (不处理)         │ 飞书卡片支持渲染 │
+#   │ <hr>                    │ (不处理)         │ 飞书卡片支持渲染 │
+#   └─────────────────────────┴──────────────────┴──────────────────┘
+#
+# 脚注定义替换：
+#   [^id]: content → **注 id**: content（直接替换，飞书会吞掉原始脚注定义行）
+#   [^id] 引用处不处理（保留原样，由飞书自行渲染）
+#
+# 标题降级预设（H1 统一使用 **【标题】** 格式）：
+#   bar      — H2~H6: ▍ ▎ ▏ ▏▏ ▏▏▏（默认）
+#   circle   — H2~H6: 🔵 🔘 ● ○ ◦
+#   diamond  — H2~H6: 🔷 🔹 ◆ ◇ ◦
+#   original — 不做标题降级
+#
+# 参数:
+#   $1 - response_json  含 texts 数组的 JSON
+#   $2 - heading_style  标题降级样式（bar/circle/diamond/original）
+# 输出：处理后的 response_json
+# =============================================================================
+preprocess_markdown() {
+    local response_json="$1"
+    local heading_style="${2:-bar}"
+
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        echo "$response_json" | jq --arg heading_style "$heading_style" '
+            # 标题降级样式表
+            def heading_styles:
+                if $heading_style == "circle" then
+                    [["**【","】**"],["🔵 **","**"],["🔘 **","**"],["● **","**"],["○ **","**"],["◦ **","**"]]
+                elif $heading_style == "diamond" then
+                    [["**【","】**"],["🔷 **","**"],["🔹 **","**"],["◆ **","**"],["◇ **","**"],["◦ **","**"]]
+                elif $heading_style == "bar" then
+                    [["**【","】**"],["**▍","**"],["**▎","**"],["**▏","**"],["**▏▏","**"],["**▏▏▏","**"]]
+                else null end;
+
+            # 行级转换（图片 → HTML → 脚注 → 标题）
+            def transform_line($styles):
+                # 图片链接转文本
+                gsub("!\\[(?<alt>[^\\]]*)\\]\\((?<url>[^)]+)\\)";
+                    if .alt != "" then "[图片: " + .alt + "](" + .url + ")"
+                    else "[图片](" + .url + ")" end)
+                # HTML: summary 转加粗，其余标签删除
+                | gsub("<summary>(?<s>[^<]*)</summary>"; "**\(.s)**")
+                | gsub("</?(?:details|div|span|p)[^>]*>"; "")
+                # 脚注定义替换 与 标题降级 互斥（jq 无 early return，用 if/else 实现）
+                | if test("^\\s*\\[\\^(?:[^\\]]+)\\]:\\s.+$") then
+                    # 脚注: [^id]: content → **注 id**: content
+                    capture("^(?<indent>\\s*)\\[\\^(?<id>[^\\]]+)\\]:\\s(?<content>.+)$") as $m |
+                    if $m then "\($m.indent)**注 \($m.id)**: \($m.content)" else . end
+                  else
+                    # 标题: # title → 加粗/emoji 格式
+                    if $styles != null then
+                        capture("^(?<hashes>#{1,6})\\s+(?<title>.+)$") as $m |
+                        if $m then
+                            (($m.hashes | length) - 1) as $idx |
+                            $styles[$idx] as $pair |
+                            $pair[0] + $m.title + $pair[1]
+                        else . end
+                    else . end
+                  end;
+
+            def preprocess:
+                heading_styles as $styles |
+                split("\n") | reduce .[] as $line (
+                    {in_code: false, lines: []};
+                    if ($line | gsub("^[ \\t]+"; "") | startswith("```")) then
+                        .in_code = (.in_code | not) | .lines += [$line]
+                    elif .in_code then
+                        .lines += [$line]
+                    else
+                        .lines += [$line | transform_line($styles)]
+                    end
+                ) | .lines | join("\n");
+
+            .texts |= map(preprocess)
+        ' 2>/dev/null
+    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        echo "$response_json" | "$PYTHON3" -c "
+import sys, json, re
+
+data = json.load(sys.stdin)
+heading_style = sys.argv[1] if len(sys.argv) > 1 else 'bar'
+fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
+
+# ── 正则（预编译） ──────────────────────────────────────────
+img_re = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')               # 图片链接
+summary_re = re.compile(r'<summary>([^<]*)</summary>')         # HTML summary
+html_re = re.compile(r'</?(?:details|div|span|p)[^>]*>')       # HTML 标签
+footnote_def_re = re.compile(r'^(\s*)\[\^([^\]]+)\]:\s(.+)$')  # 脚注定义
+heading_re = re.compile(r'^(#{1,6})\s+(.+)$')                  # Markdown 标题
+
+# ── 标题降级样式表 ──────────────────────────────────────────
+HEADING_STYLES = {
+    'circle': [
+        ('**\u3010', '\u3011**'),
+        ('\U0001f535 **', '**'), ('\U0001f518 **', '**'),
+        ('\u25cf **', '**'), ('\u25cb **', '**'), ('\u25e6 **', '**'),
+    ],
+    'diamond': [
+        ('**\u3010', '\u3011**'),
+        ('\U0001f537 **', '**'), ('\U0001f539 **', '**'),
+        ('\u25c6 **', '**'), ('\u25c7 **', '**'), ('\u25e6 **', '**'),
+    ],
+    'bar': [
+        ('**\u3010', '\u3011**'),
+        ('**\u258d', '**'), ('**\u258e', '**'), ('**\u258f', '**'),
+        ('**\u258f\u258f', '**'), ('**\u258f\u258f\u258f', '**'),
+    ],
+}
+h_formats = HEADING_STYLES.get(heading_style)
+
+# ── 行级转换 ────────────────────────────────────────────────
+# 对单行依次执行：图片转文本 → HTML 剥离 → 脚注替换 → 标题降级
+# 在主循环中被调用，仅作用于代码块外的行
+def transform_line(line):
+    # 1. 图片链接转文本: ![alt](url) → [图片: alt](url)
+    #    飞书不支持 Markdown 图片语法，会导致卡片渲染报错
+    line = img_re.sub(
+        lambda m: '[\u56fe\u7247: %s](%s)' % (m.group(1), m.group(2))
+                  if m.group(1) else '[\u56fe\u7247](%s)' % m.group(2), line)
+    # 2. HTML 标签剥离: <summary> → 加粗，其余标签删除保留内容
+    #    飞书不支持 HTML 标签，会原样显示为文本；<br>/<hr> 保留（飞书能渲染）
+    line = summary_re.sub(r'**\1**', line)
+    line = html_re.sub('', line)
+    # 3. 脚注定义替换: [^id]: content → **注 id**: content
+    #    飞书会吞掉脚注定义行，替换后内容始终可见
+    m = footnote_def_re.match(line)
+    if m:
+        return '%s**\u6ce8 %s**: %s' % (m.group(1), m.group(2), m.group(3))
+    # 4. 标题降级: # title → 加粗/emoji 格式（heading_style=original 时跳过）
+    if h_formats:
+        m = heading_re.match(line)
+        if m:
+            pre, suf = h_formats[len(m.group(1)) - 1]
+            line = '%s%s%s' % (pre, m.group(2), suf)
+    return line
+
+# ── 主处理循环 ──────────────────────────────────────────────
+# 单次遍历：代码块保护 → 行级转换
+def process_text(text):
+    lines = text.split('\n')
+    result = []
+    in_code = False
+    for line in lines:
+        if line.lstrip().startswith(fence):
+            in_code = not in_code
+            result.append(line)
+        elif in_code:
+            result.append(line)
+        else:
+            result.append(transform_line(line))
+    return '\n'.join(result)
+
+data['texts'] = [process_text(t) for t in data.get('texts', [])]
+json.dump(data, sys.stdout, ensure_ascii=False)
+" "$heading_style" 2>/dev/null
+    else
+        echo "$response_json"
+    fi
+}
+
+# =============================================================================
 # 从单个 transcript 文件中提取响应内容（texts 数组 + thinking）
 # 参数:
 #   $1 - transcript 文件路径
@@ -287,7 +467,7 @@ for text in texts:
         truncated.append(text[:remaining] + '...')
         is_truncated = True
         remaining = 0
-fence = chr(96) * 3
+fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
 elements = []
 for i, text in enumerate(truncated):
     text = re.sub(r'^[ \t]*' + fence, fence, text, flags=re.MULTILINE)
@@ -348,6 +528,22 @@ send_stop_notification_async() {
 
         CLAUDE_THINKING=$(json_get "$response_json" "thinking")
 
+        # 前置解析 chat_id 并检查 mute 状态，muted 时跳过后续所有处理
+        local RESOLVED_CHAT_ID
+        RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+        if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+            log "Session muted, skipping stop notification: $SESSION_ID"
+            return 0
+        fi
+
+        # Markdown 预处理（图片转换 + HTML 剥离 + 脚注展平 + 标题降级，单次子进程）
+        local HEADING_STYLE=$(get_config "FEISHU_HEADING_STYLE" "bar")
+        local _processed
+        _processed=$(preprocess_markdown "$response_json" "$HEADING_STYLE")
+        if [ -n "$_processed" ]; then
+            response_json="$_processed"
+        fi
+
         # 构建响应元素 JSON 片段（含截断和代码块格式化）
         RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
         log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#CLAUDE_THINKING} chars"
@@ -375,7 +571,7 @@ send_stop_notification_async() {
     if [ -n "$CARD" ]; then
         # 传递 session_id, project_dir, callback_url 支持回复继续会话
         local options
-        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL")
+        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID")
         send_feishu_card "$CARD" "$options" >/dev/null 2>&1
     fi
 }

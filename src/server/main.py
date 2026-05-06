@@ -50,7 +50,7 @@ from services.card_cache import CardCache
 from services.feishu_api import FeishuAPIService
 from services.message_session_store import MessageSessionStore
 from services.group_session_store import GroupSessionStore
-from services.dir_history_store import DirHistoryStore
+from services.directory_store import DirectoryStore
 from services.binding_store import BindingStore
 from handlers.http_handler import HttpRequestHandler
 from services.auth_token_store import AuthTokenStore
@@ -273,28 +273,36 @@ def _cleanup_expired_data():
     |----------------------|-------------------------|----------|------|------|--------------------------|
     | MessageSessionStore  | message_sessions.json   | 7 天     | ✅   | ✅   | 本函数清理                |
     | SessionChatStore     | session_chats.json      | 30 天    | ✅   | ✅   | 本函数清理                |
+    | DirectoryStore       | directories.json        | 30 天    | ✅   | ✅   | 本函数清理                |
     | BindingStore         | bindings.json           | 无       | ❌   | ❌   | 需先实现自动续期机制       |
-    | DirHistoryStore      | dir_history.json        | 30 天    | ✅   | ❌   | 写入时清理，死数据无害     |
     | AuthTokenStore       | auth_token.json         | 无       | ❌   | ❌   | 单条记录，每次注册覆盖     |
     | WebSocketRegistry    | pending_connections     | 90s/10min| ✅   | ✅   | 中频清理（run_cleanup_thread）|
 
     本函数清理范围（低频，每 1 小时）：
         - message_sessions.json (7天过期)
-        - session_chats.json (7天过期)
+        - session_chats.json (30天过期)
+        - directories.json (30天过期 + 不存在目录)
     """
     # 清理 message_sessions
     store = MessageSessionStore.get_instance()
     if store:
         expired_count = store.cleanup_expired()
         if expired_count > 0:
-            logger.info(f"[cleanup] Cleaned {expired_count} expired session mappings")
+            logger.info(f"[cleanup] Cleaned {expired_count} expired message mappings")
 
     # 清理 session_chats
     session_store = SessionChatStore.get_instance()
     if session_store:
         expired_count = session_store.cleanup_expired()
         if expired_count > 0:
-            logger.info(f"[cleanup] Cleaned {expired_count} expired chat mappings")
+            logger.info(f"[cleanup] Cleaned {expired_count} expired session mappings")
+
+    # 清理 directories（过期 + 不存在目录）
+    dir_store = DirectoryStore.get_instance()
+    if dir_store:
+        expired_count = dir_store.cleanup_expired()
+        if expired_count > 0:
+            logger.info(f"[cleanup] Cleaned {expired_count} expired directory entries")
 
 
 def _cleanup_group_chats():
@@ -429,7 +437,7 @@ def main():
         4. RequestManager - 管理待处理的权限请求
         5. MessageSessionStore - 维护 message_id 到 session 的映射
         6. SessionChatStore - 维护 session_id 到 chat_id 的映射
-        7. DirHistoryStore - 记录目录使用历史
+        7. DirectoryStore - 记录目录使用历史和目录级静音状态
         8. BindingStore - 维护 owner_id 到 callback_url 的绑定（网关专用）
         9. AuthTokenStore - 存储网关注册的 auth_token（Callback 后端专用）
         10. FeishuAPIService - 飞书 OpenAPI 服务（OpenAPI 模式）
@@ -477,9 +485,9 @@ def main():
     GroupSessionStore.initialize(runtime_dir)
     logger.info(f"GroupSessionStore initialized with runtime_dir={runtime_dir}")
 
-    # 初始化 DirHistoryStore（用于记录目录使用历史）
-    DirHistoryStore.initialize(runtime_dir)
-    logger.info(f"DirHistoryStore initialized with runtime_dir={runtime_dir}")
+    # 初始化 DirectoryStore（目录使用历史 + 目录级静音状态）
+    DirectoryStore.initialize(runtime_dir)
+    logger.info(f"DirectoryStore initialized with runtime_dir={runtime_dir}")
 
     # 初始化 BindingStore（用于网关注册功能）
     BindingStore.initialize(runtime_dir)

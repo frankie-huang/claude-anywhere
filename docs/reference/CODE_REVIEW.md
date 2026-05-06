@@ -235,7 +235,7 @@ color=$(_tool_config_get "_defaults.unknown_tool.color")
 
 ### 21. [安全] feishu.sh 中多处 JSON 手工拼接
 
-**文件**: `src/lib/feishu.sh:751`、`src/hooks/webhook.sh:77`
+**文件**: `src/lib/feishu.sh:751`
 
 `$session_id`、`$WEBHOOK_URL` 等变量未经 JSON 转义直接拼接到 JSON 字符串中。
 

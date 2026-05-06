@@ -65,6 +65,14 @@ send_user_prompt_async() {
         return 0
     fi
 
+    # 前置解析 chat_id 并检查 mute 状态，muted 时跳过发送
+    local RESOLVED_CHAT_ID
+    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
+        return 0
+    fi
+
     # 发送 prompt 文本到飞书话题
     # 截断过长的 prompt（纯文本消息不宜太长）
     local max_prompt_length=10000
@@ -87,7 +95,7 @@ send_user_prompt_async() {
 
     # 使用 send_feishu_post 发送富文本消息（带 session threading + at）
     local options
-    options=$(json_build_object "project_dir" "$PROJECT_DIR" "session_id" "$SESSION_ID" "callback_url" "$CALLBACK_URL")
+    options=$(json_build_object "project_dir" "$PROJECT_DIR" "session_id" "$SESSION_ID" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID")
     send_feishu_post "$message_text" "$options" >/dev/null 2>&1
 }
 
