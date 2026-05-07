@@ -3,7 +3,7 @@
 # src/hook-router.sh - Claude Code Hook 统一路由入口
 #
 # 这是所有 Claude Code Hook 的唯一入口脚本
-# 根据事件类型（UserPromptSubmit, PermissionRequest, Notification, Stop）分发到对应处理脚本
+# 根据事件类型（UserPromptSubmit, PermissionRequest, Stop）分发到对应处理脚本
 #
 # 用法: 配置到 Claude Code settings.json 的 hooks 中
 #
@@ -62,21 +62,29 @@ log "Hook router received event: $HOOK_EVENT"
 # 根据事件类型分发到对应处理脚本
 # 子脚本通过 $INPUT 变量获取输入数据（不再从 stdin 读取）
 case "$HOOK_EVENT" in
+    UserPromptSubmit)
+        if [ "$(get_config "HOOK_USER_PROMPT_ENABLED" "true")" = "false" ]; then
+            log "UserPromptSubmit hook disabled, skipping"
+            exit 0
+        fi
+        log "Routing to user prompt handler"
+        source "$SRC_DIR/hooks/user_prompt.sh"
+        ;;
     PermissionRequest)
+        if [ "$(get_config "HOOK_PERMISSION_ENABLED" "true")" = "false" ]; then
+            log "PermissionRequest hook disabled, falling back to terminal"
+            exit 1
+        fi
         log "Routing to permission handler"
         source "$SRC_DIR/hooks/permission.sh"
         ;;
-    Notification)
-        log "Routing to webhook handler"
-        source "$SRC_DIR/hooks/webhook.sh"
-        ;;
     Stop)
+        if [ "$(get_config "HOOK_STOP_ENABLED" "true")" = "false" ]; then
+            log "Stop hook disabled, skipping"
+            exit 0
+        fi
         log "Routing to stop handler"
         source "$SRC_DIR/hooks/stop.sh"
-        ;;
-    UserPromptSubmit)
-        log "Routing to user prompt handler"
-        source "$SRC_DIR/hooks/user_prompt.sh"
         ;;
     *)
         log_error "Unknown hook event: $HOOK_EVENT, falling back to terminal"

@@ -8,7 +8,7 @@
 
 | 模式 | 适合场景 | 需要配置 |
 |------|---------|---------|
-| **Webhook** | 个人使用，只需接收通知和审批权限 | 飞书 Webhook URL |
+| **Webhook**（⚠️ 不再维护） | 个人使用，只需接收通知和审批权限 | 飞书 Webhook URL |
 | **OpenAPI 单机** | 个人使用，需要在飞书中回复继续会话 | 飞书应用 App ID/Secret |
 | **OpenAPI 分离部署** | 团队使用，多实例共享一个网关 | Gateway URL |
 
@@ -31,6 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/
 ---
 
 ## Webhook 模式（手动安装）
+
+> ⚠️ Webhook 模式不再维护，推荐使用上方的 [OpenAPI 模式](#openapi-一键安装)。
 
 最简单的部署方式，只需一个飞书群机器人 Webhook 地址。
 

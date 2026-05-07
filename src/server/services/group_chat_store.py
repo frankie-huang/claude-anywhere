@@ -54,7 +54,7 @@ class GroupChatStore:
     - `_max_seq`: owner_id → 当前最大 seq，加速 allocate
 
     并发模型：
-    - 写路径（allocate / remove）持 _file_lock，先写磁盘、_save() 成功后再更新索引
+    - 写路径（allocate / bind / remove）持 _file_lock，先写磁盘、_save() 成功后再更新索引
     - 读路径（get_owner / is_service_created / get_seq）走内存索引，
       依赖 CPython GIL 对 dict 单次操作的原子性
     - get_chat_by_seq / get_chats_by_owner / get_all 需要遍历 data，走 _file_lock 保护
@@ -97,47 +97,79 @@ class GroupChatStore:
     # 写接口
     # =========================================================================
 
-    def allocate(self, owner_id: str, chat_id: str) -> int:
-        """为新群聊分配 seq 并记录归属。
+    def allocate(self, owner_id: str) -> int:
+        """分配下一个 seq（不绑定 chat_id，但持久化占位）。
 
-        同 chat_id 已存在则返回已分配的 seq，不做重复登记（幂等）。
+        用于在创建群聊前获取 seq 以构造群名。建群成功后需调用 bind() 绑定 chat_id。
+        建群失败则该 seq 保留为占位记录（chat_id 为空），不影响正确性。
 
         Args:
             owner_id: 创建者的飞书用户 ID
-            chat_id: 飞书群聊 ID
 
         Returns:
             分配的 seq；失败返回 0
         """
-        if not owner_id or not chat_id:
-            logger.warning("[group-chat-store] Refused allocate with empty owner=%r chat=%r",
-                           owner_id, chat_id)
+        if not owner_id:
+            logger.warning("[group-chat-store] Refused allocate with empty owner_id")
             return 0
         with self._file_lock:
             try:
                 data = self._load()
-                # 幂等：chat_id 已存在则返回原 seq
-                existing = self._chat_index.get(chat_id)
-                if existing:
-                    return existing[1]
-
                 owner_bucket = data.setdefault(owner_id, {})
                 allocated = self._max_seq.get(owner_id, 0) + 1
                 owner_bucket[str(allocated)] = {
-                    'chat_id': chat_id,
+                    'chat_id': '',
                     'created_at': int(time.time()),
                 }
                 if not self._save(data):
                     return 0
-                # 更新索引
-                self._chat_index[chat_id] = (owner_id, allocated)
                 self._max_seq[owner_id] = allocated
-                logger.info("[group-chat-store] Allocated owner=%s seq=%d chat=%s",
-                            owner_id, allocated, chat_id)
+                logger.info("[group-chat-store] Allocated owner=%s seq=%d (pending bind)",
+                            owner_id, allocated)
                 return allocated
             except Exception as e:
                 logger.error("[group-chat-store] Failed to allocate: %s", e)
                 return 0
+
+    def bind(self, owner_id: str, seq: int, chat_id: str) -> bool:
+        """将已分配的 seq 绑定到实际创建的 chat_id 并持久化。
+
+        Args:
+            owner_id: 创建者的飞书用户 ID
+            seq: allocate() 返回的 seq
+            chat_id: 飞书群聊 ID
+
+        Returns:
+            是否成功
+        """
+        if not owner_id or not seq or not chat_id:
+            logger.warning("[group-chat-store] Refused bind with empty params: "
+                           "owner=%r seq=%r chat=%r", owner_id, seq, chat_id)
+            return False
+        with self._file_lock:
+            try:
+                data = self._load()
+                # 幂等：chat_id 已存在则跳过
+                existing = self._chat_index.get(chat_id)
+                if existing:
+                    logger.info("[group-chat-store] bind: chat_id=%s already bound to "
+                                "owner=%s seq=%d", chat_id, existing[0], existing[1])
+                    return True
+
+                owner_bucket = data.setdefault(owner_id, {})
+                owner_bucket[str(seq)] = {
+                    'chat_id': chat_id,
+                    'created_at': int(time.time()),
+                }
+                if not self._save(data):
+                    return False
+                self._chat_index[chat_id] = (owner_id, seq)
+                logger.info("[group-chat-store] Bound owner=%s seq=%d chat=%s",
+                            owner_id, seq, chat_id)
+                return True
+            except Exception as e:
+                logger.error("[group-chat-store] Failed to bind: %s", e)
+                return False
 
     def remove(self, chat_id: str) -> bool:
         """删除 chat_id 记录（群聊解散后调用）。
@@ -199,7 +231,7 @@ class GroupChatStore:
         with self._file_lock:
             try:
                 data = self._load()
-                return data.get(owner_id, {}).get(str(seq), {}).get('chat_id')
+                return data.get(owner_id, {}).get(str(seq), {}).get('chat_id') or None
             except Exception as e:
                 logger.error("[group-chat-store] get_chat_by_seq error: %s", e)
                 return None
@@ -220,8 +252,11 @@ class GroupChatStore:
                         seq = int(seq_key)
                     except (TypeError, ValueError):
                         continue
+                    chat_id = item.get('chat_id', '')
+                    if not chat_id:
+                        continue  # 跳过 allocate 占位但未 bind 的记录
                     result.append({
-                        'chat_id': item.get('chat_id', ''),
+                        'chat_id': chat_id,
                         'seq': seq,
                         'created_at': item.get('created_at', 0),
                     })
@@ -249,24 +284,35 @@ class GroupChatStore:
     # =========================================================================
 
     def _rebuild_index(self) -> None:
-        """从持久化数据重建内存索引。仅 __init__ 阶段调用。"""
+        """从持久化数据重建内存索引，并清理未绑定的占位记录。仅 __init__ 阶段调用。"""
         with self._file_lock:
             try:
                 data = self._load()
                 self._chat_index = {}
                 self._max_seq = {}
-                for owner_id, owner_bucket in data.items():
-                    for seq_key, item in owner_bucket.items():
+                dirty = False
+                for owner_id, owner_bucket in list(data.items()):
+                    for seq_key, item in list(owner_bucket.items()):
                         try:
                             seq = int(seq_key)
                         except (TypeError, ValueError):
                             continue
                         chat_id = item.get('chat_id', '')
-                        if not chat_id:
-                            continue
-                        self._chat_index[chat_id] = (owner_id, seq)
+                        # 无论是否有 chat_id，都要计入 _max_seq 防止 seq 回退
                         if seq > self._max_seq.get(owner_id, 0):
                             self._max_seq[owner_id] = seq
+                        if not chat_id:
+                            # 清理 allocate 占位但未 bind 的残留记录
+                            del owner_bucket[seq_key]
+                            dirty = True
+                            continue
+                        self._chat_index[chat_id] = (owner_id, seq)
+                    if not owner_bucket:
+                        del data[owner_id]
+                        dirty = True
+                if dirty:
+                    self._save(data)
+                    logger.info("[group-chat-store] Cleaned up unbound allocate placeholders")
                 if self._chat_index:
                     logger.info("[group-chat-store] Rebuilt index: owners=%d chats=%d",
                                 len(self._max_seq), len(self._chat_index))

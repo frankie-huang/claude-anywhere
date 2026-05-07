@@ -23,6 +23,7 @@ import socket
 import threading
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 # setup_logging 由 main.py 启动时将 shared/ 加入 sys.path
@@ -444,9 +445,6 @@ def _handle_message_event(data: dict):
     route_info = SessionFacade.resolve_from_message(data, binding)
     route_source = route_info['source']
 
-    # 若当前 session 处于静音状态，先自动解除（同步调用；解除失败不影响后续转发）
-    _auto_unmute_if_needed(binding, route_info, chat_id, message_id)
-
     if SessionFacade.RouteSource.is_parent_not_found(route_source):
         _run_in_background(_send_notice_message,
                            (chat_id,
@@ -485,36 +483,138 @@ def _handle_message_event(data: dict):
         _handle_default_chat_message(data, prompt, binding)
         return
 
-    # 已注册但未配置默认目录：发送使用提示
-    owner_id = binding.get('_owner_id', '')
-    supported = _get_supported_commands(owner_id)
-    hint = "💡 我还不能直接对话哦，请通过以下方式使用：\n\n" \
-           "**发起新会话：**\n" \
-           "发送 `/new` 指令创建 Claude 会话\n\n" \
-           "**继续会话：**\n" \
-           "回复 Claude 的消息即可继续对话\n\n" \
-           "**支持的指令：**\n" + supported
-    _run_in_background(_send_notice_message, (chat_id, hint, message_id))
+    # 已注册但未配置默认目录：发送帮助卡片
+    hint = "💡 我还不能直接对话哦，可选择以下方式使用：\n" \
+           "- **发起新会话**\n\n" \
+           "发送 `/new` 指令创建 Claude 会话\n" \
+           "- **继续会话**\n\n" \
+           "回复 Claude 会话的消息即可继续对话\n" \
+           "- **指定默认目录**\n\n" \
+           "在 `.env` 中配置 `DEFAULT_CHAT_DIR` 并重启服务，即可直接发消息对话"
+    _run_in_background(_send_help_card, (binding, chat_id, message_id, hint))
 
 
-def _get_supported_commands(owner_id: str = '') -> str:
-    """获取支持的命令列表（用于帮助提示）
+
+
+def _send_help_card(binding: Optional[Dict[str, Any]], chat_id: str,
+                    reply_to: str, hint: str = '') -> None:
+    """构建并发送帮助指令卡片（后台线程调用）
 
     Args:
-        owner_id: 当前请求的用户 ID，用于过滤管理员专属指令
-
-    Returns:
-        命令列表字符串
+        hint: 卡片顶部提示文案（如"未知指令"或"请通过指令使用"等）
     """
+    from services.feishu_api import FeishuAPIService
     from config import FEISHU_OWNER_ID as gateway_owner_id
 
+    service = FeishuAPIService.get_instance()
+    if not service or not service.enabled:
+        logger.error("[feishu] Failed to send help card: FeishuAPIService not available")
+        return
+
+    owner_id = binding.get('_owner_id', '') if binding else ''
     is_admin = owner_id and owner_id == gateway_owner_id
-    items = []
-    for cmd, (_, admin_only, info) in _COMMANDS.items():
-        if admin_only and not is_admin:
-            continue
-        items.append(f"- `/{cmd}`: {info}")
-    return '\n'.join(items)
+
+    elements = []
+
+    # 顶部提示文案
+    if hint:
+        elements.append({
+            "tag": "markdown",
+            "content": hint
+        })
+        elements.append({"tag": "hr"})
+
+    # 构建指令行
+    def _build_cmd_rows(cmd_dict, admin_filter):
+        """生成 column_set 行列表，首行显示指令名+说明，后续行留空"""
+        rows = []
+        for cmd, (_, admin_only, brief, examples) in cmd_dict.items():
+            if admin_only != admin_filter:
+                continue
+            for i, (example, desc) in enumerate(examples):
+                cmd_col = f"**`/{cmd}`**\n{brief}" if i == 0 else ""
+                rows.append({
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "horizontal_spacing": "8px",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 2,
+                            "vertical_align": "top",
+                            "elements": [{"tag": "markdown", "content": cmd_col}]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 2,
+                            "vertical_align": "top",
+                            "elements": [{"tag": "markdown", "content": f"`{example}`"}]
+                        },
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 3,
+                            "vertical_align": "top",
+                            "elements": [{"tag": "markdown", "content": desc}]
+                        }
+                    ]
+                })
+            # 指令之间加分隔线
+            rows.append({"tag": "hr"})
+        # 去掉最后一个 hr
+        if rows and rows[-1].get('tag') == 'hr':
+            rows.pop()
+        return rows
+
+    def _wrap_section(title, rows):
+        """将标题和行列表包裹在灰色背景 column_set 中"""
+        return {
+            "tag": "column_set",
+            "background_style": "grey",
+            "columns": [{
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "8px",
+                "elements": [{"tag": "markdown", "content": title}] + rows
+            }]
+        }
+
+    # 普通指令
+    normal_rows = _build_cmd_rows(_COMMANDS, False)
+    if normal_rows:
+        elements.append(_wrap_section("**支持的指令**", normal_rows))
+
+    # 管理员指令
+    admin_rows = _build_cmd_rows(_COMMANDS, True)
+    if is_admin and admin_rows:
+        elements.append(_wrap_section("**管理员指令**", admin_rows))
+
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "指令帮助"},
+            "template": "blue"
+        },
+        "body": {
+            "direction": "vertical",
+            "elements": elements
+        }
+    }
+
+    card_json = json.dumps(card, ensure_ascii=False)
+    success = False
+    if reply_to:
+        success, _ = service.reply_card(card_json, reply_to)
+    else:
+        success, _ = service.send_card(card_json, receive_id=chat_id, receive_id_type='chat_id')
+
+    if not success:
+        logger.error("[feishu] Failed to send help card, fallback to text")
+        _send_notice_message(chat_id, "帮助卡片发送失败，请使用 `/help` 或发送未知指令重试", reply_to)
 
 
 def _parse_command(text: str) -> Tuple[bool, str, str]:
@@ -567,7 +667,7 @@ def _handle_command(data: dict, command: str, args: str):
 
     handler_info = _COMMANDS.get(command)
     if handler_info:
-        handler_func, admin_only, _ = handler_info
+        handler_func, admin_only, _, _ = handler_info
         # 管理员专属指令需要权限检查
         if admin_only and owner_id != gateway_owner_id:
             if chat_id:
@@ -576,10 +676,9 @@ def _handle_command(data: dict, command: str, args: str):
         handler_func(data, args)
     else:
         logger.info(f"[feishu] Unknown command: /{command}")
-        # 发送未知指令提示
         if chat_id:
-            supported = _get_supported_commands(owner_id)
-            _run_in_background(_send_notice_message, (chat_id, f"未知指令：`/{command}`\n\n支持的指令：\n{supported}", message_id))
+            _run_in_background(_send_help_card,
+                               (binding, chat_id, message_id, f"未知指令：`/{command}`"))
 
 
 def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None:
@@ -782,7 +881,7 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         'project_dir': project_dir,
         'prompt': prompt,
         'chat_id': chat_id,
-        'reply_message_id': message_id
+        'message_id': message_id
     }
     if claude_command:
         data['claude_command'] = claude_command
@@ -816,7 +915,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
 
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
-        logger.warning("[feishu] FeishuAPIService not enabled, skipping notification")
+        logger.error("[feishu] FeishuAPIService not enabled, skipping notification")
         return
 
     status = response.get('status', '')
@@ -2487,7 +2586,7 @@ def _fetch_recent_dirs_from_callback(binding: Dict[str, Any], limit: int = 5) ->
     }
 
     try:
-        response_data = _forward_via_ws_or_http(binding, '/cb/claude/recent-dirs', request_data)
+        response_data = _forward_via_ws_or_http(binding, '/cb/directory/recent-dirs', request_data)
 
         if response_data is None:
             return []
@@ -2518,7 +2617,7 @@ def _fetch_browse_dirs_from_callback(binding: Dict[str, Any], path: str) -> dict
     }
 
     try:
-        response_data = _forward_via_ws_or_http(binding, '/cb/claude/browse-dirs', request_data)
+        response_data = _forward_via_ws_or_http(binding, '/cb/directory/browse-dirs', request_data)
 
         if response_data is None:
             return {}
@@ -2593,7 +2692,7 @@ def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
 
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
-        logger.warning("[feishu] FeishuAPIService not enabled, cannot send new session card")
+        logger.error("[feishu] FeishuAPIService not enabled, cannot send new session card")
         return
 
     if not binding:
@@ -2629,6 +2728,7 @@ def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
         logger.info(f"[feishu] Sent new session card to {chat_id}, card_msg_id={sent_message_id}")
     else:
         logger.error(f"[feishu] Failed to send new session card: {sent_message_id}")
+        _send_notice_message(chat_id, "会话卡片发送失败，请稍后重试", message_id)
 
 
 def _handle_new_command(data: dict, args: str):
@@ -2786,8 +2886,9 @@ def create_group_chat_and_record(owner_id: str, session_id: str, project_dir: st
 
     所有创建路径都应走此函数，原子完成：
         - 幂等检查：GroupSessionStore 已有该 session_id 的群则直接返回
-        - 调飞书 API 建群（name 由 group_name_prefix + project_dir + 时间戳构造）
-        - GroupChatStore.allocate（owner + seq）—— seq 落 store 即可，不回传调用方
+        - GroupChatStore.allocate 分配 seq（用于构造群名）
+        - 调飞书 API 建群（name = prefix - #seq - dir_name - YYYYMMDD）
+        - GroupChatStore.bind 将 chat_id 绑定到 seq
         - 若提供 session_id/project_dir，同步写 GroupSessionStore（chat → session 路由）
 
     调用方:
@@ -2825,33 +2926,37 @@ def create_group_chat_and_record(owner_id: str, session_id: str, project_dir: st
                         owner_id, session_id, existing_chat_id)
             return True, existing_chat_id
 
-    # 由 prefix + project_dir + 时间戳构造群名
-    dir_name = os.path.basename(project_dir) if project_dir else ''
-    if len(dir_name) > 30:
-        dir_name = dir_name[:29] + '\u2026'
-    timestamp = time.strftime('%m%d %H:%M:%S')
-    if group_name_prefix and dir_name:
-        name = f"{group_name_prefix} - {dir_name} - {timestamp}"
-    elif group_name_prefix:
-        name = f"{group_name_prefix} - {timestamp}"
-    elif dir_name:
-        name = f"{dir_name} - {timestamp}"
-    else:
-        name = timestamp
-
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
         return False, 'Feishu API service not available'
+
+    # 先分配 seq，再构造群名（建群失败则 seq 跳号，可接受）
+    seq = group_store.allocate(owner_id)
+    if not seq:
+        return False, 'Failed to allocate seq for group chat'
+
+    dir_name = os.path.basename(project_dir) if project_dir else ''
+    if len(dir_name) > 30:
+        dir_name = dir_name[:29] + '…'
+    date_str = time.strftime('%Y%m%d')
+    parts = []
+    if group_name_prefix:
+        parts.append(group_name_prefix)
+    parts.append('#%d' % seq)
+    if dir_name:
+        parts.append(dir_name)
+    parts.append(date_str)
+    name = ' - '.join(parts)
 
     ok, result = service.create_group_chat(name, owner_id)
     if not ok:
         return False, result
 
     chat_id = result
-    seq = group_store.allocate(owner_id, chat_id)
-    if not seq:
-        logger.warning("[feishu] group_store.allocate failed for owner=%s chat=%s, "
-                       "group created on Feishu but not tracked locally", owner_id, chat_id)
+    if not group_store.bind(owner_id, seq, chat_id):
+        logger.error("[create-group] bind failed: owner=%s seq=%d chat=%s, "
+                     "group created on Feishu but not tracked locally",
+                     owner_id, seq, chat_id)
 
     # 同步写 chat → session 路由（如果调用方提供了 session_id）
     if session_id:
@@ -3035,13 +3140,6 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
     if not owner_id:
         logger.warning("[feishu] /gw/feishu/send: missing owner_id")
         return True, {'success': False, 'error': 'Missing owner_id'}
-
-    # 静音拦截：session 处于静音状态则直接丢弃消息（Claude 依然正常处理用户消息，仅出站静默）
-    # 稳态下命中 SessionFacade 内存缓存，零 RPC；重启后首次查询才回源 callback
-    if session_id and SessionFacade.is_muted(binding, session_id):
-        logger.debug("[feishu] /gw/feishu/send muted: session_id=%s chat_id=%s",
-                     session_id, chat_id)
-        return True, {'success': True, 'muted': True}
 
     # 确定 receive_id 和 receive_id_type
     # 优先级：传入的 chat_id > owner_id
@@ -3585,6 +3683,7 @@ def _send_users_status_card(chat_id: str, card: dict, reply_to: str):
 
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
+        logger.error("[feishu] Feishu API service not available, cannot send user status card")
         return
 
     card_json = json.dumps(card, ensure_ascii=False)
@@ -3594,7 +3693,8 @@ def _send_users_status_card(chat_id: str, card: dict, reply_to: str):
         success, _ = service.send_card(card_json, receive_id=chat_id, receive_id_type='chat_id')
 
     if not success:
-        logger.warning(f"[feishu] Failed to send user status card to {chat_id}")
+        logger.error("[feishu] Failed to send user status card, fallback to text")
+        _send_notice_message(chat_id, "用户状态卡片发送失败，请稍后重试", reply_to)
 
 
 def _handle_groups_command(data: dict, args: str) -> None:
@@ -3632,11 +3732,12 @@ def _handle_groups_command(data: dict, args: str) -> None:
 
         _run_in_background(_dissolve_groups, (binding, payload, chat_id, message_id))
     else:
-        _run_in_background(_list_groups, (binding, chat_id, message_id))
+        _run_in_background(_send_groups_card, (binding, chat_id, message_id))
 
 
-def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None:
-    """列出当前 owner 的活跃群聊（数据全来自 gateway 本地 store，零 RPC）"""
+def _send_groups_card(binding: Dict[str, Any], chat_id: str, message_id: str) -> None:
+    """构建并发送群聊列表卡片（数据全来自 gateway 本地 store，零 RPC）"""
+    from services.feishu_api import FeishuAPIService
     from services.group_chat_store import GroupChatStore
     from services.group_session_store import GroupSessionStore
 
@@ -3657,14 +3758,14 @@ def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None
     now = int(time.time())
     gs_data = gs_store.get_by_owner(owner_id)
 
-    def _format_age(delta: int) -> str:
-        if delta < 60:
+    def _format_ago(seconds: int) -> str:
+        if seconds < 60:
             return "刚刚"
-        if delta < 3600:
-            return "%d 分钟前" % (delta // 60)
-        if delta < 86400:
-            return "%d 小时前" % (delta // 3600)
-        return "%d 天前" % (delta // 86400)
+        if seconds < 3600:
+            return "%d 分钟前" % (seconds // 60)
+        if seconds < 86400:
+            return "%d 小时前" % (seconds // 3600)
+        return "%d 天前" % (seconds // 86400)
 
     entries = []
     for item in owner_chats:
@@ -3672,25 +3773,71 @@ def _list_groups(binding: Dict[str, Any], chat_id: str, message_id: str) -> None
         seq = item['seq']
         created_at = item.get('created_at', 0)
         gs_item = gs_data.get(cid) or {}
+        session_id = gs_item.get('session_id', '')
         project_dir = gs_item.get('project_dir', '')
         last_active_at = gs_item.get('last_active_at', created_at)
         entries.append({
             'chat_id': cid,
             'seq': seq,
+            'session_id': session_id,
             'project_dir': project_dir,
             'last_active_at': last_active_at,
         })
-    # 按 last_active_at 降序（最近活跃的在前）
-    entries.sort(key=lambda x: x['last_active_at'], reverse=True)
-
-    lines = ["**活跃群聊列表** (%d 个)\n" % len(entries)]
+    # 按目录分组，每组内按 last_active_at 降序
+    groups: Dict[str, List[dict]] = {}  # project_dir → [entry, ...]
     for e in entries:
-        proj = os.path.basename(e['project_dir']) or '-'
-        age = _format_age(now - e['last_active_at']) if e['last_active_at'] else ''
-        lines.append("**#%d** | %s | %s" % (e['seq'], proj, age))
+        groups.setdefault(e['project_dir'], []).append(e)
+    # 每组取最近活跃时间，组间按此降序
+    sorted_dirs = sorted(groups.keys(),
+                         key=lambda d: max(x['last_active_at'] for x in groups[d]),
+                         reverse=True)
+    for group in groups.values():
+        group.sort(key=lambda x: x['last_active_at'], reverse=True)
 
-    lines.append("\n解散群聊：`/groups dissolve 序号` 或 `/groups dissolve all`")
-    _send_notice_message(chat_id, '\n'.join(lines), message_id)
+    # 用 markdown 生成完整列表，避免 column_set 元素过多超限
+    md_parts = [f"**由服务创建的群聊 ({len(entries)})**", ""]
+    for d in sorted_dirs:
+        dir_label = d if d else '(未关联目录)'
+        md_parts.append(f"\U0001F4C1 **{dir_label}**")
+        for e in groups[d]:
+            sid = e['session_id'] or '-'
+            ago = _format_ago(now - e['last_active_at']) if e['last_active_at'] else ''
+            link = "https://applink.feishu.cn/client/chat/open?openChatId=%s" % e['chat_id']
+            md_parts.append(f"- **{e['seq']}**  `{sid}`  {ago}  [进入群聊]({link})")
+        md_parts.append("---")
+    md_parts.append("**解散群聊：**`/groups dissolve <序号1> <序号2> ...` 或 `/groups dissolve all`")
+
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "群聊列表"},
+            "template": "blue"
+        },
+        "body": {
+            "direction": "vertical",
+            "elements": [{
+                "tag": "markdown",
+                "content": '\n'.join(md_parts)
+            }]
+        }
+    }
+
+    service = FeishuAPIService.get_instance()
+    if not service or not service.enabled:
+        logger.error("[feishu] Failed to send groups list card: FeishuAPIService not available")
+        return
+
+    card_json = json.dumps(card, ensure_ascii=False)
+    success = False
+    if message_id:
+        success, _ = service.reply_card(card_json, message_id)
+    else:
+        success, _ = service.send_card(card_json, receive_id=chat_id, receive_id_type='chat_id')
+
+    if not success:
+        logger.warning("[feishu] Failed to send groups list card, fallback to text")
+        _send_notice_message(chat_id, '\n'.join(md_parts), message_id)
 
 
 def _dissolve_groups(binding: Dict[str, Any], payload: dict,
@@ -3901,7 +4048,14 @@ def _pick_mute_target(route_info: Dict[str, str], chat_id: str,
 
 
 def _handle_mute_command(data: dict, args: str) -> None:
-    """处理 /mute 命令：静音当前会话"""
+    """处理 /mute 命令：静音会话、目录或查看静音列表
+
+    用法：
+        /mute                — 静音当前会话
+        /mute <session_id>   — 静音指定会话，需要指定完整的 session_id
+        /mute /path          — 静音指定目录（以 / 开头的参数视为目录）
+        /mute list           — 查看所有已静音的会话和目录
+    """
     event = data.get('event', {})
     message = event.get('message', {})
     chat_id = message.get('chat_id', '')
@@ -3911,6 +4065,38 @@ def _handle_mute_command(data: dict, args: str) -> None:
     if not binding:
         return
 
+    trimmed = args.strip()
+
+    # /mute list → 查看静音列表
+    if trimmed == 'list':
+        _run_in_background(_send_mute_list_card, (binding, chat_id, message_id))
+        return
+
+    # 参数以 / 开头 → 目录 mute
+    if trimmed.startswith('/'):
+        changed = SessionFacade.mute_dir(binding, trimmed)
+        if changed is None:
+            _run_in_background(_send_notice_message,
+                               (chat_id, "目录静音操作失败，请查看日志。", message_id))
+            return
+        text = (f"已静音目录 `{trimmed}`，从终端发起的新会话将自动静音。"
+                if changed else f"目录 `{trimmed}` 已处于静音状态。")
+        _run_in_background(_send_notice_message, (chat_id, text, message_id))
+        return
+
+    # 非空参数（非 list、非 / 开头）→ 视为 session-id 直接 mute
+    if trimmed:
+        changed = SessionFacade.mute(binding, trimmed)
+        if changed is None:
+            _run_in_background(_send_notice_message,
+                               (chat_id, "静音操作失败，请确认 session ID 是否完整且正确。", message_id))
+            return
+        text = (f"已静音 session `{trimmed[:8]}`，后续消息将不再推送到此处。"
+                if changed else f"session `{trimmed[:8]}` 已处于静音状态。")
+        _run_in_background(_send_notice_message, (chat_id, text, message_id))
+        return
+
+    # 无参数 → 静音当前会话
     route_info = SessionFacade.resolve_from_message(data, binding)
     session_id = _pick_mute_target(route_info, chat_id, message_id)
     if not session_id:
@@ -3923,13 +4109,19 @@ def _handle_mute_command(data: dict, args: str) -> None:
         return
 
     sid_tag = f"session `{session_id[:8]}`"
-    text = (f"已静音 {sid_tag}，后续消息将不再推送到此处。发送任意文字消息可自动解除静音。" if changed
+    text = (f"已静音 {sid_tag}，后续消息将不再推送到此处。发送消息继续会话时会自动解除静音，也可通过 /unmute 手动解除。" if changed
             else f"{sid_tag} 已处于静音状态。")
     _run_in_background(_send_notice_message, (chat_id, text, message_id))
 
 
 def _handle_unmute_command(data: dict, args: str) -> None:
-    """处理 /unmute 命令：解除静音"""
+    """处理 /unmute 命令：解除会话或目录静音
+
+    用法：
+        /unmute                — 解除当前会话静音
+        /unmute <session_id>   — 解除指定会话静音，需要指定完整的 session_id
+        /unmute /path          — 解除指定目录静音
+    """
     event = data.get('event', {})
     message = event.get('message', {})
     chat_id = message.get('chat_id', '')
@@ -3939,6 +4131,33 @@ def _handle_unmute_command(data: dict, args: str) -> None:
     if not binding:
         return
 
+    trimmed = args.strip()
+
+    # 参数以 / 开头 → 目录 unmute
+    if trimmed.startswith('/'):
+        changed = SessionFacade.unmute_dir(binding, trimmed)
+        if changed is None:
+            _run_in_background(_send_notice_message,
+                               (chat_id, "解除目录静音失败，请查看日志。", message_id))
+            return
+        text = (f"已解除目录 `{trimmed}` 的静音。"
+                if changed else f"目录 `{trimmed}` 当前未处于静音状态。")
+        _run_in_background(_send_notice_message, (chat_id, text, message_id))
+        return
+
+    # 非空参数（非 / 开头）→ 视为 session-id 直接 unmute
+    if trimmed:
+        changed = SessionFacade.unmute(binding, trimmed)
+        if changed is None:
+            _run_in_background(_send_notice_message,
+                               (chat_id, "解除静音失败，请确认 session ID 是否完整且正确。", message_id))
+            return
+        text = (f"已解除 session `{trimmed[:8]}` 的静音。"
+                if changed else f"session `{trimmed[:8]}` 当前未处于静音状态。")
+        _run_in_background(_send_notice_message, (chat_id, text, message_id))
+        return
+
+    # 无参数 → 解除当前会话静音
     route_info = SessionFacade.resolve_from_message(data, binding)
     session_id = _pick_mute_target(route_info, chat_id, message_id)
     if not session_id:
@@ -3956,31 +4175,97 @@ def _handle_unmute_command(data: dict, args: str) -> None:
     _run_in_background(_send_notice_message, (chat_id, text, message_id))
 
 
-def _auto_unmute_if_needed(binding: Dict[str, Any], route_info: Dict[str, str],
-                           chat_id: str, message_id: str) -> None:
-    """非命令消息到达入口：若当前 session 处于静音则解除并提示
+def _send_mute_list_card(binding: Dict[str, Any], chat_id: str,
+                         reply_to: str) -> None:
+    """构建并发送静音列表卡片（后台线程调用）"""
+    from services.feishu_api import FeishuAPIService
 
-    使用主路由已解析好的 route_info，避免重复解析。作为被动钩子，对
-    PARENT_NOT_FOUND / UNRESOLVED 均静默跳过，不给用户报错。
-    """
-    if not binding:
-        return
-    if not SessionFacade.RouteSource.is_resolved(route_info.get('source', '')):
-        return
-    session_id = route_info.get('session_id', '')
-    if not session_id:
+    result = SessionFacade.list_muted(binding)
+    if result is None:
+        _send_notice_message(chat_id, "查询静音列表失败，请查看日志。", reply_to)
         return
 
-    result = SessionFacade.unmute(binding, session_id)
-    if result is True:
-        _run_in_background(_send_notice_message,
-                           (chat_id,
-                            f"已自动解除 session `{session_id[:8]}` 的静音。",
-                            message_id))
-    elif result is None:
-        # callback 调用失败：静默跳过用户反馈（被动钩子），但打 warning 留痕便于排障
-        logger.warning("[feishu] auto_unmute failed: session_id=%s chat_id=%s",
-                       session_id, chat_id)
+    sessions = result.get('sessions', [])
+    dirs = result.get('dirs', [])
+    if not sessions and not dirs:
+        _send_notice_message(chat_id, "当前没有任何静音的会话或目录。", reply_to)
+        return
+
+    # 构建卡片元素列表，目录块和会话块用 column_set 背景色区分
+    elements = []
+    if dirs:
+        dir_parts = [f"**已静音的目录 ({len(dirs)})**", ""]
+        for d in dirs:
+            muted_date = datetime.fromtimestamp(d['muted_at']).strftime('%Y-%m-%d')
+            dir_parts.append(f"- `{d['project_dir']}`  {muted_date}")
+        elements.append({
+            "tag": "column_set",
+            "background_style": "grey",
+            "columns": [{
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "8px",
+                "elements": [{"tag": "markdown", "content": '\n'.join(dir_parts)}]
+            }]
+        })
+    if sessions:
+        session_parts = [f"**已静音的会话 ({len(sessions)})**", ""]
+        # 按目录分组，最近静音的目录排前面
+        session_groups: Dict[str, List[dict]] = {}  # project_dir → [session, ...]
+        for s in sessions:
+            session_groups.setdefault(s.get('project_dir', ''), []).append(s)
+        sorted_dirs = sorted(session_groups.keys(),
+                             key=lambda d: max(x.get('muted_at', 0) for x in session_groups[d]),
+                             reverse=True)
+        for d in sorted_dirs:
+            dir_label = d if d else '(未关联目录)'
+            session_parts.append(f"\U0001F4C1 **{dir_label}**")
+            for s in session_groups[d]:
+                muted_date = datetime.fromtimestamp(s.get('muted_at', 0)).strftime('%Y-%m-%d')
+                session_parts.append(f"- `{s['session_id']}`  {muted_date}")
+            session_parts.append("---")
+        elements.append({
+            "tag": "column_set",
+            "background_style": "grey",
+            "columns": [{
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "8px",
+                "elements": [{"tag": "markdown", "content": '\n'.join(session_parts)}]
+            }]
+        })
+    elements.append({"tag": "markdown", "content": "**解除静音：**`/unmute`（在会话内）、`/unmute <session_id>` 或 `/unmute /path`"})
+
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "静音列表"},
+            "template": "blue"
+        },
+        "body": {
+            "direction": "vertical",
+            "elements": elements
+        }
+    }
+
+    service = FeishuAPIService.get_instance()
+    if not service or not service.enabled:
+        logger.error("[feishu] Failed to send mute list card: FeishuAPIService not available")
+        return
+
+    card_json = json.dumps(card, ensure_ascii=False)
+    success = False
+    if reply_to:
+        success, _ = service.reply_card(card_json, reply_to)
+    else:
+        success, _ = service.send_card(card_json, receive_id=chat_id, receive_id_type='chat_id')
+
+    if not success:
+        logger.error("[feishu] Failed to send mute list card, fallback to text")
+        _send_notice_message(chat_id, "静音列表卡片发送失败，请使用 `/unmute` 命令操作", reply_to)
 
 
 def _handle_clear_command(data: dict, args: str) -> None:
@@ -4069,21 +4354,63 @@ def _handle_clear_command(data: dict, args: str) -> None:
                         message_id))
 
 
+def _handle_help_command(data: dict, args: str) -> None:
+    """处理 /help 命令：展示指令帮助卡片"""
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+    binding = _get_binding_from_event(event)
+    _run_in_background(_send_help_card, (binding, chat_id, message_id))
+
+
 # =============================================================================
 # 命令映射（放在文件末尾，避免函数未定义的问题）
 # =============================================================================
 
-# 支持的命令映射：命令名 -> (处理函数, 是否管理员专属, 帮助文本)
+# 支持的命令映射：命令名 -> (处理函数, 是否管理员专属, 简述, 示例列表)
 # admin_only 为 True 时，仅管理员可见和执行
+# 格式：(handler, admin_only, brief, examples)
+#   brief: 简短说明
+#   examples: [(示例, 说明), ...]
 _COMMANDS = {
-    'new': (_handle_new_command, False, "发起新的 Claude 会话\n格式：`/new --dir=/path/to/project [--cmd=0] prompt` 或回复消息时 `/new prompt`"),
-    'reply': (_handle_reply_command, False, "回复消息时指定 Claude Command 继续会话\n格式：`/reply [--cmd=0] prompt`\n仅支持在回复消息时使用"),
-    'attach': (_handle_attach_command, False, "将指定 session 绑定到当前群聊\n格式：`/attach <session_id 前缀>`（至少 8 字符）\n仅支持在群聊中使用"),
-    'clear': (_handle_clear_command, False, "清空当前群聊会话\n解绑当前会话，下次发消息自动创建新会话\n仅在群聊模式下可用"),
-    'mute': (_handle_mute_command, False, "静音当前会话，后续消息不再推送\n格式：`/mute`（发送任意文字消息可自动解除）"),
-    'unmute': (_handle_unmute_command, False, "解除当前会话静音\n格式：`/unmute`"),
-    'users': (_handle_users_command, True, "查看已注册用户和在线状态"),
-    'groups': (_handle_groups_command, False, "管理群聊会话\n`/groups` 列表 | `/groups dissolve 1 2` 解散 | `/groups dissolve all` 全部解散"),
+    'new': (_handle_new_command, False, "发起新的 Claude 会话", [
+        ("/new", "收到卡片，完善会话信息（指定工作目录，填写提示词等）后发起新会话"),
+        ("/new prompt", "- 回复已有会话消息时 - 继承工作目录发起新会话\n- 已配置 `DEFAULT_CHAT_DIR` - 从默认目录发起新会话\n- 未配置 `DEFAULT_CHAT_DIR` - 收到卡片完善会话信息"),
+        ("/new --dir=/path prompt", "指定工作目录发起新会话"),
+        ("/new --cmd=0 prompt", "指定 Claude Command 发起新会话（需要提前配置 `CLAUDE_COMMAND`）"),
+    ]),
+    'reply': (_handle_reply_command, False, "回复消息时继续会话", [
+        ("/reply --cmd=0 prompt", "指定 Claude Command 继续会话（需要提前配置 `CLAUDE_COMMAND`）"),
+    ]),
+    'mute': (_handle_mute_command, False, "静音会话或目录", [
+        ("/mute", "静音当前会话"),
+        ("/mute <session_id>", "静音指定会话，需要指定完整的 session_id"),
+        ("/mute /path", "静音指定目录，后续从终端发起的该目录的新会话将不再通知"),
+        ("/mute list", "查看静音列表，展示被静音的工作目录和会话"),
+    ]),
+    'unmute': (_handle_unmute_command, False, "解除会话或目录静音", [
+        ("/unmute", "解除当前会话静音"),
+        ("/unmute <session_id>", "解除指定会话静音，需要指定完整的 session_id"),
+        ("/unmute /path", "解除指定目录静音"),
+    ]),
+    'groups': (_handle_groups_command, False, "【群聊模式】管理群聊会话", [
+        ("/groups", "列出所有自动创建的群聊"),
+        ("/groups dissolve all", "解散所有自动创建的群聊"),
+        ("/groups dissolve 1 2", "按序号解散群聊，支持批量指定"),
+    ]),
+    'attach': (_handle_attach_command, False, "【群聊模式】绑定 session 到当前群聊", [
+        ("/attach <session_id>", "`<session_id>` 可以使用前缀（至少 8 个字符）"),
+    ]),
+    'clear': (_handle_clear_command, False, "【群聊模式】重置当前群聊会话", [
+        ("/clear", "解绑会话，下次发消息自动创建新会话"),
+    ]),
+    'users': (_handle_users_command, True, "查看已注册用户和在线状态", [
+        ("/users", "列出用户及在线状态"),
+    ]),
+    'help': (_handle_help_command, False, "查看指令帮助", [
+        ("/help", "显示本帮助卡片"),
+    ]),
 }
 
 

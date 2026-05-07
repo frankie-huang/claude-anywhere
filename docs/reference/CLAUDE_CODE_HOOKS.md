@@ -295,7 +295,7 @@ Claude Code 支持 **11 种 hook 事件**：
   }
   ```
 
-### Notification - 通知
+### Notification - 通知（本项目未处理）
 
 - **触发时机**: Claude 发送通知
 - **支持 Matcher**: 是

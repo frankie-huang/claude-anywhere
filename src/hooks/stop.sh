@@ -287,7 +287,7 @@ for text in texts:
         truncated.append(text[:remaining] + '...')
         is_truncated = True
         remaining = 0
-fence = chr(96) * 3
+fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
 elements = []
 for i, text in enumerate(truncated):
     text = re.sub(r'^[ \t]*' + fence, fence, text, flags=re.MULTILINE)
@@ -348,7 +348,16 @@ send_stop_notification_async() {
 
         CLAUDE_THINKING=$(json_get "$response_json" "thinking")
 
+        # 前置解析 chat_id 并检查 mute 状态，muted 时跳过后续所有处理
+        local RESOLVED_CHAT_ID
+        RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+        if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+            log "Session muted, skipping stop notification: $SESSION_ID"
+            return 0
+        fi
+
         # 构建响应元素 JSON 片段（含截断和代码块格式化）
+        # 注: Markdown 预处理已下沉到 feishu.sh 的 send_feishu_card() 中统一处理
         RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
         log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#CLAUDE_THINKING} chars"
     fi
@@ -375,7 +384,7 @@ send_stop_notification_async() {
     if [ -n "$CARD" ]; then
         # 传递 session_id, project_dir, callback_url 支持回复继续会话
         local options
-        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL")
+        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID")
         send_feishu_card "$CARD" "$options" >/dev/null 2>&1
     fi
 }

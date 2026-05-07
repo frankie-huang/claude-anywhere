@@ -7,21 +7,18 @@
     对 feishu.py 暴露一组语义化的 session 能力 API，内部隐藏几个子系统：
       - 远端 callback（/cb/session/mute 等）——通过注入的 forward_fn 访问
       - 本地 MessageSessionStore —— parent_id 反查
-      - 本地进程内缓存 —— mute 状态加速
 
     设计上预期后续把 feishu.py 里其它 "session 相关" 的能力（group 反查、
     ensure-chat、attach 等）陆续搬到这里。当前已纳入：
       - resolve_from_message：根据飞书消息上下文解析归属 session
-      - is_muted / mute / unmute：出站静音状态（缓存 + 写穿透）
+      - mute / unmute：透传 callback 端的 session 级静音指令
+      - mute_dir / unmute_dir：透传 callback 端的目录级静音指令
 
-mute 状态的一致性模型：
-    权威源：callback 端 session_chat_store（持久化到 JSON 文件）
-    gateway 缓存：SessionFacade._muted_cache（进程内 dict）
-    策略：
-      - 写穿透（mute/unmute）——先调 callback，成功后再更新缓存
-      - 懒读回源（is_muted）——缓存命中直接返回；miss 去 callback 查一次并回填
-      - 故障降级——is_muted 在 callback 调用失败时返回 False（未静音），不污染缓存
-    稳态下出站拦截零 RPC；重启后首次查询付一次 RPC。
+mute 状态说明：
+    权威源与拦截点均在 callback 端（session_chat_store + hook 脚本的 _get_chat_id）。
+    网关仅在用户执行 /mute、/unmute 命令时透传到 callback，不缓存、不拦截。
+    自动解除静音由 callback 端 handle_continue_session 处理。
+    目录级 mute 存储在 DirectoryStore，终端发起的新会话自动继承目录 mute 状态。
 
 初始化：
     应用启动时（在 feishu.py 模块加载末尾）调用一次：
@@ -31,7 +28,7 @@ mute 状态的一致性模型：
 import logging
 from typing import Any, Callable, Dict, Optional
 
-from utils.ttl_cache import TTLCache
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +58,6 @@ class SessionFacade:
             """是否无法从消息上下文定位到任何 session（非回复、非 group 群聊等）"""
             return source == cls.UNRESOLVED
 
-    # ---- mute 内存缓存：session_id -> muted? ----
-    # 严格 TTL：读时过期视为 miss；超 size 上限按 FIFO 淘汰。
-    _muted_cache: TTLCache = TTLCache(
-        ttl=86400.0, max_size=4096,
-        strict_read=True, name='session-facade.muted',
-    )
 
     # ---- 注入的下游依赖（feishu.py 启动时 configure 一次）----
     _forward_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None
@@ -223,112 +214,131 @@ class SessionFacade:
         return {'source': cls.RouteSource.UNRESOLVED, **empty}
 
     # =========================================================================
-    # Mute 状态（缓存 + 写穿透 + 懒读回源）
+    # Mute 状态（透传 callback，网关不缓存）
     # =========================================================================
 
     @classmethod
-    def is_muted(cls, binding: Dict[str, Any], session_id: str) -> bool:
-        """查询 session 是否处于静音状态
-
-        命中缓存 → 直接返回；miss → 回源 callback 并回填。
-        callback 调用失败或响应字段缺失时降级返回 False（不写入缓存，下次仍会重试）。
-        """
-        if not session_id:
-            return False
-        cached = cls._muted_cache.get(session_id)
-        if cached is not None:
-            return cached
-
-        resp = cls._call_mute_api(binding, session_id, 'query')
-        if resp is None or 'muted' not in resp:
-            return False  # 故障降级：调用失败或响应不符契约
-        muted = bool(resp['muted'])
-        cls._muted_cache.put(session_id, muted)
-        return muted
-
-    @classmethod
     def mute(cls, binding: Dict[str, Any], session_id: str) -> Optional[bool]:
-        """将 session 标记为静音（写穿透 + 幂等短路）
+        """将 session 标记为静音
 
         Returns:
             True  = 本次调用将 session 从未静音切到静音
             False = 幂等：操作前已处于静音
-            None  = callback 调用失败（缓存不更新）
+            None  = callback 调用失败
         """
         if not session_id:
             return None
-        # 缓存已知静音 → 幂等短路，零 RPC
-        if cls._muted_cache.get(session_id) is True:
-            return False  # 幂等：无状态变化
-        resp = cls._call_mute_api(binding, session_id, 'mute')
+        resp = cls._call_session_mute_api(binding, 'mute', session_id)
         if resp is None or 'changed' not in resp:
-            return None  # 故障降级：调用失败或响应不符契约（不更新缓存）
-        cls._muted_cache.put(session_id, True)
+            return None
         return bool(resp['changed'])
 
     @classmethod
     def unmute(cls, binding: Dict[str, Any], session_id: str) -> Optional[bool]:
-        """清除 session 静音标志（写穿透 + 幂等短路）
+        """清除 session 静音标志
 
         Returns:
             True  = 本次调用将 session 从静音切到未静音
             False = 幂等：操作前就未静音
-            None  = callback 调用失败（缓存不更新）
-
-        注：auto_unmute 钩子在每条非命令消息触发，稳态（缓存已知未静音）下
-        短路返回 False，零 RPC。这是在缓存层承担入站路径的优化。
+            None  = callback 调用失败
         """
         if not session_id:
             return None
-        # 缓存已知未静音 → 幂等短路，零 RPC
-        if cls._muted_cache.get(session_id) is False:
-            return False  # 幂等：无状态变化
-        resp = cls._call_mute_api(binding, session_id, 'unmute')
+        resp = cls._call_session_mute_api(binding, 'unmute', session_id)
         if resp is None or 'changed' not in resp:
-            return None  # 故障降级：调用失败或响应不符契约（不更新缓存）
-        cls._muted_cache.put(session_id, False)
+            return None
         return bool(resp['changed'])
 
     @classmethod
-    def invalidate_mute_cache(cls, session_id: Optional[str] = None) -> None:
-        """清除 mute 状态缓存，下次查询会回源 callback
+    def mute_dir(cls, binding: Dict[str, Any], project_dir: str) -> Optional[bool]:
+        """将目录标记为静音
 
-        常规使用不需要调用：muted 字段只通过 SessionFacade.mute / unmute 写入，
-        gateway 缓存自然和 callback 一致。此方法用作保底工具——当知道 callback
-        端 mute 状态可能绕过 SessionFacade 被改变时（未来若出现此类场景）主动
-        失效缓存，避免旧值长期短路。
-
-        Args:
-            session_id: 指定 session 时只清该条；None 时清空整个缓存。
+        Returns:
+            True  = 本次新增静音
+            False = 幂等：已静音
+            None  = callback 调用失败
         """
-        if session_id is None:
-            size = len(cls._muted_cache)
-            if size:
-                logger.debug("[session-facade] invalidate entire mute cache (size=%d)", size)
-            cls._muted_cache.clear()
-        else:
-            cls._muted_cache.pop(session_id)
+        if not project_dir:
+            return None
+        resp = cls._call_dir_mute_api(binding, 'mute', project_dir)
+        if resp is None or 'changed' not in resp:
+            return None
+        return bool(resp['changed'])
+
+    @classmethod
+    def unmute_dir(cls, binding: Dict[str, Any], project_dir: str) -> Optional[bool]:
+        """取消目录静音
+
+        Returns:
+            True  = 本次取消静音
+            False = 幂等：未静音
+            None  = callback 调用失败
+        """
+        if not project_dir:
+            return None
+        resp = cls._call_dir_mute_api(binding, 'unmute', project_dir)
+        if resp is None or 'changed' not in resp:
+            return None
+        return bool(resp['changed'])
+
+    @classmethod
+    def list_muted(cls, binding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """列出所有已静音的 session 和目录
+
+        Returns:
+            {'sessions': [{session_id, project_dir, chat_id, muted_at}, ...],
+             'dirs': [{project_dir, muted_at}, ...]}
+            失败返回 None
+        """
+        resp_s = cls._call_session_mute_api(binding, 'list')
+        resp_d = cls._call_dir_mute_api(binding, 'list')
+        if resp_s is None and resp_d is None:
+            return None
+        return {
+            'sessions': resp_s.get('sessions', []) if resp_s else [],
+            'dirs': resp_d.get('dirs', []) if resp_d else [],
+        }
 
     # =========================================================================
-    # 内部：callback /cb/session/mute 调用
+    # 内部：callback mute API 调用
     # =========================================================================
 
     @classmethod
-    def _call_mute_api(cls, binding: Dict[str, Any], session_id: str,
-                       action: str) -> Optional[Dict[str, Any]]:
-        """调 /cb/session/mute；action ∈ {mute, unmute, query}。失败返回 None。"""
+    def _call_session_mute_api(cls, binding: Dict[str, Any], action: str,
+                               session_id: str = '') -> Optional[Dict[str, Any]]:
+        """调 /cb/session/mute；action ∈ {mute, unmute, query, list}。失败返回 None。"""
         if cls._forward_fn is None:
             logger.error("[session-facade] forward_fn not configured")
             return None
         try:
-            resp = cls._forward_fn(binding, '/cb/session/mute', {
-                'session_id': session_id,
-                'action': action,
-            })
+            payload = {'action': action}
+            if session_id:
+                payload['session_id'] = session_id
+            resp = cls._forward_fn(binding, '/cb/session/mute', payload)
             if resp and resp.get('ok'):
                 return resp
             logger.warning("[session-facade] /cb/session/mute (%s) failed: %s", action, resp)
             return None
         except Exception as e:
             logger.error("[session-facade] /cb/session/mute error: %s", e)
+            return None
+
+    @classmethod
+    def _call_dir_mute_api(cls, binding: Dict[str, Any], action: str,
+                           project_dir: str = '') -> Optional[Dict[str, Any]]:
+        """调 /cb/directory/mute；action ∈ {mute, unmute, query, list}。失败返回 None。"""
+        if cls._forward_fn is None:
+            logger.error("[session-facade] forward_fn not configured")
+            return None
+        try:
+            payload = {'action': action}
+            if project_dir:
+                payload['project_dir'] = project_dir
+            resp = cls._forward_fn(binding, '/cb/directory/mute', payload)
+            if resp and resp.get('ok'):
+                return resp
+            logger.warning("[session-facade] /cb/directory/mute (%s) failed: %s", action, resp)
+            return None
+        except Exception as e:
+            logger.error("[session-facade] /cb/directory/mute error: %s", e)
             return None

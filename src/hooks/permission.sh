@@ -350,9 +350,9 @@ send_permission_notification() {
     local card
     card=$(build_permission_card "$TOOL_NAME" "$PROJECT_NAME" "$TIMESTAMP" "$COMMAND_CONTENT" "$DESCRIPTION" "$TEMPLATE_COLOR" "$buttons" "$SESSION_ID" "$custom_footer_hint")
 
-    # 传递 session_id、project_dir、callback_url 支持回复继续会话
+    # 传递 session_id、project_dir、callback_url、chat_id 支持回复继续会话
     local options
-    options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL")
+    options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID")
     send_feishu_card "$card" "$options"
 }
 
@@ -370,6 +370,13 @@ run_interactive_mode() {
 
     # 准备通用变量
     prepare_common_vars
+
+    # 前置解析 chat_id 并检查 mute 状态，muted 时回退到终端审批
+    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, falling back to terminal: $SESSION_ID"
+        exit $EXIT_FALLBACK
+    fi
 
     # 延迟发送
     if ! delay_with_decision_check "$NOTIFY_DELAY"; then
@@ -398,7 +405,7 @@ run_interactive_mode() {
 
         # 发送卡片
         local ask_options
-        ask_options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL")
+        ask_options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID")
         send_feishu_card "$ask_card" "$ask_options"
 
         # 构建请求 JSON（携带 raw_input_encoded + questions_encoded）
@@ -516,6 +523,13 @@ run_fallback_mode() {
 
     # 准备通用变量
     prepare_common_vars
+
+    # 前置解析 chat_id 并检查 mute 状态，muted 时跳过通知
+    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping fallback notification: $SESSION_ID"
+        exit $EXIT_FALLBACK
+    fi
 
     # 延迟发送
     if ! delay_with_decision_check "$NOTIFY_DELAY"; then

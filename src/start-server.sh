@@ -3,7 +3,7 @@
 # src/start-server.sh - 启动/停止 Claude Code 权限回调服务
 #
 # 用法:
-#   ./src/start-server.sh [start|stop|restart|status]
+#   ./src/start-server.sh [start|stop|restart|status|state]
 #   不带参数默认为 start
 #
 # 功能:
@@ -21,7 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVER_DIR="${PROJECT_ROOT}/src/server"
 RUNTIME_DIR="${PROJECT_ROOT}/runtime"
-PID_FILE="${RUNTIME_DIR}/server.pid"
+STATE_FILE="${RUNTIME_DIR}/server.state"
+PID_FILE="${RUNTIME_DIR}/server.pid"  # 旧版兼容，仅读取迁移用
 LOG_DIR="${PROJECT_ROOT}/log"
 
 # 引入配置模块 (优先级: .env > 环境变量 > 默认值)
@@ -30,6 +31,91 @@ source "${SCRIPT_DIR}/lib/core.sh"
 # 确保目录存在
 mkdir -p "$LOG_DIR/callback"
 mkdir -p "$RUNTIME_DIR"
+
+# =============================================================================
+# 状态持久化（内部方法：读写删统一封装，外部不直接操作 STATE_FILE / PID_FILE）
+# =============================================================================
+
+# 读取状态数据
+# 用法: _state_read [field]  — 指定字段返回值，不指定返回原始 JSON
+# 无状态文件时返回 1
+_state_read() {
+    [ -f "$STATE_FILE" ] || return 1
+    if [ -z "${1:-}" ]; then
+        cat "$STATE_FILE"
+    else
+        "$PYTHON3" -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$STATE_FILE" "$1" 2>/dev/null
+    fi
+}
+
+# 写入状态（PID + 运行参数），同时清理旧版 PID 文件
+_state_write() {
+    local pid="$1" port="$2" socket_path="$3"
+    "$PYTHON3" -c "
+import json, sys
+with open(sys.argv[4], 'w') as f:
+    json.dump({'pid': int(sys.argv[1]), 'port': sys.argv[2], 'socket_path': sys.argv[3]}, f)
+" "$pid" "$port" "$socket_path" "$STATE_FILE"
+    rm -f "$PID_FILE"
+}
+
+# 清除状态文件
+_state_clear() {
+    rm -f "$STATE_FILE" "$PID_FILE"
+}
+
+# 获取进程 ID（优先从状态文件读取，降级读旧版 PID 文件）
+get_pid() {
+    _state_read pid || { [ -f "$PID_FILE" ] && cat "$PID_FILE"; }
+}
+
+# 检查服务是否运行
+is_running() {
+    local pid=$(get_pid)
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+
+    # 检查进程是否存在
+    if ps -p "$pid" > /dev/null 2>&1; then
+        return 0
+    else
+        # 状态文件存在但进程不存在，清理
+        _state_clear
+        return 1
+    fi
+}
+
+# 输出服务运行状态（JSON 格式，供其他脚本读取）
+show_state() {
+    if ! is_running; then
+        echo "{}"
+        return 1
+    fi
+    local raw
+    raw=$(_state_read)
+    if [ -n "$raw" ]; then
+        echo "$raw"
+    else
+        # 旧版兼容：只有 PID 文件，无 state 数据
+        local pid=$(get_pid)
+        echo "{\"pid\":$pid,\"port\":\"\",\"socket_path\":\"\"}"
+    fi
+}
+
+# state 子命令：提前退出，确保只输出 JSON，不受后续 echo 影响
+if [ "${1:-start}" = "state" ]; then
+    if [ -n "$PYTHON3" ]; then
+        show_state
+        exit $?
+    fi
+    echo "{}"
+    exit 1
+fi
+
+# =============================================================================
+# 以下为人类交互逻辑（state 已提前退出，不会执行到这里）
+# =============================================================================
 
 # 检查 Python 3（使用 core.sh 统一检测的 PYTHON3 变量）
 if [ -z "$PYTHON3" ]; then
@@ -66,32 +152,8 @@ validate_env_python_path() {
 }
 
 # =============================================================================
-# 辅助函数
+# 服务管理
 # =============================================================================
-
-# 获取进程 ID
-get_pid() {
-    if [ -f "$PID_FILE" ]; then
-        cat "$PID_FILE"
-    fi
-}
-
-# 检查服务是否运行
-is_running() {
-    local pid=$(get_pid)
-    if [ -z "$pid" ]; then
-        return 1
-    fi
-
-    # 检查进程是否存在
-    if ps -p "$pid" > /dev/null 2>&1; then
-        return 0
-    else
-        # PID 文件存在但进程不存在，清理 PID 文件
-        rm -f "$PID_FILE"
-        return 1
-    fi
-}
 
 # 启动服务
 start_service() {
@@ -119,8 +181,11 @@ start_service() {
     nohup "$PYTHON3" "${SERVER_DIR}/main.py" >/dev/null 2>"$error_file" &
     local pid=$!
 
-    # 保存 PID
-    echo $pid > "$PID_FILE"
+    # 写入状态（PID + 实际运行参数）
+    local _port _socket_path
+    _port=$(get_config "CALLBACK_SERVER_PORT" "8080")
+    _socket_path=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
+    _state_write "$pid" "$_port" "$_socket_path"
 
     # 等待启动完成（每秒检查一次）
     # 服务初始化约需 5 秒，成功后继续运行，失败则进程退出
@@ -144,7 +209,7 @@ start_service() {
             else
                 echo "Check logs: $log_file"
             fi
-            rm -f "$PID_FILE"
+            _state_clear
             return 1
         fi
 
@@ -155,7 +220,7 @@ start_service() {
                 echo "Failed to start service."
                 echo "Error:"
                 cat "$error_file"
-                rm -f "$PID_FILE"
+                _state_clear
                 return 1
             fi
             # 进程稳定运行且无致命错误
@@ -177,7 +242,7 @@ start_service() {
 stop_service() {
     if ! is_running; then
         echo "Service is not running."
-        rm -f "$PID_FILE"
+        _state_clear
         return 0
     fi
 
@@ -201,22 +266,22 @@ stop_service() {
         sleep 1
     fi
 
-    # 清理 PID 文件
-    rm -f "$PID_FILE"
-
-    # 清理 socket 文件
+    # 清理 socket 文件（优先从 state 读取实际运行时路径，降级读 .env）
     local socket_path
-    socket_path=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
+    socket_path=$(_state_read socket_path 2>/dev/null)
+    [ -z "$socket_path" ] && socket_path=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
     if [ -S "$socket_path" ]; then
         rm -f "$socket_path"
         echo "Cleaned up socket file: $socket_path"
     fi
 
+    # 先确认进程状态，再清理状态文件
     if is_running; then
         echo "Failed to stop service."
         return 1
     else
         echo "Service stopped."
+        _state_clear
         return 0
     fi
 }
@@ -235,18 +300,20 @@ show_status() {
         local pid=$(get_pid)
         echo "Service is running (PID: $pid)"
 
-        # 显示端口监听状态
+        # 显示端口监听状态（优先从 state 读取实际运行值）
         if command -v netstat &> /dev/null; then
             local port
-            port=$(get_config "CALLBACK_SERVER_PORT" "8080")
+            port=$(_state_read port 2>/dev/null)
+            [ -z "$port" ] && port=$(get_config "CALLBACK_SERVER_PORT" "8080")
             if netstat -tln 2>/dev/null | grep -q ":$port "; then
                 echo "HTTP server listening on port $port"
             fi
         fi
 
-        # 显示 socket 文件状态
+        # 显示 socket 文件状态（优先从 state 读取实际运行值）
         local socket_path
-        socket_path=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
+        socket_path=$(_state_read socket_path 2>/dev/null)
+        [ -z "$socket_path" ] && socket_path=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
         if [ -S "$socket_path" ]; then
             echo "Socket server listening on $socket_path"
         fi
@@ -275,8 +342,12 @@ case "${1:-start}" in
     status)
         show_status
         ;;
+    state)
+        # 正常由 L106 提前退出，此处为兜底
+        show_state
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status}"
+        echo "Usage: $0 {start|stop|restart|status|state}"
         exit 1
         ;;
 esac

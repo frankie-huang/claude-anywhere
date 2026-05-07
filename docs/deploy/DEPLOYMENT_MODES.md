@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/
 |------|:------------:|:------------:|
 | **飞书应用** | 无需注册 | 需要创建应用 |
 | **交互方式** | 按钮跳转浏览器 | 飞书内直接响应 |
-| **配置复杂度** | 简单（2分钟） | 较复杂（15分钟） |
+| **配置复杂度** | 简单（2分钟）⚠️ 不再维护 | 较复杂（15分钟） |
 | **多实例部署** | ❌ 不支持 | ✅ 支持 |
 | **回复继续会话** | ❌ 不支持 | ✅ 支持 |
 | **群聊绑定** | ❌ 不支持 | ✅ 支持 |
@@ -84,6 +84,8 @@ curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/
 ---
 
 ## Webhook 模式
+
+> ⚠️ Webhook 模式不再维护，推荐使用 [OpenAPI 模式](#openapi-模式)。
 
 ### 简介
 

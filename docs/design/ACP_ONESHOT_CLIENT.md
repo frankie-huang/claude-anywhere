@@ -402,7 +402,6 @@ def main():
 | 组件 | 改动 | 说明 |
 |------|------|------|
 | `src/hooks/permission.sh` | **无** | 不涉及 |
-| `src/hooks/webhook.sh` | **无** | 不涉及 |
 | `src/hook-router.sh` | **无** | 不涉及 |
 | `src/server/main.py` | **无或极小** | 如果已有 HTTP API 可调用则无需改动；若需新增权限请求端点，约 20 行 |
 | `src/server/services/` | **无** | 复用现有 request_manager、feishu_api |
@@ -459,5 +458,5 @@ def main():
 
 - **批量模式**：从文件读取多个 prompt，顺序执行
 - **CI 集成**：作为 CI step 运行，权限审批通过飞书完成
-- **webhook 通知**：任务完成后发送飞书通知（复用现有 webhook.sh）
+- **飞书通知**：任务完成后发送飞书通知（复用现有 stop.sh）
 - **日志持久化**：记录每次执行的 session_id、prompt、结果

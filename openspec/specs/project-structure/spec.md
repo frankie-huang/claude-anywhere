@@ -174,7 +174,8 @@ claude-anywhere/
 │   │
 │   ├── hooks/                    # Hook 处理逻辑
 │   │   ├── permission.sh         # 权限请求处理
-│   │   └── webhook.sh            # 通用通知处理
+│   │   ├── stop.sh               # 任务完成通知处理
+│   │   └── user_prompt.sh        # 用户 Prompt 同步
 │   │
 │   ├── lib/                      # Shell 函数库
 │   │   ├── core.sh               # 核心库（路径、环境、日志）

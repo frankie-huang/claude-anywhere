@@ -10,11 +10,13 @@
 - 速率限制（同一 client_id 每 10 分钟只能上报一次）
 - IP 限流（同一 IP 每 10 分钟最多 10 次请求）
 - 返回最新版本信息（用于版本更新通知）
+- 遥测中心迁移：通过 redirect_url 告知客户端新地址
 """
 
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from config import get_config
 from services.auth_token import check_global_auth_token
 from telemetry.store import TelemetryStore
 from telemetry.utils import get_version, is_version_newer, validate_uuid_v4
@@ -63,6 +65,7 @@ def handle_heartbeat(body: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int
     os_name = body.get('os', 'unknown')
     repo_url = body.get('repo_url', '')
     timestamp = body.get('timestamp')
+    reporting_url = body.get('reporting_url', '')
 
     # 验证必要字段
     if not client_id:
@@ -114,12 +117,19 @@ def handle_heartbeat(body: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int
         client_id[:20], version, os_name
     )
 
-    return 200, {
+    response = {
         'success': True,
         'latest_version': server_version,
         'update_available': update_available,
         'message': 'New version available, please run git pull to update' if update_available else ''
     }
+
+    # 遥测中心迁移：当配置了新地址且客户端还在用旧地址时，返回 redirect_url
+    redirect_url = get_config('TELEMETRY_REDIRECT_URL', '').strip()
+    if redirect_url and reporting_url != redirect_url:
+        response['redirect_url'] = redirect_url
+
+    return 200, response
 
 
 def handle_stats(_body: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:

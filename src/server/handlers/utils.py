@@ -45,14 +45,16 @@ def post_json(url, data, auth_token=None, timeout=10):
         return json.loads(response.read().decode('utf-8'))
 
 
-def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
-    """从 Callback 侧调用飞书网关，发送文本消息（兼容单机和分离部署）
+def reply_feishu_text(chat_id: str, message_id: str, text: str) -> Tuple[bool, str]:
+    """从 Callback 侧调用飞书网关，发送/回复文本消息（兼容单机和分离部署）
 
     优先使用 FeishuAPIService 直接发送（单机模式），
     不可用时通过网关 /gw/feishu/send 转发（分离部署模式）。
+    有 message_id 时回复该消息，无则降级为向 chat_id 发送。
 
     Args:
         chat_id: 飞书群聊 ID
+        message_id: 要回复的消息 ID（为空时降级为 send_text）
         text: 消息文本
 
     Returns:
@@ -66,14 +68,16 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
             from services.feishu_api import FeishuAPIService
             service = FeishuAPIService.get_instance()
             if service and service.enabled:
-                success, result = service.send_text(
-                    text,
-                    receive_id=chat_id,
-                    receive_id_type='chat_id'
-                )
-                return (success, result)
+                if message_id:
+                    return service.reply_text(text, message_id)
+                else:
+                    return service.send_text(
+                        text,
+                        receive_id=chat_id,
+                        receive_id_type='chat_id'
+                    )
         except Exception as e:
-            logger.warning("[send_feishu_text] FeishuAPIService unavailable: %s", e)
+            logger.warning("[reply_feishu_text] FeishuAPIService unavailable: %s", e)
 
     # 分离部署模式（或单机 fallback）：通过网关转发
     try:
@@ -95,6 +99,8 @@ def send_feishu_text(chat_id: str, text: str) -> Tuple[bool, str]:
             'owner_id': FEISHU_OWNER_ID,
             'chat_id': chat_id
         }
+        if message_id:
+            data['reply_to_message_id'] = message_id
         resp = post_json(api_url, data, auth_token=auth_token)
         if resp.get('success'):
             return (True, resp.get('data', {}).get('message_id', ''))

@@ -26,7 +26,16 @@ logger = logging.getLogger(__name__)
 
 
 class TTLCache:
-    """TTL + 固定上限 FIFO 淘汰的通用缓存"""
+    """TTL + 固定上限 FIFO 淘汰的通用缓存
+
+    历史引用：
+        原由 SessionFacade._muted_cache 使用，用于在网关侧缓存 session 的
+        mute（静音）状态，实现出站拦截的零 RPC 快路径。后该架构简化为 callback
+        端全权管理 mute 状态（拦截 + 自动解除），网关不再缓存，该引用已移除。
+
+    当前状态：
+        暂无引用。模块保留，后续若有"进程内 TTL 缓存 + 内存上限"的需求可直接复用。
+    """
 
     def __init__(self, ttl: float, max_size: int,
                  strict_read: bool = True, name: str = 'cache') -> None:

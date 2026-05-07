@@ -215,7 +215,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | Session-Chat Store | `src/server/services/session_chat_store.py` | 会话 ID 与群聊映射 |
 | Auth Token Store | `src/server/services/auth_token_store.py` | 网关注册令牌存储 |
 | Binding Store | `src/server/services/binding_store.py` | 网关注册绑定存储（owner_id → callback_url） |
-| Dir History Store | `src/server/services/dir_history_store.py` | 目录使用历史 |
+| Directory Store | `src/server/services/directory_store.py` | 目录使用历史 |
 | 飞书 API 服务 | `src/server/services/feishu_api.py` | 飞书 OpenAPI 封装 |
 | 飞书长连接 | `src/server/services/feishu_longpoll.py` | 飞书 WebSocket 长连接事件接收 |
 | 自动注册 | `src/server/services/auto_register.py` | Callback 向网关注册 |

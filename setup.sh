@@ -71,10 +71,13 @@ SHOW_HELP=false
 
 for arg; do
     case "$arg" in
+        init)
+            ACTION="init"
+            ;;
         update)
             ACTION="update"
             ;;
-        start|stop|restart|status)
+        start|stop|restart|status|state)
             ACTION="$arg"
             ;;
         --app-id=*)
@@ -127,6 +130,9 @@ if [ "$SHOW_HELP" = true ] || [ $# -eq 0 ]; then
     echo "  --gateway-url=URL           飞书网关地址（必填，如 ws://host:port）"
     echo "  --owner-id=ID               飞书用户 ID（必填）"
     echo ""
+    echo "初始化:"
+    echo "  init                        交互式初始化配置（引导生成 .env）"
+    echo ""
     echo "更新:"
     echo "  update                      拉取最新代码并重启服务（需在源码目录执行）"
     echo ""
@@ -135,6 +141,7 @@ if [ "$SHOW_HELP" = true ] || [ $# -eq 0 ]; then
     echo "  stop                        停止服务"
     echo "  restart                     重启服务"
     echo "  status                      查看服务运行状态"
+    echo "  state                       输出服务运行状态（JSON 格式，供脚本调用）"
     echo ""
     echo "通用可选参数:"
     echo "  --owner-id=ID               飞书用户 ID（分离模式必填，单机模式可稍后配置）"
@@ -211,6 +218,28 @@ ask_yes_no() {
         *) return 1 ;;
     esac
 }
+
+# =============================================================================
+# init 子命令：交互式初始化配置
+# =============================================================================
+
+if [ "$ACTION" = "init" ]; then
+    require_no_other_params "init"
+    require_source_dir "init"
+
+    SOURCE_DIR="$SETUP_DIR"
+
+    # 检测 Python（仍在 bash 中，因为 Python 脚本依赖 Python 执行）
+    source "${SOURCE_DIR}/src/lib/core.sh"
+    if [ -z "$PYTHON3" ]; then
+        print_error "未找到 Python 3，请先安装 Python 3.6+"
+        exit 1
+    fi
+
+    # 全流程由 Python 脚本完成（配置 .env → 依赖检测 → Hook → 服务启动）
+    "$PYTHON3" "${SOURCE_DIR}/src/setup_init.py" "$SOURCE_DIR"
+    exit $?
+fi
 
 # =============================================================================
 # update 子命令：校验并执行（必须在源码目录执行，提前退出避免执行后续逻辑）
@@ -299,11 +328,11 @@ if [ "$ACTION" = "update" ]; then
 fi
 
 # =============================================================================
-# 服务管理子命令：start/stop/restart/status（必须在源码目录执行）
+# 服务管理子命令：start/stop/restart/status/state（必须在源码目录执行）
 # =============================================================================
 
 case "$ACTION" in
-    start|stop|restart|status)
+    start|stop|restart|status|state)
         require_no_other_params "$ACTION"
         require_source_dir "$ACTION"
 
@@ -541,7 +570,7 @@ print_success "Python 3: $("$PYTHON3" --version 2>&1) ($PYTHON3)"
 
 # 检测 lark-oapi 是否已安装
 HAS_LARK_OAPI=false
-if "$PYTHON3" -c "import lark_oapi" 2>/dev/null; then
+if "$PYTHON3" -c "import importlib.util; exit(0 if importlib.util.find_spec('lark_oapi') else 1)" 2>/dev/null; then
     HAS_LARK_OAPI=true
     print_success "lark-oapi 已安装（支持长连接模式，Python: $PYTHON3）"
 fi

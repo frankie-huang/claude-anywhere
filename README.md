@@ -24,12 +24,11 @@
 1. **统一 Hook 路由** (`src/hook-router.sh`) - Claude Code Hook 统一入口，事件分发
 2. **用户 Prompt 同步脚本** (`src/hooks/user_prompt.sh`) - UserPromptSubmit 事件处理
 3. **权限处理脚本** (`src/hooks/permission.sh`) - PermissionRequest 事件处理
-4. **通用通知脚本** (`src/hooks/webhook.sh`) - Notification 事件处理
-5. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
-6. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
-7. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
-8. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
-9. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
+4. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
+5. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
+6. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
+7. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
+8. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
 
 ## 项目结构
 
@@ -44,7 +43,6 @@ claude-anywhere/
 │   ├── hooks/                  # Hook 事件处理脚本
 │   │   ├── user_prompt.sh      # 用户 Prompt 同步（UserPromptSubmit 事件）
 │   │   ├── permission.sh       # 权限请求处理（可交互）
-│   │   ├── webhook.sh          # 通用通知处理（Notification 事件）
 │   │   └── stop.sh             # 任务完成通知处理（Stop 事件）
 │   ├── lib/                    # Shell 函数库
 │   │   ├── core.sh             # 核心库（路径、环境、日志）
@@ -66,7 +64,7 @@ claude-anywhere/
 │   │   │   ├── message_session_store.py # Message-Session 映射存储
 │   │   │   ├── session_chat_store.py   # Session-Chat 映射存储
 │   │   │   ├── binding_store.py     # 群聊绑定存储
-│   │   │   ├── dir_history_store.py # 目录历史记录存储
+│   │   │   ├── directory_store.py   # 目录使用记录存储
 │   │   │   ├── auto_register.py     # 网关注册服务
 │   │   │   ├── auth_token.py        # 认证令牌管理
 │   │   │   ├── auth_token_store.py  # 认证令牌存储
@@ -371,7 +369,6 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `src/hook-router.sh` | Hook 统一入口（配置到 Claude Code） | 所有 Hook 事件 |
 | `src/hooks/user_prompt.sh` | 用户 Prompt 同步到飞书 | UserPromptSubmit |
 | `src/hooks/permission.sh` | 权限请求处理（可交互） | PermissionRequest |
-| `src/hooks/webhook.sh` | 通用通知（任务暂停等） | Notification |
 | `src/hooks/stop.sh` | 任务完成通知（含响应摘要） | Stop |
 | `src/server/main.py` | 权限回调服务（HTTP + Socket） | - |
 | `src/server/socket_client.py` | Socket 客户端（替代 socat） | - |
@@ -409,7 +406,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `message_session_store.py` | Message-Session 映射存储（message_id → session） |
 | `session_chat_store.py` | Session-Chat 映射存储（session_id → chat_id） |
 | `binding_store.py` | 网关注册绑定存储（owner_id → callback_url + auth_token） |
-| `dir_history_store.py` | 目录历史记录存储（常用工作目录推荐） |
+| `directory_store.py` | 目录使用记录存储（常用工作目录推荐） |
 | `auto_register.py` | 网关注册服务（Callback 自动向网关注册） |
 | `auth_token.py` | 认证令牌管理（生成、验证、刷新） |
 | `auth_token_store.py` | 认证令牌存储（网关注册返回的 token） |
@@ -539,13 +536,13 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `FEISHU_SEND_MODE` | 发送模式：`webhook` / `openapi` | `webhook` |
+| `FEISHU_SEND_MODE` | 发送模式：`webhook` / `openapi` | `openapi` |
 
 **模式对比**：
 
 | 特性 | Webhook 模式 | OpenAPI 模式 |
 |------|-------------|-------------|
-| 配置复杂度 | 简单 | 需要飞书应用 |
+| 配置复杂度 | 简单（⚠️ 不再维护） | 需要飞书应用 |
 | 按钮交互 | 跳转浏览器 | 飞书内 toast 响应 |
 | 多实例支持 | 不支持 | 支持（分离部署） |
 | 回复继续会话 | 不支持 | 支持 |
@@ -658,7 +655,6 @@ FEISHU_OWNER_ID=ou_admin_user
 |------|------|--------|
 | `CALLBACK_SERVER_URL` | 回调服务外部访问地址（所有模式建议配置） | `http://localhost:8080` |
 | `CALLBACK_SERVER_PORT` | HTTP 服务端口 | 8080 |
-| `PERMISSION_SOCKET_PATH` | Unix Socket 路径 | `/tmp/claude-permission.sock` |
 
 #### 四、通知与交互行为
 
@@ -666,9 +662,10 @@ FEISHU_OWNER_ID=ou_admin_user
 |------|------|--------|
 | `FEISHU_AT_USER` | 通知 @ 用户配置：空=@ `FEISHU_OWNER_ID`，`all`=@ 所有人，`off`=禁用 | 空 |
 | `FEISHU_REPLY_IN_THREAD` | 话题内回复模式：回复消息是否收进话题详情（仅 OpenAPI 模式） | `false` |
+| `PERMISSION_SOCKET_PATH` | Unix Socket 路径（PermissionRequest hook 与回调服务通信） | `/tmp/claude-permission.sock` |
 | `PERMISSION_REQUEST_TIMEOUT` | 权限请求服务端超时秒数（需为正整数，无效值回退默认值） | 600 |
 | `PERMISSION_NOTIFY_DELAY` | 权限通知延迟发送秒数 | 60 |
-| `CALLBACK_PAGE_CLOSE_DELAY` | 回调页面自动关闭秒数（建议范围 1-10） | 3 |
+| `CALLBACK_PAGE_CLOSE_DELAY` | 回调页面自动关闭秒数（仅 Webhook 模式，建议范围 1-10） | 3 |
 | `STOP_THINKING_MAX_LENGTH` | Stop 事件思考过程最大长度（字符数，0 禁用） | 10000 |
 | `STOP_MESSAGE_MAX_LENGTH` | Stop 事件消息最大长度（字符数） | 10000 |
 

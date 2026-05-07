@@ -4,6 +4,165 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-05-08
+
+#### 遥测中心迁移支持
+
+- **服务端**：心跳响应新增可选 `redirect_url` 字段，当配置 `TELEMETRY_REDIRECT_URL` 且客户端 `reporting_url` 与之不同时返回
+- **客户端**：心跳上报新增 `reporting_url` 字段，告知服务端当前使用的遥测地址；收到 `redirect_url` 后持久化到 `runtime/telemetry_url`，后续请求自动切换到新地址
+- **URL 优先级**：持久化迁移地址 > 硬编码默认地址；用户可删除 `runtime/telemetry_url` 恢复默认
+
+### Changed - 2026-05-07
+
+#### claude.py 后台进程监控改进 + 可读性重构
+
+- **后台进程失败通知**：detached 进程（运行超过 30s）失败退出时，通过后台线程排空 pipe 并保留尾部输出，发送飞书错误通知（原来直接关闭 pipe 丢失所有输出）
+- **截断逻辑统一**：错误消息截断从各调用方下沉到 `_send_error_notification` 内部，避免遗漏
+- **`reply_feishu_text` 参数顺序**：`(chat_id, text, message_id)` → `(chat_id, message_id, text)`，语义更一致
+- **函数重命名**：`_execute_and_check` → `_launch_claude`、`_wait_for_completion` → `_monitor_startup`、`_wait_and_notify_on_failure` → `_monitor_detached`
+- **函数分组重排**：按 公开接口 → 进程执行与监控 → 命令构建 → 飞书通知 四组排列，公开接口置顶
+
+#### Markdown 预处理下沉到 feishu.sh 统一覆盖所有卡片发送
+
+- **原问题**：Markdown 预处理（图片转文本、HTML 剥离、脚注展平、标题降级）仅在 `stop.sh` 中实现，只覆盖 Stop 事件；Permission、AskQuestion 等卡片未经预处理
+- **改动**：将预处理逻辑从 `stop.sh` 迁移到 `feishu.sh` 的 `preprocess_card_markdown()`，在 `send_feishu_card()` 发送前自动递归处理卡片中所有 `{tag:"markdown"}` 元素
+- **修复**：迁移时同步修复了 jq 分支 `capture()` 不匹配时产生 `empty` 导致非标题行丢失的问题，改为 `test()` 前置守卫
+- **影响**：所有通过 `send_feishu_card()` 发送的卡片自动覆盖，无需各 hook 单独调用
+
+#### setup.sh init 交互式初始化 + server.state 状态持久化
+
+- **`setup.sh init` 交互式初始化**：新增 `init` 子命令，通过 `src/setup_init.py` 引导完成全流程配置（.env → 依赖检测 → lark-oapi 安装 → Hook 配置 → 服务启动）
+- **OOP 架构**：`setup_init.py` 包含 7 个类（EditableBuffer、TerminalUI、EnvManager、DependencyChecker、HookConfigurator、ServiceManager、SetupInit），`setup.sh init` 分支简化为检测 Python + 调用 Python 脚本
+- **终端交互组件**：箭头键选择器、内联编辑输入、动态列表编辑器、预览+按需编辑的 `review_settings` 组件，支持 CJK 字符宽度计算和超宽行自动换行的正确回退
+- **server.state 状态持久化**：`start-server.sh` 从 PID 文件迁移到 JSON 格式的 `runtime/server.state`（含 pid/port/socket_path），新增 `state` 子命令输出运行状态供脚本调用
+- **端口/Socket 冲突检测**：init 流程中检测端口占用和 socket 文件冲突，精确区分本服务占用与第三方占用
+- **Hook 配置自动化**：`HookConfigurator` 自动写入/合并 settings.json 中的 Hook 配置，支持冲突检测和超时时间动态计算
+
+### Changed - 2026-05-04
+
+#### Hook 事件开关 + 删除 Notification 事件 + .env.example 重整
+
+- **Hook 事件开关**：新增 `HOOK_USER_PROMPT_ENABLED`、`HOOK_PERMISSION_ENABLED`、`HOOK_STOP_ENABLED` 配置项，支持在 `.env` 中关闭对应 Hook 事件
+- **删除 Notification 事件**：移除 `src/hooks/webhook.sh` 及 `hook-router.sh` 中的 Notification 路由，该事件已不再使用
+- **`.env.example` 重整**：配置项重新归类为 9 个分区，顺序调整为按重要性排列，速查表与配置区域顺序对齐
+- **`FEISHU_SEND_MODE` 默认值改为 `openapi`**：Webhook 模式标注为不再维护，推荐使用 OpenAPI 模式
+
+#### 群聊命名规则重构：名称含序号，allocate/bind 两步创建
+
+群名格式从 `{前缀} - {目录名} - {MMdd HH:mm:ss}` 改为 `{前缀} - #{序号} - {目录名} - {YYYYMMDD}`：
+
+- **群名含序号**：先分配 seq 再建群，群名中包含 `#seq`，便于识别
+- **GroupChatStore.allocate/bind 拆分**：`allocate(owner_id)` 分配 seq 并持久化占位，`bind(owner_id, seq, chat_id)` 绑定实际群聊
+- **allocate 失败提前返回**：存储不可用时不再继续建群，避免产生孤儿群
+- **bind 失败记 warning**：群已创建但未追踪时记录日志便于排查
+- **启动时清理占位记录**：`_rebuild_index` 清理未绑定的空 chat_id 记录，清理前计入 `_max_seq` 防止 seq 回退
+- **读接口过滤占位记录**：`get_chats_by_owner`、`get_chat_by_seq` 跳过空 chat_id 记录
+
+#### groups 卡片重构：按目录分组 + 进入群聊链接
+
+`/groups` 列表从纯文本改为飞书卡片，按目录分组展示，新增群聊跳转链接：
+
+- **卡片化展示**：从 `_send_notice_message` 改为飞书卡片，失败时降级为文本
+- **按目录分组**：群聊按 `project_dir` 分组，最近活跃的目录排前面，目录行带 📁 图标
+- **进入群聊链接**：每个群聊条目附带 applink 跳转链接，点击可在飞书客户端打开群聊
+- **展示 session_id**：每个群聊条目显示关联的 session ID
+- **解散命令支持批量**：文案更新为 `/groups dissolve <序号1> <序号2> ...`
+
+#### mute list 卡片重构：按目录分组 + column_set 背景色分块
+
+飞书卡片元素上限约 50 个，column_set 按钮布局在记录较多时触发 230099 错误，重构为 markdown + column_set 背景色方案：
+
+- **按目录分组展示**：静音会话按 `project_dir` 分组，最近静音的目录排前面，目录行带 📁 图标
+- **column_set 灰色背景分块**：「已静音的目录」和「已静音的会话」各用 column_set grey 背景包裹，视觉层级清晰
+- **`/mute <session_id>` / `/unmute <session_id>`**：直接按 session ID 静音/解除静音，替代卡片内按钮交互
+- **移除 `handle_mute_list_unmute`**：卡片交互按钮删除，unmute 统一走命令方式
+- **失败提示优化**：session-id 静音/解除失败时提示确认 ID 是否完整且正确
+
+### Added - 2026-05-04
+
+#### `/help` 指令帮助卡片与指令体系重构
+
+- **`/help` 指令**：发送帮助卡片展示所有可用指令及示例
+- **帮助卡片**：column_set 三列布局（指令+示例+说明），首行显示指令名后续留空，管理员指令单独分区
+- **指令元数据重构**：`_COMMANDS` 从 `(handler, admin_only, help_text)` 改为 `(handler, admin_only, brief, examples)`，每个指令拆为简述 + 示例列表
+- **统一触发**：未知指令、未配置默认目录时均发送帮助卡片（替代原纯文本）
+- **文案补充**：未配置默认目录的提示新增 `DEFAULT_CHAT_DIR` 配置说明
+
+### Added - 2026-05-03
+
+#### `/mute list` 静音列表卡片
+
+通过飞书卡片展示所有已静音的会话和目录，支持卡片内点击解除静音：
+
+- **`/mute list` 命令**：飞书卡片分「已静音的目录」和「已静音的会话」两个区块，按 `muted_at` 降序排列
+- **卡片交互**：每条记录带「解除」按钮，点击回调执行 unmute，返回 toast 反馈
+- **SessionChatStore**：新增 `list_muted_sessions()` 方法；`muted` 字段改为 `muted_at` 时间戳，与目录 mute 对齐
+- **SessionFacade**：新增 `list_muted` 透传方法；`_call_session_mute_api` / `_call_dir_mute_api` 参数改为 `action` 在前
+
+#### 目录级静音（mute directory）与 SessionChatStore 重构
+
+支持 mute 整个工作目录，终端发起的新会话自动继承目录 mute 状态；同时重构 SessionChatStore 读取方法，提供更清晰的业务抽象：
+
+- **目录级 mute**：`/mute /path/to/dir` 静音指定目录，`/unmute /path/to/dir` 取消；终端新会话首次调用 `get-chat-id` 时自动检查并继承目录 mute 状态
+- **DirectoryStore 增强**：新增 `mute_dir`/`unmute_dir`/`is_dir_muted`/`list_muted_dirs` 方法；符号链接自动解析为真实路径存储；mute 前校验目录存在性
+- **定期清理**：新增 `cleanup_expired` 公共方法，清理过期使用历史和已不存在的目录条目，由 `_cleanup_expired_data` 每小时定期执行
+- **SessionChatStore 重构**：`get_chat_id` 改为 `get_active_chat_id`（过滤 dissolved + expired），`is_session_muted` 仅过滤 expired（mute 是 session 维度，与群解散无关）
+- **handle_get_chat_id 增强**：store 未初始化提前返回 500；目录 mute 继承仅对真正不存在的新 session 生效（dissolved session 不触发）；save/mute 失败均打日志并返回 `muted: false`
+- **SessionFacade 透传**：新增 `mute_dir`/`unmute_dir` 方法，通过 `/cb/directory/mute` 路由转发
+
+### Changed - 2026-05-03
+
+#### Session mute 字段改为时间戳 & 清理逻辑优化
+
+- **muted → muted_at**：session 静音字段从布尔值改为时间戳，与 DirectoryStore 的 muted_at 模式对齐
+- **get_session 去主动清理**：过期 session 不再在读取时删除，仅返回 None，清理由 cleanup_expired 统一处理
+- **cleanup_expired 保留静音记录**：有 muted_at 标记的 session 即使过期也不删除，避免绕过用户静音意图
+
+#### 目录相关路由与 Store 重命名
+
+将目录相关接口从 `/cb/claude/*` 独立为 `/cb/directory/*` 命名空间，Store 类同步重命名以保持语义一致：
+
+- **路由重命名**：`/cb/claude/record-dir-usage` → `/cb/directory/record-usage`，`/cb/claude/recent-dirs` → `/cb/directory/recent-dirs`，`/cb/claude/browse-dirs` → `/cb/directory/browse-dirs`
+- **Store 重命名**：`DirHistoryStore` → `DirectoryStore`，文件 `dir_history_store.py` → `directory_store.py`
+- **数据文件迁移**：`dir_history.json` → `directories.json`，首次启动时自动迁移旧文件
+
+### Changed - 2026-05-02
+
+#### mute 架构重构：职责统一归 callback 端
+
+mute 状态的检查、拦截、自动解除统一由 callback 端管理，网关侧简化为纯指令透传：
+
+- **自动解除静音**：从网关 `_auto_unmute_if_needed` 移至 callback 端 `handle_continue_session` / `handle_new_session`，解除后回复用户消息通知
+- **网关简化**：移除 `SessionFacade._muted_cache`、`is_muted()`、`invalidate_mute_cache()`；移除 `handle_send_message` 中的 mute 拦截
+- **回复式通知**：`send_feishu_text` 改为 `reply_feishu_text`，支持回复指定消息（错误通知和解除静音通知均回复到用户消息上）
+- **字段统一**：网关→callback 的 `reply_message_id` 统一为 `message_id`
+- **文案优化**：`/mute` 提示更新为"发送消息继续会话时会自动解除静音，也可通过 /unmute 手动解除"
+
+### Added - 2026-05-02
+
+#### muted session Hook 层前置拦截与 chat_id 透传
+
+muted session 的出站拦截提前到 Hook 脚本层，避免不必要的卡片构建和重复 HTTP 请求：
+
+- **callback API 增强**：`/cb/session/get-chat-id` 响应新增 `muted` 字段，`_get_chat_id` 通过 `MUTED_SENTINEL` 哨兵值向上游传播
+- **hook 前置检查**：stop/permission/user_prompt hook 前置调用 `_resolve_chat_id`，muted 时直接短路，跳过 Markdown 处理、卡片构建等后续工作
+- **chat_id 透传**：hook 预解析的 `RESOLVED_CHAT_ID` 通过 options 透传到发送函数，整个链路 `_get_chat_id` 只调一次
+
+### Added - 2026-05-01
+
+#### Markdown 预处理：飞书卡片兼容转换
+
+Claude 响应发送到飞书前自动做 Markdown 兼容转换（单次子进程，跳过代码块）：
+
+- **图片链接转文本**：`![alt](url)` → `[图片: alt](url)`，避免飞书卡片渲染报错
+- **HTML 标签剥离**：`<summary>` 转加粗，其余标签删除保留内容（`<br>`/`<hr>` 保留）
+- **脚注定义展平**：`[^id]: content` → `**注 id**: content`，飞书会吞掉原始脚注定义行
+- **标题降级**（可选）：`#` 标题 → 加粗/emoji 格式，由 `FEISHU_HEADING_STYLE` 控制
+  - `bar`（默认）：H1 **【标题】**，H2~H6 竖线粗细递减
+  - `circle`：H1 **【标题】**，H2~H6 蓝色圆形递减
+  - `diamond`：H1 **【标题】**，H2~H6 蓝色菱形递减
+  - `original`：不做标题降级，其余三项预处理仍生效
+
 ### Added - 2026-04-30
 
 #### 新增 CLAUDE_ARGS_TEMPLATE 配置：CLI 包装器参数模板

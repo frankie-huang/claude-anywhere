@@ -46,6 +46,9 @@ if ! type json_init &> /dev/null; then
     source "${BASH_SOURCE[0]%/*}/json.sh"
 fi
 
+# muted session 哨兵值：_get_chat_id / _resolve_chat_id 返回此值表示 session 已静音，调用方应跳过发送
+readonly MUTED_SENTINEL="__MUTED__"
+
 # 初始化 JSON 解析器
 json_init >/dev/null 2>&1 || true
 
@@ -846,6 +849,7 @@ _get_bot_open_id() {
 # ----------------------------------------------------------------------------
 _get_chat_id() {
     local session_id="$1"
+    local project_dir="${2:-}"
 
     if [ -z "$session_id" ]; then
         echo ""
@@ -853,12 +857,22 @@ _get_chat_id() {
     fi
 
     # 调用 Callback 后端的 /cb/session/get-chat-id 接口查询
+    # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
+    local request_body
+    if [ -n "$project_dir" ]; then
+        local escaped_dir
+        escaped_dir=$(json_escape "$project_dir")
+        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\"}"
+    else
+        request_body="{\"session_id\":\"$session_id\"}"
+    fi
+
     local response
     response=$(_do_curl_post "${callback_url}/cb/session/get-chat-id" \
-        "{\"session_id\":\"$session_id\"}" \
+        "$request_body" \
         "cb/session/get-chat-id" \
         "$(_get_auth_token)")
 
@@ -867,6 +881,14 @@ _get_chat_id() {
     response=$(echo "$response" | sed '1d')
 
     if [ "$http_code" != "200" ]; then
+        return 0
+    fi
+
+    # 检查 muted 状态：muted 的 session 直接返回哨兵值，跳过后续发送
+    local muted
+    muted=$(json_get "$response" "muted")
+    if [ "$muted" = "true" ]; then
+        echo "$MUTED_SENTINEL"
         return 0
     fi
 
@@ -959,7 +981,12 @@ _resolve_chat_id() {
 
     # 优先通过 session_id 查询已有的 chat_id
     if [ -n "$session_id" ]; then
-        chat_id=$(_get_chat_id "$session_id")
+        chat_id=$(_get_chat_id "$session_id" "$project_dir")
+        if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+            log "Session muted, skipping send: $session_id"
+            echo "$MUTED_SENTINEL"
+            return 0
+        fi
         if [ -n "$chat_id" ]; then
             log "Found chat_id for session: $chat_id"
             echo "$chat_id"
@@ -1344,7 +1371,7 @@ _send_via_http_endpoint() {
 # ----------------------------------------------------------------------------
 # _record_dir_usage - 记录目录使用（内部函数）
 # ----------------------------------------------------------------------------
-# 功能: 调用 Callback 后端的 /cb/claude/record-dir-usage 接口记录目录使用次数
+# 功能: 调用 Callback 后端的 /cb/directory/record-usage 接口记录目录使用次数
 #       后台静默执行，失败不阻塞主流程
 #
 # 参数:
@@ -1360,12 +1387,197 @@ _record_dir_usage() {
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
-    _do_curl_post "${callback_url}/cb/claude/record-dir-usage" \
+    _do_curl_post "${callback_url}/cb/directory/record-usage" \
         "$(json_build_object "project_dir" "$project_dir")" \
-        "cb/record-dir-usage" \
+        "cb/directory/record-usage" \
         "$(_get_auth_token)" >/dev/null 2>&1 || true
 }
 
+# ----------------------------------------------------------------------------
+# preprocess_card_markdown - 卡片 Markdown 预处理
+# ----------------------------------------------------------------------------
+# 递归遍历飞书卡片 JSON，找到所有 {tag:"markdown", content:"..."} 元素，
+# 对 content 执行飞书兼容转换（单次子进程，跳过代码块内容）。
+#
+# 处理项（均跳过代码块）：
+#   1. 图片链接转文本   — ![alt](url) → [图片: alt](url)，飞书不支持会报错
+#   2. HTML 标签剥离   — 删除标签，保留标签间的文本内容
+#   3. 脚注定义展平    — 脚注定义行转为可见文本
+#   4. 标题降级（可选） — # 标题 → 加粗/emoji 格式，由 heading_style 控制
+#
+# HTML 标签剥离场景：
+#   ┌─────────────────────────┬──────────────────┬──────────────────┐
+#   │ HTML 标签               │ 转换结果         │ 说明             │
+#   ├─────────────────────────┼──────────────────┼──────────────────┤
+#   │ <summary>text</summary> │ **text**         │ 保留文本，转加粗 │
+#   │ <details>…</details>    │ (删除标签)       │ 保留内部内容     │
+#   │ <div>…</div>            │ (删除标签)       │ 保留内部内容     │
+#   │ <span>…</span>          │ (删除标签)       │ 保留内部内容     │
+#   │ <p>…</p>                │ (删除标签)       │ 保留内部内容     │
+#   │ <br>                    │ (不处理)         │ 飞书卡片支持渲染 │
+#   │ <hr>                    │ (不处理)         │ 飞书卡片支持渲染 │
+#   └─────────────────────────┴──────────────────┴──────────────────┘
+#
+# 脚注定义替换：
+#   [^id]: content → **注 id**: content（直接替换，飞书会吞掉原始脚注定义行）
+#   [^id] 引用处不处理（保留原样，由飞书自行渲染）
+#
+# 标题降级预设（H1 统一使用 **【标题】** 格式）：
+#   bar      — H2~H6: ▍ ▎ ▏ ▏▏ ▏▏▏（默认）
+#   circle   — H2~H6: 🔵 🔘 ● ○ ◦
+#   diamond  — H2~H6: 🔷 🔹 ◆ ◇ ◦
+#   original — 不做标题降级
+#
+# 参数:
+#   $1 - card_json      飞书卡片 JSON 字符串
+#   $2 - heading_style  标题降级样式（bar/circle/diamond/original，默认 bar）
+# 输出：处理后的 card_json
+# ----------------------------------------------------------------------------
+preprocess_card_markdown() {
+    local card_json="$1"
+    local heading_style="${2:-bar}"
+
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        echo "$card_json" | jq --arg heading_style "$heading_style" '
+            # 标题降级样式表
+            def heading_styles:
+                if $heading_style == "circle" then
+                    [["**【","】**"],["🔵 **","**"],["🔘 **","**"],["● **","**"],["○ **","**"],["◦ **","**"]]
+                elif $heading_style == "diamond" then
+                    [["**【","】**"],["🔷 **","**"],["🔹 **","**"],["◆ **","**"],["◇ **","**"],["◦ **","**"]]
+                elif $heading_style == "bar" then
+                    [["**【","】**"],["**▍","**"],["**▎","**"],["**▏","**"],["**▏▏","**"],["**▏▏▏","**"]]
+                else null end;
+
+            # 行级转换（图片 → HTML → 脚注 → 标题）
+            def transform_line($styles):
+                # 图片链接转文本
+                gsub("!\\[(?<alt>[^\\]]*)\\]\\((?<url>[^)]+)\\)";
+                    if .alt != "" then "[图片: " + .alt + "](" + .url + ")"
+                    else "[图片](" + .url + ")" end)
+                # HTML: summary 转加粗，其余标签删除
+                | gsub("<summary>(?<s>[^<]*)</summary>"; "**\(.s)**")
+                | gsub("</?(?:details|div|span|p)[^>]*>"; "")
+                # 脚注定义替换 与 标题降级 互斥（test 前置守卫确保 capture 必定匹配）
+                | if test("^\\s*\\[\\^(?:[^\\]]+)\\]:\\s.+$") then
+                    capture("^(?<indent>\\s*)\\[\\^(?<id>[^\\]]+)\\]:\\s(?<content>.+)$") as $m |
+                    "\($m.indent)**注 \($m.id)**: \($m.content)"
+                  elif $styles != null and test("^#{1,6}\\s+.+$") then
+                    capture("^(?<hashes>#{1,6})\\s+(?<title>.+)$") as $m |
+                    (($m.hashes | length) - 1) as $idx |
+                    $styles[$idx] as $pair |
+                    $pair[0] + $m.title + $pair[1]
+                  else . end;
+
+            # 对单个 markdown 文本做行级预处理（跳过代码块）
+            def preprocess:
+                heading_styles as $styles |
+                split("\n") | reduce .[] as $line (
+                    {in_code: false, lines: []};
+                    if ($line | gsub("^[ \\t]+"; "") | startswith("```")) then
+                        .in_code = (.in_code | not) | .lines += [$line]
+                    elif .in_code then
+                        .lines += [$line]
+                    else
+                        .lines += [$line | transform_line($styles)]
+                    end
+                ) | .lines | join("\n");
+
+            # 递归遍历卡片 JSON，处理所有 {tag:"markdown"} 元素的 content
+            def walk_md:
+                if type == "array" then map(walk_md)
+                elif type == "object" then
+                    if .tag == "markdown" and .content then
+                        .content |= preprocess
+                    else to_entries | map(.value |= walk_md) | from_entries end
+                else . end;
+
+            walk_md
+        ' 2>/dev/null
+    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        echo "$card_json" | "$PYTHON3" -c "
+import sys, json, re
+
+data = json.load(sys.stdin)
+heading_style = sys.argv[1] if len(sys.argv) > 1 else 'bar'
+fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
+
+# ── 正则（预编译） ──────────────────────────────────────────
+img_re = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')               # 图片链接
+summary_re = re.compile(r'<summary>([^<]*)</summary>')         # HTML summary
+html_re = re.compile(r'</?(?:details|div|span|p)[^>]*>')       # HTML 标签
+footnote_def_re = re.compile(r'^(\s*)\[\^([^\]]+)\]:\s(.+)$')  # 脚注定义
+heading_re = re.compile(r'^(#{1,6})\s+(.+)$')                  # Markdown 标题
+
+# ── 标题降级样式表 ──────────────────────────────────────────
+HEADING_STYLES = {
+    'circle': [
+        ('**\u3010', '\u3011**'),
+        ('\U0001f535 **', '**'), ('\U0001f518 **', '**'),
+        ('\u25cf **', '**'), ('\u25cb **', '**'), ('\u25e6 **', '**'),
+    ],
+    'diamond': [
+        ('**\u3010', '\u3011**'),
+        ('\U0001f537 **', '**'), ('\U0001f539 **', '**'),
+        ('\u25c6 **', '**'), ('\u25c7 **', '**'), ('\u25e6 **', '**'),
+    ],
+    'bar': [
+        ('**\u3010', '\u3011**'),
+        ('**\u258d', '**'), ('**\u258e', '**'), ('**\u258f', '**'),
+        ('**\u258f\u258f', '**'), ('**\u258f\u258f\u258f', '**'),
+    ],
+}
+h_formats = HEADING_STYLES.get(heading_style)
+
+# ── 行级转换 ────────────────────────────────────────────────
+def transform_line(line):
+    line = img_re.sub(
+        lambda m: '[\u56fe\u7247: %s](%s)' % (m.group(1), m.group(2))
+                  if m.group(1) else '[\u56fe\u7247](%s)' % m.group(2), line)
+    line = summary_re.sub(r'**\1**', line)
+    line = html_re.sub('', line)
+    m = footnote_def_re.match(line)
+    if m:
+        return '%s**\u6ce8 %s**: %s' % (m.group(1), m.group(2), m.group(3))
+    if h_formats:
+        m = heading_re.match(line)
+        if m:
+            pre, suf = h_formats[len(m.group(1)) - 1]
+            line = '%s%s%s' % (pre, m.group(2), suf)
+    return line
+
+# ── 文本级处理（代码块保护 → 行级转换） ────────────────────
+def process_text(text):
+    lines = text.split('\n')
+    result = []
+    in_code = False
+    for line in lines:
+        if line.lstrip().startswith(fence):
+            in_code = not in_code
+            result.append(line)
+        elif in_code:
+            result.append(line)
+        else:
+            result.append(transform_line(line))
+    return '\n'.join(result)
+
+# ── 递归遍历卡片 JSON，处理所有 markdown 元素 ──────────────
+def walk_md(node):
+    if isinstance(node, list):
+        return [walk_md(x) for x in node]
+    if isinstance(node, dict):
+        if node.get('tag') == 'markdown' and 'content' in node:
+            node['content'] = process_text(node['content'])
+            return node
+        return {k: walk_md(v) for k, v in node.items()}
+    return node
+
+json.dump(walk_md(data), sys.stdout, ensure_ascii=False)
+" "$heading_style" 2>/dev/null
+    else
+        echo "$card_json"
+    fi
+}
 
 # ----------------------------------------------------------------------------
 # send_feishu_card - 发送飞书卡片
@@ -1411,12 +1623,22 @@ send_feishu_card() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url)"
+    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url chat_id)"
     local webhook_url="${vals[0]:-}"
     local session_id="${vals[1]:-}"
     local project_dir="${vals[2]:-}"
     local callback_url="${vals[3]:-}"
+    local chat_id="${vals[4]:-}"
     [ -z "$webhook_url" ] && webhook_url=$(get_config "FEISHU_WEBHOOK_URL" "")
+
+    # Markdown 预处理：遍历卡片中所有 markdown 元素，转换飞书不支持的语法
+    local _heading_style
+    _heading_style=$(get_config "FEISHU_HEADING_STYLE" "bar")
+    local _preprocessed
+    _preprocessed=$(preprocess_card_markdown "$card_json" "$_heading_style")
+    if [ -n "$_preprocessed" ]; then
+        card_json="$_preprocessed"
+    fi
 
     # 记录卡片内容到日志
     log "Sending feishu card:"
@@ -1442,8 +1664,8 @@ send_feishu_card() {
 
         # 构建传递给 _send_feishu_card_http_endpoint 的 options
         local http_options=""
-        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ]; then
-            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url")
+        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ] || [ -n "$chat_id" ]; then
+            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url" "chat_id" "$chat_id")
         fi
 
         error_msg=$(_send_feishu_card_http_endpoint "$card_json" "$target_url" "$http_options")
@@ -1538,10 +1760,11 @@ _send_feishu_card_http_endpoint() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" session_id project_dir callback_url)"
+    done <<< "$(json_get_multi "$options" session_id project_dir callback_url chat_id)"
     local session_id="${vals[0]:-}"
     local project_dir="${vals[1]:-}"
     local callback_url="${vals[2]:-}"
+    local chat_id="${vals[3]:-}"
 
     # 提取 card 内容
     local card_content
@@ -1557,9 +1780,17 @@ _send_feishu_card_http_endpoint() {
         return 1
     fi
 
-    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
-    local chat_id
-    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    # chat_id 由调用方通过 _resolve_chat_id 预解析后透传
+    # 未传入时兜底查询（兼容旧调用方式）
+    if [ -z "$chat_id" ]; then
+        chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    fi
+
+    # muted session：跳过发送，直接返回成功
+    if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping card send: $session_id"
+        return 0
+    fi
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""
@@ -1701,10 +1932,11 @@ send_feishu_post() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" project_dir session_id callback_url)"
+    done <<< "$(json_get_multi "$options" project_dir session_id callback_url chat_id)"
     local project_dir="${vals[0]:-}"
     local session_id="${vals[1]:-}"
     local callback_url="${vals[2]:-}"
+    local chat_id="${vals[3]:-}"
 
     local send_mode
     send_mode=$(get_config "FEISHU_SEND_MODE" "webhook")
@@ -1730,9 +1962,17 @@ send_feishu_post() {
         return 1
     fi
 
-    # 获取 chat_id（session 查询 → group 模式懒创建 → FEISHU_CHAT_ID 兜底）
-    local chat_id
-    chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    # chat_id 由调用方通过 _resolve_chat_id 预解析后透传
+    # 未传入时兜底查询（兼容旧调用方式）
+    if [ -z "$chat_id" ]; then
+        chat_id=$(_resolve_chat_id "$session_id" "$project_dir")
+    fi
+
+    # muted session：跳过发送，直接返回成功
+    if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping post send: $session_id"
+        return 0
+    fi
 
     # 查询 last_message_id 用于链式回复
     local reply_to_message_id=""
