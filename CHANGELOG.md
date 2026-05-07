@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-05-07
+
+#### setup.sh init 交互式初始化 + server.state 状态持久化
+
+- **`setup.sh init` 交互式初始化**：新增 `init` 子命令，通过 `src/setup_init.py` 引导完成全流程配置（.env → 依赖检测 → lark-oapi 安装 → Hook 配置 → 服务启动）
+- **OOP 架构**：`setup_init.py` 包含 7 个类（EditableBuffer、TerminalUI、EnvManager、DependencyChecker、HookConfigurator、ServiceManager、SetupInit），`setup.sh init` 分支简化为检测 Python + 调用 Python 脚本
+- **终端交互组件**：箭头键选择器、内联编辑输入、动态列表编辑器、预览+按需编辑的 `review_settings` 组件，支持 CJK 字符宽度计算和超宽行自动换行的正确回退
+- **server.state 状态持久化**：`start-server.sh` 从 PID 文件迁移到 JSON 格式的 `runtime/server.state`（含 pid/port/socket_path），新增 `state` 子命令输出运行状态供脚本调用
+- **端口/Socket 冲突检测**：init 流程中检测端口占用和 socket 文件冲突，精确区分本服务占用与第三方占用
+- **Hook 配置自动化**：`HookConfigurator` 自动写入/合并 settings.json 中的 Hook 配置，支持冲突检测和超时时间动态计算
+
 ### Changed - 2026-05-04
 
 #### Hook 事件开关 + 删除 Notification 事件 + .env.example 重整
