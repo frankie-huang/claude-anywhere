@@ -16,9 +16,78 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+
+
+# =============================================================================
+# Terminal — 终端环境基础设施
+# =============================================================================
+
+class Terminal:
+    """终端环境管理：初始化、前台进程组控制
+
+    解决两类终端问题：
+    1. 子进程抢占前台：依赖检测通过用户的 login shell（zsh -ic / bash -lc）
+       检测 claude CLI，这些 shell 会启用 job control 并调用 tcsetpgrp() 抢占前台，
+       退出后终端的前台进程组可能已不在本进程，导致后续 print() 触发 SIGTTOU 被挂起。
+    2. 非终端环境：setup.sh 通过管道调用时 stdin/stdout 可能不是终端，
+       需要打开 /dev/tty 确保交互式组件能正常读写。
+    """
+
+    @staticmethod
+    def init():
+        """初始化终端环境（程序启动时调用一次）
+
+        1. 忽略 SIGTTOU/SIGTTIN：防止进程因写/读终端而被挂起
+        2. 确保 stdin/stdout 连接到终端
+        3. 抢到前台进程组
+        """
+        # 忽略后台终端操作信号
+        for name in ('SIGTTOU', 'SIGTTIN'):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                signal.signal(sig, signal.SIG_IGN)
+
+        # 如果 stdin/stdout 不是 tty，尝试打开 /dev/tty
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            try:
+                tty_in = open('/dev/tty', 'r', buffering=1)
+                tty_out = open('/dev/tty', 'w', buffering=1)
+            except OSError:
+                pass
+            else:
+                if not sys.stdin.isatty():
+                    sys.stdin = tty_in
+                else:
+                    tty_in.close()
+                if not sys.stdout.isatty():
+                    sys.stdout = tty_out
+                else:
+                    tty_out.close()
+
+        Terminal.ensure_foreground()
+
+    @staticmethod
+    def ensure_foreground():
+        """确保当前进程在前台进程组
+
+        依赖检测中通过 login shell 检测 claude CLI 时，shell 可能抢占前台进程组。
+        每次读取按键前调用，防止 termios 操作（setraw/tcsetattr）因非前台而失败。
+        """
+        if not all(hasattr(os, attr) for attr in ('getpgrp', 'tcgetpgrp', 'tcsetpgrp')):
+            return
+        try:
+            fd = sys.stdin.fileno()
+            if not os.isatty(fd):
+                return
+            if os.tcgetpgrp(fd) != os.getpgrp():
+                os.tcsetpgrp(fd, os.getpgrp())
+        except OSError:
+            pass
+
 
 # =============================================================================
 # EditableBuffer — 可编辑文本缓冲区
@@ -154,6 +223,7 @@ class TerminalUI:
         """读取单个按键（支持方向键等特殊键）"""
         import tty
         import termios
+        Terminal.ensure_foreground()
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
@@ -1191,7 +1261,7 @@ class SetupInit:
                 token = TerminalUI.input_or_keep("FEISHU_VERIFICATION_TOKEN",
                                                  existing=self.env.get('FEISHU_VERIFICATION_TOKEN'), required=True,
                                                  secret=True,
-                                                 hint="未检测到 lark-oapi 依赖，需使用 HTTP 回调模式\n从飞书开放平台 -> 事件订阅 -> 加密与签名 获取")
+                                                 hint="未检测到 lark-oapi 依赖，需使用 HTTP 回调模式\n从飞书开放平台 -> 事件与回调 -> 加密策略 获取")
                 self.env.set('FEISHU_VERIFICATION_TOKEN', token)
             else:
                 TerminalUI.print_success("已检测到 lark-oapi，将使用长连接模式（无需 Verification Token）")
@@ -1252,20 +1322,29 @@ class SetupInit:
             return None
 
         existing_port = self.env.get('CALLBACK_SERVER_PORT') or '8080'
-        port = TerminalUI.input_or_keep("CALLBACK_SERVER_PORT", existing=existing_port, required=True,
-                                        hint="本机监听端口，服务启动后占用此端口接收回调请求", validate=_validate_port)
-        self.env.set('CALLBACK_SERVER_PORT', port)
+        while True:
+            port = TerminalUI.input_or_keep("CALLBACK_SERVER_PORT", existing=existing_port, required=True,
+                                            hint="本机监听端口，服务启动后占用此端口接收回调请求", validate=_validate_port)
 
-        # 端口占用检测
-        if self._check_port_in_use(port):
-            if self.running_port == port:
-                pass
-            elif self.service_running and not self.running_port:
-                pass
+            # 端口占用检测
+            if self._check_port_in_use(port):
+                if self.running_port == port:
+                    break
+                elif self.service_running and not self.running_port:
+                    break
+                else:
+                    TerminalUI.print_warning(f"端口 {port} 当前已被占用")
+                    choice = TerminalUI.select_option("端口已被占用，如何处理？", [
+                        ("重新输入端口", "换一个未被占用的端口"),
+                        ("继续使用", "启动服务前自行确保该端口可用"),
+                    ])
+                    if choice == 1:
+                        break
+                    existing_port = port
             else:
-                TerminalUI.print_warning(f"端口 {port} 当前已被占用，启动服务前请确保该端口可用")
-        else:
-            TerminalUI.print_success(f"端口 {port} 当前可用")
+                TerminalUI.print_success(f"端口 {port} 当前可用")
+                break
+        self.env.set('CALLBACK_SERVER_PORT', port)
 
         # CALLBACK_SERVER_URL
         # 需要公网地址的场景：
@@ -1311,11 +1390,22 @@ class SetupInit:
             TerminalUI.print_success(f"CALLBACK_SERVER_URL={default_url}")
 
         # URL 端口一致性检查
-        final_url = self.env.get('CALLBACK_SERVER_URL')
-        url_port_match = re.search(r':(\d+)(/|$)', final_url)
-        if url_port_match and url_port_match.group(1) != port:
+        while True:
+            final_url = self.env.get('CALLBACK_SERVER_URL')
+            url_port_match = re.search(r':(\d+)(/|$)', final_url)
+            if not url_port_match or url_port_match.group(1) == port:
+                break
             TerminalUI.print_warning(f"CALLBACK_SERVER_URL 中的端口 ({url_port_match.group(1)}) "
-                                  f"与 CALLBACK_SERVER_PORT ({port}) 不一致，可能无法正常工作")
+                                     f"与 CALLBACK_SERVER_PORT ({port}) 不一致，可能无法正常工作")
+            choice = TerminalUI.select_option("端口不一致，如何处理？", [
+                ("重新输入 URL", "修改 CALLBACK_SERVER_URL 中的端口"),
+                ("继续使用", "忽略端口不一致"),
+            ])
+            if choice == 1:
+                break
+            url = TerminalUI.input_or_keep("CALLBACK_SERVER_URL", existing=final_url, required=True,
+                                           validate=_validate_url)
+            self.env.set('CALLBACK_SERVER_URL', url)
 
         # PERMISSION_SOCKET_PATH 冲突检测
         sock_path = self.env.get('PERMISSION_SOCKET_PATH') or '/tmp/claude-permission.sock'
@@ -1518,6 +1608,8 @@ class SetupInit:
 # =============================================================================
 
 def main():
+    Terminal.init()
+
     if len(sys.argv) < 2:
         print("用法: python3 setup_init.py <source_dir>", file=sys.stderr)
         sys.exit(1)
