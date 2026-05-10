@@ -223,6 +223,80 @@ extract_response() {
 }
 
 # =============================================================================
+# 用 last_assistant_message 补全 response_json 的 texts 数组
+# 参数:
+#   $1 - response_json           extract_response 返回的 JSON（可为空）
+#   $2 - last_assistant_message  Stop 事件提供的最终答复文本（可为空）
+#   $3 - session_id              会话 ID（transcript 无数据时用于构造 fallback）
+# 返回:
+#   更新后的 response_json（stdout），补全失败时返回原值
+# 说明:
+#   Stop hook 后台执行时 transcript 可能尚未写入最终 assistant text，
+#   但中间过程（thinking、早期 text）已落盘。本函数将 last_assistant_message
+#   追加到 texts 末尾（如尚未包含）。transcript 无数据时构造最小 fallback。
+# =============================================================================
+supplement_last_message() {
+    local response_json="$1"
+    local last_msg="$2"
+    local fallback_session_id="${3:-unknown}"
+
+    if [ -z "$last_msg" ]; then
+        echo "$response_json"
+        return 0
+    fi
+
+    if [ -n "$response_json" ] && [ "$response_json" != "null" ]; then
+        # transcript 有数据，追加最终答复（如 texts 末尾不是它）
+        # 通过 stdin 管道 + 分隔符传入两个输入：
+        #   - 避免 argv 传递长消息 (MAX_ARG_STRLEN=128KB)
+        #   - 避免 local wrapper= + json_escape 方案，因为 json_escape 未覆盖所有控制字符，
+        #     特殊字符会导致构造的 wrapper JSON 畸形而解析失败；分隔符方案原样传递无丢失
+        local merged_json=""
+        local SEP='__SUPPLEMENT_SEP_b7e2f4__'
+        if [ "$JSON_HAS_JQ" = "true" ]; then
+            merged_json=$(printf '%s\n%s\n%s' "$response_json" "$SEP" "$last_msg" \
+                | jq -R -s --arg sep "$SEP" '
+                    split($sep + "\n") as $raw_parts |
+                    # jq split 无 maxsplit，需手动 re-join 以对齐 Python split(...,1)
+                    (if ($raw_parts | length) > 2 then
+                        [$raw_parts[0], ($raw_parts[1:] | join($sep + "\n"))]
+                    else $raw_parts end) as $parts |
+                    ($parts[0] | fromjson) as $resp |
+                    $parts[1] as $msg |
+                    $resp |
+                    if (.texts | length) == 0 or (.texts[-1] != $msg) then
+                        .texts += [$msg]
+                    else . end
+                ' 2>/dev/null)
+        elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+            merged_json=$(printf '%s\n%s\n%s' "$response_json" "$SEP" "$last_msg" \
+                | SEP="$SEP" "$PYTHON3" -c "
+import sys, json, os
+parts = sys.stdin.read().split(os.environ['SEP'] + chr(10), 1)
+data = json.loads(parts[0])
+msg = parts[1] if len(parts) > 1 else ''
+if not data.get('texts') or data['texts'][-1] != msg:
+    data.setdefault('texts', []).append(msg)
+print(json.dumps(data, ensure_ascii=False))
+" 2>/dev/null)
+        fi
+        if [ -n "$merged_json" ] && [ "$merged_json" != "null" ]; then
+            log "Supplemented response with last_assistant_message"
+            echo "$merged_json"
+        else
+            echo "$response_json"
+        fi
+    else
+        # transcript 无数据，用 last_assistant_message 构造最小 response
+        # 注：此路径几乎不可达（需 extract_response 彻底失败且 last_msg 非空），
+        # json_escape 的控制字符风险在此无实际影响，无需走 stdin 管道
+        local result="{\"texts\":[\"$(json_escape "$last_msg")\"],\"thinking\":\"\",\"session_id\":\"$fallback_session_id\"}"
+        log "Constructed response from last_assistant_message (transcript unavailable)"
+        echo "$result"
+    fi
+}
+
+# =============================================================================
 # 构建响应元素 JSON 片段（多个 markdown 元素，hr 分隔）
 # 参数:
 #   $1 - response_json  extract_response 返回的 JSON（含 texts 数组）
@@ -303,6 +377,15 @@ print(','.join(elements))
 
 # =============================================================================
 # 后台异步发送通知函数
+#
+# 调用链：
+#   send_stop_notification_async()
+#     ├─ extract_response(transcript_path)
+#     │    └─ extract_response_from_file(transcript, 5 retries)
+#     │         └─ (fallback) extract_response_from_file(subagent_file, 3 retries)
+#     ├─ supplement_last_message(response_json, hook_input)
+#     ├─ build_response_elements(response_json, max_length)
+#     └─ build_stop_card(elements, project, timestamp, session_id, thinking)
 # =============================================================================
 send_stop_notification_async() {
     # 捕获当前环境变量供后台使用
@@ -311,7 +394,9 @@ send_stop_notification_async() {
     local STOP_MESSAGE_MAX_LENGTH=$(get_config "STOP_MESSAGE_MAX_LENGTH" "10000")
     local STOP_THINKING_MAX_LENGTH=$(get_config "STOP_THINKING_MAX_LENGTH" "10000")
     local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
+    local INPUT_SESSION_ID=$(json_get "$INPUT" "session_id")
     local TRANSCRIPT_PATH=$(json_get "$INPUT" "transcript_path")
+    local LAST_ASSISTANT_MSG=$(json_get "$INPUT" "last_assistant_message")
     local PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(json_get "$INPUT" "cwd")}"
     local PROJECT_NAME=$(basename "${PROJECT_DIR:-$(pwd)}")
     local SESSION_ID=""
@@ -338,6 +423,9 @@ send_stop_notification_async() {
 
     # 使用 extract_response 函数（支持子代理回退）
     response_json=$(extract_response "$TRANSCRIPT_PATH")
+
+    # 用 Stop 事件提供的 last_assistant_message 补全竞态缺失的最终答复
+    response_json=$(supplement_last_message "$response_json" "$LAST_ASSISTANT_MSG" "$INPUT_SESSION_ID")
 
     if [ -n "$response_json" ] && [ "$response_json" != "null" ]; then
         # 从结果中提取 session_id 和 thinking

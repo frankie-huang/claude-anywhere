@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-05-11
+
+#### Stop hook 竞态修复：用 last_assistant_message 补全缺失的最终答复
+
+- Stop hook 后台读取 transcript 时，最终 assistant text 可能尚未写入文件，导致飞书卡片只展示中间过程而缺失最终答复
+- 新增 `supplement_last_message()` 函数，将 Stop 事件提供的 `last_assistant_message` 追加到 texts 末尾
+- `send_stop_notification_async()` 顶部注释补充完整调用链文档
+
+### Changed - 2026-05-10
+
+#### Claude 命令配置改进：自动检测 --print 参数支持
+
+- **`run_in_user_shell()`**：从 `_check_claude_command` 抽取为 `DependencyChecker` 公共方法，统一 login shell 执行逻辑
+- **`check_supports_print_flag()`**：新增方法，通过 login shell 检测命令是否支持 `--print` 参数
+- **`_configure_claude_command()`**：
+  - 添加功能说明文案，引导用户判断是否需要自定义命令
+  - 自定义命令自动检测 `--print` 支持，全部支持时跳过模板配置
+  - 部分支持时提供「重新输入命令」选项，递归调用自然跳过初始问题
+  - 仅当命令不支持 `--print` 时才要求配置 `CLAUDE_ARGS_TEMPLATE`
+- **参数文档统一**：模板说明中 `-p` 改为 `--print`，与实际参数一致
+
+### Fixed - 2026-05-10
+
+#### 终端被 SIGTTOU 挂起（login shell 抢占前台进程组）
+
+依赖检测通过 `zsh -ic` / `bash -lc` 检测 claude CLI 时，login shell 启用 job control 抢占前台进程组，退出后 Python 进程不在前台，后续 `print()` 触发 SIGTTOU 被挂起。
+
+- **Terminal 类**：忽略 SIGTTOU/SIGTTIN 信号，确保 stdin/stdout 连接终端（打开 `/dev/tty`），每次按键前抢回前台
+- **stdin 隔离**：`DependencyChecker` 中 `command -v claude` 和 `claude --version` 调用添加 `stdin=subprocess.DEVNULL`，从源头阻止 login shell 获取终端控制权
+
 ### Changed - 2026-05-08
 
 #### 遥测中心迁移支持

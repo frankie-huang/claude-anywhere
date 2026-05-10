@@ -900,8 +900,19 @@ class DependencyChecker:
 
         return all_ok
 
-    def _check_claude_command(self):
-        """通过用户 shell 检测 claude CLI"""
+    def run_in_user_shell(self, cmd, timeout=10):
+        """通过用户的 login shell 执行命令
+
+        与后端 build_shell_cmd (handlers/utils.py) 使用相同的 shell 参数：
+        zsh 用 -ic，fish 用 -c，其他用 -lc。
+
+        Args:
+            cmd: 要执行的命令字符串
+            timeout: 超时秒数
+
+        Returns:
+            subprocess.CompletedProcess 或 None（执行失败时）
+        """
         user_shell = os.environ.get('SHELL', '/bin/bash')
         shell_name = os.path.basename(user_shell)
 
@@ -913,27 +924,55 @@ class DependencyChecker:
             shell_args = ['-lc']
 
         try:
-            result = subprocess.run(
-                [user_shell] + shell_args + ['command -v claude'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, timeout=5)
-            claude_path = result.stdout.strip().split('\n')[-1] if result.returncode == 0 else ''
-            if claude_path:
-                # 尝试获取版本
-                try:
-                    ver_result = subprocess.run(
-                        [user_shell] + shell_args + ['claude --version'],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        universal_newlines=True, timeout=5)
-                    version = ver_result.stdout.strip().split('\n')[-1] if ver_result.returncode == 0 else ''
-                    TerminalUI.print_success(f"claude: {version or claude_path} ({shell_name})")
-                except Exception:
-                    TerminalUI.print_success(f"claude: {claude_path} ({shell_name})")
-            else:
-                TerminalUI.print_warning(f"claude: 未找到 (在 {shell_name} 中)")
-                TerminalUI.print_dim("请确保已安装 Claude Code CLI: https://claude.ai/code")
+            return subprocess.run(
+                [user_shell] + shell_args + [cmd],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, timeout=timeout)
         except Exception:
+            return None
+
+    def _check_claude_command(self):
+        """通过用户 shell 检测 claude CLI"""
+        result = self.run_in_user_shell('command -v claude')
+        if result is None:
             TerminalUI.print_warning("claude: 检测超时")
+            return
+
+        claude_path = result.stdout.strip().split('\n')[-1] if result.returncode == 0 else ''
+        if claude_path:
+            ver_result = self.run_in_user_shell('claude --version')
+            version = ver_result.stdout.strip().split('\n')[-1] if ver_result and ver_result.returncode == 0 else ''
+            TerminalUI.print_success(f"claude: {version or claude_path}")
+        else:
+            TerminalUI.print_warning("claude: 未找到")
+            TerminalUI.print_dim("请确保已安装 Claude Code CLI: https://claude.ai/code")
+
+    def check_supports_print_flag(self, cmd):
+        """检测命令是否支持 --print 参数
+
+        通过 login shell 执行 `cmd --print`，确保能检测到用户的别名/函数。
+        根据错误信息判断：
+        - stderr 含 "unknown option" 等关键词 → 不支持
+        - exit code 127 → 命令未找到
+        - 其他非零退出（如缺少参数）→ --print 被识别，返回 True
+
+        Args:
+            cmd: 要检测的命令（可以是命令名、路径或别名）
+
+        Returns:
+            True 表示支持 --print 参数，False 表示不支持或检测失败
+        """
+        result = self.run_in_user_shell(cmd + ' --print')
+        if result is None:
+            return False
+        stderr_lower = (result.stderr or '').lower()
+        if 'unknown option' in stderr_lower or 'unrecognized option' in stderr_lower \
+                or 'invalid option' in stderr_lower or 'unknown flag' in stderr_lower \
+                or 'no such option' in stderr_lower:
+            return False
+        if result.returncode == 127:
+            return False
+        return True
 
     def check_python_version(self, min_version):
         """检查 Python 版本是否 >= min_version (如 '3.8')"""
@@ -1479,12 +1518,15 @@ class SetupInit:
 
     def _configure_claude_command(self):
         TerminalUI.print_section("Claude 命令")
+        TerminalUI.print_dim("本服务通过调用 Claude CLI 来执行会话，默认使用 claude 命令。")
+        TerminalUI.print_dim("如果你使用了第三方封装、别名、或需要多个命令切换，请配置自定义命令。")
+        TerminalUI.print_text()
         existing_cmd = self.env.get('CLAUDE_COMMAND')
         has_custom_cmd = existing_cmd and existing_cmd.strip() not in ('claude', '')
 
         if not has_custom_cmd:
-            custom_cmd_idx = TerminalUI.select_option("是否通过默认的 claude 命令启动会话", [
-                ("是", "使用默认的 claude 命令"),
+            custom_cmd_idx = TerminalUI.select_option("是否只通过默认的 claude 命令启动会话", [
+                ("是", "只使用默认的 claude 命令"),
                 ("否", "使用第三方 CLI、别名或自定义命令"),
             ], hint="如需使用其他命令或配置多个命令切换，请选「否」")
         else:
@@ -1503,8 +1545,7 @@ class SetupInit:
                     existing_cmds = [stripped]
 
             cmds = TerminalUI.input_list("CLAUDE_COMMAND", existing=existing_cmds,
-                                         hint="默认 claude，一般无需修改\n"
-                                              "如使用第三方 CLI、别名或自定义环境变量封装，请按实际情况配置\n"
+                                         hint="如使用第三方 CLI、别名或自定义环境变量封装，请按实际情况配置\n"
                                               "支持多个命令（默认使用第一个，/new 和 /reply 时可切换）")
             if cmds:
                 if len(cmds) == 1:
@@ -1514,20 +1555,64 @@ class SetupInit:
             else:
                 self.env.set('CLAUDE_COMMAND', 'claude')
 
-            def _validate_template(v):
-                if '{cmd}' not in v or '{args}' not in v:
-                    return "模板必须同时包含 {cmd} 和 {args}"
-                return None
+            # 检测自定义命令是否支持 --print 参数
+            TerminalUI.print_text()
+            TerminalUI.print_dim("正在检测命令参数支持情况（需加载用户 shell 环境，请稍候）...")
+            supported = []
+            unsupported = []
+            for cmd_item in cmds:
+                if self.deps.check_supports_print_flag(cmd_item):
+                    supported.append(cmd_item)
+                else:
+                    unsupported.append(cmd_item)
 
-            existing_template = self.env.get('CLAUDE_ARGS_TEMPLATE')
-            template = TerminalUI.input_or_keep("CLAUDE_ARGS_TEMPLATE", existing=existing_template, required=False,
-                                                validate=_validate_template,
-                                                hint="命令行模板，默认 {cmd} {args}，其中:\n"
-                                                     "  {cmd} = CLAUDE_COMMAND 的值，{args} = -p prompt 等参数\n"
-                                                     "  默认执行效果: claude -p prompt --session-id xxx\n"
-                                                     "仅当第三方 CLI 参数传递方式不同时才需修改，如:\n"
-                                                     "  某 CLI 需要 wrapper -a \"-p prompt\" → 模板填 {cmd} -a \"{args}\"")
-            self.env.set('CLAUDE_ARGS_TEMPLATE', template or '{cmd} {args}')
+            # 输出检测结果
+            if not unsupported:
+                TerminalUI.print_success("所有命令均支持 --print 参数，将使用默认参数模板")
+            else:
+                for s in supported:
+                    TerminalUI.print_success(f"{s}: 支持 --print")
+                for u in unsupported:
+                    TerminalUI.print_warning(f"{u}: 不支持 --print")
+
+            if len(unsupported) == len(cmds):
+                # 全部不支持 → 必须配置 template
+                needs_template = True
+            elif unsupported:
+                # 部分支持 → 让用户选择
+                choice = TerminalUI.select_option("命令参数模式不一致，如何处理？", [
+                    ("重新输入命令", "修改为参数模式一致的命令列表"),
+                    ("跳过", "保持当前配置，不配置参数模板（不支持的命令可能无法正常工作）"),
+                    ("取消", "退出初始化"),
+                ])
+                if choice == 0:
+                    # 递归回到命令输入
+                    self._configure_claude_command()
+                    return
+                # choice == 1: 跳过，不配 template
+                needs_template = False
+            else:
+                # 全部支持 → 不需要 template
+                needs_template = False
+
+            if needs_template:
+                TerminalUI.print_dim("命令不支持 --print 参数，需要通过模板告诉系统如何传递参数")
+                def _validate_template(v):
+                    if '{cmd}' not in v or '{args}' not in v:
+                        return "模板必须同时包含 {cmd} 和 {args}"
+                    return None
+
+                existing_template = self.env.get('CLAUDE_ARGS_TEMPLATE')
+                template = TerminalUI.input_or_keep("CLAUDE_ARGS_TEMPLATE", existing=existing_template, required=False,
+                                                    validate=_validate_template,
+                                                    hint="命令行模板，默认 {cmd} {args}，其中:\n"
+                                                         "  {cmd} = CLAUDE_COMMAND 的值，{args} = --print prompt 等参数\n"
+                                                         "  默认执行效果: claude --print prompt --session-id xxx\n"
+                                                         "仅当第三方 CLI 参数传递方式不同时才需修改，如:\n"
+                                                         "  某 CLI 需要 wrapper -a \"--print prompt\" → 模板填 {cmd} -a \"{args}\"")
+                self.env.set('CLAUDE_ARGS_TEMPLATE', template or '{cmd} {args}')
+            else:
+                self.env.set('CLAUDE_ARGS_TEMPLATE', '{cmd} {args}')
 
     def _configure_permission(self):
         TerminalUI.print_section("权限请求")

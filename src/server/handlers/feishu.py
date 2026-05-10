@@ -464,7 +464,6 @@ def _handle_message_event(data: dict):
                 gs_store.touch(owner_id, chat_id)
         # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
         if route_info.get('new_session'):
-            chat_type = message.get('chat_type', '')
             _run_in_background(_forward_new_request,
                                (binding, route_info['session_id'],
                                 route_info['project_dir'], prompt,
@@ -696,6 +695,7 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
     event = data.get('event', {})
     message = event.get('message', {})
     chat_id = message.get('chat_id', '')
+    chat_type = message.get('chat_type', '')
     message_id = message.get('message_id', '')
 
     default_chat_dir = binding.get('default_chat_dir', '')
@@ -714,7 +714,7 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
         logger.info(f"[default-chat] Creating new session in {default_chat_dir} for {owner_id}, prompt={_sanitize_user_content(prompt)}")
         new_session_id = str(uuid.uuid4())
         _run_in_background(_forward_new_request_for_default_dir, (
-            binding, new_session_id, default_chat_dir, prompt, chat_id, message_id
+            binding, new_session_id, default_chat_dir, prompt, chat_id, message_id, chat_type
         ))
 
 
@@ -3539,7 +3539,6 @@ def _handle_reply_command(data: dict, args: str):
     # 转发到 Callback 后端
     # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
     if route_info.get('new_session'):
-        chat_type = message.get('chat_type', '')
         _run_in_background(_forward_new_request,
                            (binding, session_id, session_project_dir, prompt,
                             chat_id, message_id, chat_type, claude_command))
