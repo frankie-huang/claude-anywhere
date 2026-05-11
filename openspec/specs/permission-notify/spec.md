@@ -770,7 +770,7 @@ Stop 事件通知 SHALL 支持提取并展示 Claude 的思考过程（thinking�
 
 #### Scenario: 用户未操作超时（MCP 非交互模式）
 
-- **GIVEN** 用户在非交互模式下运行 Claude Code（`claude -p`）
+- **GIVEN** 用户在非交互模式下运行 Claude Code（`claude --print`）
 - **AND** 飞书卡片已发送但用户未点击任何按钮
 - **WHEN** 等待超时
 - **THEN** permission.sh 返回 deny 决策（默认行为）

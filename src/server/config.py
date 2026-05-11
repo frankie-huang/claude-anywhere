@@ -142,6 +142,21 @@ def get_close_page_timeout() -> int:
     return get_config_positive_int('CALLBACK_PAGE_CLOSE_DELAY', DEFAULT_CALLBACK_PAGE_CLOSE_DELAY)
 
 
+def get_agent_type() -> str:
+    """获取当前 agent 类型
+
+    Returns:
+        'claude' 或 'codex'，默认 'claude'
+    """
+    raw = get_config('AGENT_TYPE', 'claude').strip().lower()
+    if raw not in ('claude', 'codex'):
+        raise ValueError(
+            "不支持的 AGENT_TYPE: '%s'。\n"
+            "  支持的值: claude, codex\n"
+            "  请在 .env 中修改 AGENT_TYPE 配置" % raw)
+    return raw
+
+
 def get_claude_commands() -> List[str]:
     """解析 CLAUDE_COMMAND 配置为命令列表
 
@@ -183,12 +198,51 @@ def get_claude_commands() -> List[str]:
 def get_claude_args_template() -> str:
     """获取 CLAUDE_ARGS_TEMPLATE 配置
 
-    占位符 {cmd} 和 {args} 的展开语义见 handlers.claude._expand_template。
+    占位符 {cmd} 和 {args} 的展开语义见 agents.claude._expand_template。
 
     Returns:
         模板字符串, 默认 '{cmd} {args}'
     """
     raw = get_config('CLAUDE_ARGS_TEMPLATE', '').strip()
+    return raw if raw else '{cmd} {args}'
+
+
+def get_codex_commands() -> List[str]:
+    """解析 CODEX_COMMAND 配置为命令列表
+
+    格式与 CLAUDE_COMMAND 相同（单命令字符串、列表、JSON 数组）。
+    默认 ["codex"]。
+    """
+    raw = get_config('CODEX_COMMAND', '').strip()
+
+    if not raw:
+        return ['codex']
+
+    if raw.startswith('[') and raw.endswith(']'):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                result = [str(item).strip() for item in parsed if str(item).strip()]
+                return result if result else ['codex']
+        except (ValueError, TypeError):
+            pass
+
+        inner = raw[1:-1]
+        items = [item.strip() for item in inner.split(',') if item.strip()]
+        return items if items else ['codex']
+
+    return [raw]
+
+
+def get_codex_args_template() -> str:
+    """获取 CODEX_ARGS_TEMPLATE 配置
+
+    占位符语义与 CLAUDE_ARGS_TEMPLATE 相同。
+
+    Returns:
+        模板字符串, 默认 '{cmd} {args}'
+    """
+    raw = get_config('CODEX_ARGS_TEMPLATE', '').strip()
     return raw if raw else '{cmd} {args}'
 
 

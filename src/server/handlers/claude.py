@@ -1,32 +1,29 @@
-"""Claude 会话相关处理器
+"""Agent 会话处理器
 
-处理用户通过飞书回复消息继续 Claude 会话的请求，
-以及通过 /new 指令发起新的 Claude 会话。
+处理用户通过飞书回复消息继续会话的请求，
+以及通过 /new 指令发起新会话。支持 Claude 和 Codex 两种 agent。
+
+agent 协议层（命令构建、进程启动/监控）已迁移至 agents/ 模块，
+本文件仅保留 HTTP 业务逻辑（参数校验、session store 操作、飞书通知）。
 """
 
-import json
 import logging
 import os
-import shlex
-import subprocess
-import sys
-import threading
 import uuid
-from typing import Tuple, Dict, List, Any
+from typing import Tuple, Dict, Any
 
+from agents import launch_agent, get_agent_adapter
 from services.session_chat_store import SessionChatStore
-from handlers.utils import build_shell_cmd, run_in_background as _run_in_background
 
 logger = logging.getLogger(__name__)
 
-# 常量定义
-STARTUP_TIMEOUT_SECONDS = 30  # 后台启动阶段等待时间（秒），兜住延迟失败
-STARTUP_CHECK_SECONDS = 2  # 启动检查等待时间（秒）
-MAX_LOG_LENGTH = 500  # 日志最大长度
-MAX_NOTIFICATION_LENGTH = 500  # 通知消息最大长度
+# 通知消息最大长度
+MAX_NOTIFICATION_LENGTH = 500
 
-# MCP 配置
-MCP_TOOL_NAME = "mcp__approver__permission_request"
+
+def _get_adapter():
+    """获取当前 agent adapter（延迟初始化，避免模块加载时读配置）"""
+    return get_agent_adapter()
 
 
 class Response:
@@ -116,17 +113,17 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
         return Response.error(f'Project directory not found: {project_dir}')
 
     # 验证 claude_command 合法性（如果指定了的话）
+    adapter = _get_adapter()
     if claude_command:
-        from config import get_claude_commands
-        if claude_command not in get_claude_commands():
+        if claude_command not in adapter.get_commands():
             return Response.error('invalid claude_command')
 
     # Command 优先级: 请求指定 > session 记录 > 默认
     if not claude_command:
         claude_command = session_data.get('claude_command', '')
 
-    actual_cmd = _get_claude_command(claude_command)
-    logger.info(f"[claude-continue] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
+    actual_cmd = adapter.resolve_command(claude_command)
+    logger.info(f"[continue] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
     # 更新 session 映射：刷新 claude_command 和 chat_id
     # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
@@ -138,10 +135,12 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     # 飞书发起的 prompt 已在飞书展示，标记跳过
     session_store.set_skip_next_user_prompt(session_id)
 
-    # 同步执行并检查（使用 resume 模式）
-    result = _launch_claude(session_id, project_dir, prompt, chat_id,
-                            message_id, session_mode='resume',
-                            claude_command=actual_cmd)
+    # 通过 agent 适配层启动进程
+    result = launch_agent(
+        adapter, session_id, project_dir, prompt,
+        chat_id, message_id, session_mode='resume',
+        command_name=actual_cmd,
+        on_error=_send_error_notification)
 
     # 添加 session_id 到响应
     if result[0]:  # success
@@ -197,16 +196,16 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         return Response.error(f'Project directory not found: {project_dir}')
 
     # 确定实际命令：网关传入 > store 已有值（/clear clone 继承）> 默认
+    adapter = _get_adapter()
     if claude_command:
         # 验证 claude_command 合法性（如果指定了的话）
-        from config import get_claude_commands
-        if claude_command not in get_claude_commands():
+        if claude_command not in adapter.get_commands():
             return Response.error('invalid claude_command')
     else:
         session_data = session_store.get_session(session_id)
         claude_command = (session_data or {}).get('claude_command', '')
-    actual_cmd = _get_claude_command(claude_command)
-    logger.info(f"[claude-new] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
+    actual_cmd = adapter.resolve_command(claude_command)
+    logger.info(f"[new] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
 
     from config import FEISHU_SESSION_MODE
     is_group_mode = (FEISHU_SESSION_MODE == 'group')
@@ -236,354 +235,28 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if skip_user_prompt:
         session_store.set_skip_next_user_prompt(session_id)
 
-    # 同步执行并检查（使用 new 模式）
-    result = _launch_claude(session_id, project_dir, prompt, chat_id,
-                            message_id, session_mode='new',
-                            claude_command=actual_cmd)
+    # 通过 agent 适配层启动进程
+    adapter = _get_adapter()
+    result = launch_agent(
+        adapter, session_id, project_dir, prompt,
+        chat_id, message_id, session_mode='new',
+        command_name=actual_cmd,
+        on_error=_send_error_notification)
     if result[0]:  # success
-        # 添加 session_id 到响应
         response = result[1]
+        # Codex 路径：用从输出捕获的真实 session ID 替换临时 ID
+        captured_id = response.pop('captured_session_id', None)
+        if captured_id and captured_id != session_id:
+            if session_store.rename_session(session_id, captured_id):
+                logger.info("[new] Session ID replaced: %s -> %s",
+                            session_id, captured_id)
+                session_id = captured_id
+            else:
+                logger.warning("[new] Failed to rename session %s -> %s, keeping original",
+                               session_id, captured_id)
         response['session_id'] = session_id
 
     return result
-
-
-# =============================================
-# 进程执行与监控
-# =============================================
-
-
-def _launch_claude(session_id: str, project_dir: str, prompt: str, chat_id: str = '',
-                   message_id: str = '', session_mode: str = 'resume',
-                   claude_command: str = '') -> Tuple[bool, Dict[str, Any]]:
-    """
-    构建命令、启动 Claude 进程并检查初始状态
-
-    通过登录 shell 执行命令，支持 shell 配置文件中的别名和环境变量。
-
-    Args:
-        session_id: Claude 会话 ID
-        project_dir: 项目工作目录
-        prompt: 用户的问题
-        chat_id: 群聊 ID（用于异常通知）
-        message_id: 用户消息 ID（用于回复式通知）
-        session_mode: 会话模式，'resume' 继续会话，'new' 新建会话
-        claude_command: 指定使用的 Claude 命令（可选，为空时使用默认）
-
-    Returns:
-        (success, response)
-    """
-    from config import get_claude_args_template
-
-    shell = _get_shell()
-    claude_cmd = _get_claude_command(claude_command)
-    template = get_claude_args_template()
-
-    # ── 1. 准备 cmd_argv: 把 CLAUDE_COMMAND 拆成 argv ──
-    # 支持 'ccsdk code -t claude' 这种多 token 的 wrapper 命令
-    cmd_argv = shlex.split(claude_cmd)
-
-    # ── 2. 准备 args_argv: 组装 claude 参数列表 ──
-    if session_mode == 'new':
-        session_flag = '--session-id'
-        log_prefix = '[claude-new]'
-    else:
-        session_flag = '--resume'
-        log_prefix = '[claude-continue]'
-    mcp_argv = _get_mcp_args(project_dir, session_id)
-    # -- 分隔符确保 prompt 中的 --flag 不会被 CLI 误解析为参数
-    args_argv = ['-p', session_flag, session_id] + mcp_argv + ['--', prompt]
-
-    # ── 3. 展开模板, 构建 shell 命令 ──
-    cmd_str = _expand_template(template, cmd_argv, args_argv)
-    cmd = build_shell_cmd(shell, cmd_str)
-
-    # 日志版本: 不含 mcp 参数, prompt 用占位符替代
-    debug_args = ['-p', session_flag, session_id, '--', 'PROMPT']
-    log_cmd = _expand_template(template, cmd_argv, debug_args)
-    # 展示完整 shell 调用方式(如 bash -lc 'cmd...'), 可直接复制到终端执行
-    debug_shell_cmd = build_shell_cmd(shell, log_cmd)
-    if len(debug_shell_cmd) >= 3:
-        logger.info(f"{log_prefix} Copyable: cd {project_dir} && "
-                    f"{debug_shell_cmd[0]} {debug_shell_cmd[1]} {shlex.quote(debug_shell_cmd[2])}")
-    logger.info(f"{log_prefix} shell={shell}, Executing: cd {project_dir} && {log_cmd}")
-
-    # ── 4. 启动进程 ──
-    # 清除 CLAUDECODE 环境变量, 避免嵌套会话检测阻止子会话启动
-    # 参考: https://code.claude.com/docs/en/headless
-    env = os.environ.copy()
-    env.pop('CLAUDECODE', None)
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=project_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            env=env
-        )
-    except Exception as e:
-        # 启动失败（命令不存在等）
-        error_msg = str(e)
-        logger.error(f"{log_prefix} Failed to start process: {error_msg}")
-        return Response.error(error_msg)
-
-    # 等待一小段时间检查进程状态
-    try:
-        stdout, stderr = proc.communicate(timeout=STARTUP_CHECK_SECONDS)
-        returncode = proc.returncode
-        if returncode == 0:
-            logger.info(f"{log_prefix} Command completed quickly")
-            return Response.completed(stdout[:MAX_LOG_LENGTH * 2] if stdout else '')
-        else:
-            error_msg = stderr.strip() if stderr.strip() else stdout.strip()
-            if not error_msg:
-                error_msg = f"命令执行失败，退出码: {returncode}"
-            logger.warning(f"{log_prefix} Command failed with exit code {returncode}: {error_msg}")
-            return Response.error(error_msg)
-    except subprocess.TimeoutExpired:
-        # 进程仍在运行，正常启动
-        logger.info(f"{log_prefix} Command is running in background")
-        # 在后台等待完成
-        _run_in_background(_monitor_startup, (proc, session_id, chat_id, message_id))
-        return Response.processing()
-
-
-def _monitor_startup(proc: subprocess.Popen, session_id: str,
-                     chat_id: str = '', message_id: str = ''):
-    """
-    在后台短暂等待，捕获启动阶段的延迟失败
-
-    只等待 STARTUP_TIMEOUT_SECONDS 秒。如果进程在此期间失败，发送通知；
-    如果仍在运行，说明 claude 已正常启动，交由 _monitor_detached 持续监控。
-
-    Args:
-        proc: 子进程对象
-        session_id: 会话 ID
-        chat_id: 群聊 ID（用于异常通知）
-        message_id: 用户消息 ID（用于回复式通知）
-    """
-    try:
-        stdout, stderr = proc.communicate(timeout=STARTUP_TIMEOUT_SECONDS)
-        if proc.returncode == 0:
-            logger.info(f"[claude] Command completed successfully, session: {session_id}")
-            if stdout:
-                logger.debug(f"[claude] stdout: {stdout[:MAX_LOG_LENGTH]}...")
-        else:
-            # 启动阶段失败，记录日志
-            error_summary = stderr.strip()[:MAX_LOG_LENGTH] if stderr.strip() else '(无错误输出)'
-            logger.warning(f"[claude] Command failed with exit code {proc.returncode}, session: {session_id}, error: {error_summary}")
-
-            # 如果有 chat_id 且有 stderr，才发送飞书通知
-            if chat_id and stderr:
-                _send_error_notification(chat_id, message_id, stderr.strip())
-    except subprocess.TimeoutExpired:
-        # 进程仍在运行，说明 claude 已正常启动，放手让它自己跑
-        # 后台线程持续排空 pipe（防 buffer 满阻塞）并监控退出码
-        # 注意：communicate() 超时前可能已部分消费 pipe，后续 _drain_pipe 拿到的是剩余内容而非完整输出
-        logger.info(f"[claude] Process still running after {STARTUP_TIMEOUT_SECONDS}s, session: {session_id} — detaching to background monitor")
-        threading.Thread(
-            target=_monitor_detached,
-            args=(proc, session_id, chat_id, message_id),
-            daemon=True
-        ).start()
-    except Exception as e:
-        logger.error(f"[claude] Execution error: {e}, session: {session_id}")
-        if chat_id:
-            _send_error_notification(chat_id, message_id, str(e))
-
-
-def _monitor_detached(proc: subprocess.Popen, session_id: str,
-                      chat_id: str = '', message_id: str = ''):
-    """
-    后台持续读取 pipe 并等待子进程退出，失败时发送通知
-
-    典型场景：claude -p 因限频持续重试，最终失败退出但不触发 stop hook。
-    通过后台线程排空 stdout/stderr 防止 buffer 满阻塞，
-    同时保留尾部输出用于错误通知。
-
-    Args:
-        proc: 子进程对象（stdout/stderr 仍然打开）
-        session_id: 会话 ID
-        chat_id: 群聊 ID（用于异常通知）
-        message_id: 用户消息 ID（用于回复式通知）
-    """
-    stderr_tail = ''
-    stdout_tail = ''
-    try:
-        # 并行排空 stdout 和 stderr，防止任一 buffer 满导致死锁
-        def drain_stderr():
-            nonlocal stderr_tail
-            stderr_tail = _drain_pipe(proc.stderr)
-
-        def drain_stdout():
-            nonlocal stdout_tail
-            stdout_tail = _drain_pipe(proc.stdout)
-
-        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
-        stderr_thread.start()
-        stdout_thread.start()
-
-        # 等待进程退出
-        returncode = proc.wait()
-        # 确保 pipe 读完
-        stderr_thread.join(timeout=5)
-        stdout_thread.join(timeout=5)
-
-        if returncode == 0:
-            logger.info(f"[claude] Detached process completed successfully, session: {session_id}")
-        else:
-            # 优先用 stderr，没有则用 stdout
-            error_output = stderr_tail or stdout_tail
-            logger.warning(f"[claude] Detached process failed (code={returncode}), "
-                           f"session: {session_id}, output: {error_output[:MAX_LOG_LENGTH]}")
-            if chat_id:
-                error_msg = error_output or f"Claude 进程异常退出 (code={returncode})"
-                _send_error_notification(chat_id, message_id, error_msg)
-    except Exception as e:
-        logger.error(f"[claude] Error waiting for detached process: {e}, session: {session_id}")
-
-
-def _drain_pipe(pipe, tail_lines: int = 20):
-    """读取并丢弃 pipe 内容，保留最后 N 行
-
-    防止 pipe buffer 满导致子进程阻塞，同时保留尾部用于错误诊断。
-
-    Args:
-        pipe: 可读的文件对象（proc.stdout 或 proc.stderr）
-        tail_lines: 保留的尾部行数
-
-    Returns:
-        最后 N 行的文本内容
-    """
-    if pipe is None:
-        return ''
-    from collections import deque
-    tail = deque(maxlen=tail_lines)
-    try:
-        for line in pipe:
-            tail.append(line)
-    except (ValueError, OSError):
-        pass  # pipe 已关闭
-    return ''.join(tail).strip()
-
-
-# =============================================
-# 命令构建
-# =============================================
-
-
-def _get_shell() -> str:
-    """获取用户默认 shell
-
-    Returns:
-        shell 路径，如 '/bin/bash'，默认 '/bin/bash'
-    """
-    return os.environ.get('SHELL', '/bin/bash')
-
-
-def _get_claude_command(claude_command: str = '') -> str:
-    """获取 Claude 命令
-
-    优先使用传入的 claude_command，否则从配置列表取默认值。
-
-    Args:
-        claude_command: 指定的命令字符串（可选）
-
-    Returns:
-        命令字符串，如 'claude' 或 'claude --model opus'
-    """
-    if claude_command:
-        return claude_command
-    from config import get_claude_commands
-    return get_claude_commands()[0]
-
-
-def _get_mcp_args(project_dir: str, session_id: str) -> List[str]:
-    """
-    获取 MCP 审批相关的命令行参数
-
-    动态构建 MCP 配置 JSON 字符串，不依赖外部配置文件。
-    通过 args 参数将 project_dir 和 session_id 传递给 MCP server。
-
-    Args:
-        project_dir: 项目工作目录，传递给 MCP server 用于权限审批上下文
-        session_id: Claude 会话 ID，传递给 MCP server 用于权限审批上下文
-
-    Returns:
-        MCP 相关参数 argv 列表(未经 shell quote), MCP 脚本缺失时返回空列表
-    """
-    # 动态定位 MCP 脚本路径（与 claude.py 同目录）
-    mcp_script = os.path.join(os.path.dirname(__file__), "permission_mcp.py")
-
-    if not os.path.exists(mcp_script):
-        logger.debug(f"[mcp] MCP script not found: {mcp_script}")
-        return []
-
-    # sys.executable 返回启动本进程的 Python 解释器路径，
-    # 即 start-server.sh 中 $PYTHON3 所指向的同一个程序，确保 MCP 子进程与服务使用同一 Python 环境
-    python_cmd = sys.executable or "python3"
-    # 通过 args 参数传递 cwd 和 session_id，避免环境变量污染
-    mcp_config = {
-        "mcpServers": {
-            "approver": {
-                "command": python_cmd,
-                "args": [mcp_script, "--cwd", project_dir, "--session-id", session_id]
-            }
-        }
-    }
-
-    config_json = json.dumps(mcp_config)
-    logger.info(f"[mcp] Using MCP config: script={mcp_script}, session={session_id}, cwd={project_dir}")
-    return ['--permission-prompt-tool', MCP_TOOL_NAME, '--mcp-config', config_json]
-
-
-def _shlex_join(argv: List[str]) -> str:
-    """shlex.join 的 Python 3.6 兼容版"""
-    return ' '.join(shlex.quote(a) for a in argv)
-
-
-def _expand_template(template: str, cmd_argv: List[str], args_argv: List[str]) -> str:
-    """根据模板把 cmd 和 args 组装成 shell 命令字符串
-
-    占位符展开规则:
-      - 裸占位符 {args}  → 各参数独立 shell-quote 后拼接(适合直接透传给 claude)
-      - 引号占位符 "{args}" / '{args}' → 整体打包为一个 shell 参数
-        (用 shlex.quote 包裹, 确保 prompt 中的引号/空格不会破坏外层 shell 解析)
-      - {cmd} 同理
-
-    Args:
-        template: 模板字符串, 如 '{cmd} {args}' 或 '{cmd} -a "{args}"'
-        cmd_argv: claude 命令 argv 列表, 如 ['claude'] 或 ['ccsdk', 'code', '-t', 'claude']
-        args_argv: claude 参数 argv 列表, 如 ['-p', '--resume', 'sid', '--', 'prompt']
-
-    Returns:
-        可直接传给 shell 执行的命令字符串
-    """
-    # posix=False 保留引号字符, 用于区分裸占位符和引号占位符
-    tokens = shlex.split(template, posix=False)
-    cmd_joined = _shlex_join(cmd_argv)
-    args_joined = _shlex_join(args_argv)
-
-    result = []
-    for tok in tokens:
-        # 检测是否被成对引号包裹(单或双)
-        quoted = len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'")
-        inner = tok[1:-1] if quoted else tok
-
-        if inner == '{cmd}':
-            # 裸占位符 → 展开为多个独立 argv; 引号占位符 → 合成单个 argv
-            result.extend(cmd_argv) if not quoted else result.append(cmd_joined)
-        elif inner == '{args}':
-            result.extend(args_argv) if not quoted else result.append(args_joined)
-        else:
-            # 普通 token(如 -a) → 原样 append
-            # 子串占位符(如 --flag={cmd})实际不会出现, 此处仅做防御性处理
-            replaced = inner.replace('{cmd}', cmd_joined).replace('{args}', args_joined)
-            result.append(replaced)
-
-    return _shlex_join(result)
 
 
 # =============================================

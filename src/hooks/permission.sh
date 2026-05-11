@@ -551,8 +551,30 @@ output_decision() {
     local message="$2"
     local interrupt="$3"
 
-    log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt"
+    log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt, agent=${AGENT_TYPE:-claude}"
 
+    # Codex 使用不同的决策输出格式
+    if [ "${AGENT_TYPE:-}" = "codex" ]; then
+        local codex_decision
+        if [ "$behavior" = "allow" ]; then
+            codex_decision="allow"
+        else
+            codex_decision="block"
+        fi
+        if [ -n "$message" ]; then
+            cat << EOF
+{"decision": "${codex_decision}", "reason": "${message}"}
+EOF
+        else
+            cat << EOF
+{"decision": "${codex_decision}"}
+EOF
+        fi
+        log "Decision output complete (codex format)"
+        return
+    fi
+
+    # Claude 格式
     local decision_json
 
     if [ "$behavior" = "allow" ]; then
@@ -572,7 +594,7 @@ output_decision() {
 }
 EOF
 
-    log "Decision output complete"
+    log "Decision output complete (claude format)"
 }
 
 # =============================================================================
@@ -586,9 +608,15 @@ output_decision_with_updated_input() {
     local behavior="$1"
     local updated_input="$2"
 
-    log "Outputting decision with updatedInput: behavior=$behavior"
+    log "Outputting decision with updatedInput: behavior=$behavior, agent=${AGENT_TYPE:-claude}"
 
-    # updatedInput 必须在 decision 对象内部（Claude Code 文档要求）
+    # Codex 不支持 updatedInput，降级为普通 allow
+    if [ "${AGENT_TYPE:-}" = "codex" ]; then
+        output_decision "$behavior" "" ""
+        return
+    fi
+
+    # Claude: updatedInput 必须在 decision 对象内部（Claude Code 文档要求）
     # 使用 printf 避免 heredoc 对 updated_input 中 $ 反引号等字符的 shell 展开
     printf '{
   "hookSpecificOutput": {

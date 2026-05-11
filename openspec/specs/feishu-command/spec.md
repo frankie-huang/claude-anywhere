@@ -96,7 +96,7 @@ Callback 后端 SHALL 提供 `/cb/claude/new` 端点，接收并处理新建会�
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用指定的 `claude_command`（或默认命令）
 - **AND** 通过登录 shell（`bash -lc`）执行
-- **AND** 拼接 `-p {prompt} --session-id {session_id}` 参数
+- **AND** 拼接 `--print {prompt} --session-id {session_id}` 参数
 - **AND** 设置 10 分钟超时
 - **AND** 捕获输出用于日志
 

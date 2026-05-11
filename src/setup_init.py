@@ -1146,6 +1146,105 @@ class HookConfigurator:
 
 
 # =============================================================================
+# CodexHookConfigurator — config.toml Hook 配置
+# =============================================================================
+
+class CodexHookConfigurator:
+    """管理 Codex CLI Hook 配置（config.toml 格式）"""
+
+    def __init__(self, hook_path, config_file):
+        self.hook_path = hook_path
+        self.config_file = config_file
+
+    def configure(self, server_timeout=600):
+        """写入/合并 hook 配置到 config.toml
+
+        Args:
+            server_timeout: PERMISSION_REQUEST_TIMEOUT 的值，用于计算 hook timeout
+        """
+        TerminalUI.print_section("配置 Codex CLI Hook")
+
+        if not os.path.exists(self.hook_path):
+            TerminalUI.print_error(f"Hook 脚本不存在: {self.hook_path}")
+            return False
+
+        os.chmod(self.hook_path, 0o755)
+
+        config_dir = os.path.dirname(self.config_file)
+        os.makedirs(config_dir, exist_ok=True)
+
+        hook_timeout = server_timeout + 60
+
+        # 读取现有配置（按行保留非 hook 段）
+        existing_lines = []
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    existing_lines = f.readlines()
+            except Exception:
+                pass
+
+        # 移除已有的 [[hooks.*]] 段，保留其他配置
+        cleaned_lines = []
+        in_hook_section = False
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped.startswith('[[hooks.'):
+                in_hook_section = True
+                continue
+            if in_hook_section:
+                # 检测是否进入新的顶级段（非 hook 相关的缩进行或新的 [ 段头）
+                if stripped.startswith('[') or stripped.startswith('[['):
+                    in_hook_section = False
+                    cleaned_lines.append(line)
+                # 跳过 hook 段内的行（包括缩进的子段和空行）
+                continue
+            cleaned_lines.append(line)
+
+        # 移除尾部多余空行
+        while cleaned_lines and cleaned_lines[-1].strip() == '':
+            cleaned_lines.pop()
+
+        # 生成 hook 配置 TOML
+        hook_toml = self._build_hook_toml(hook_timeout)
+
+        # 合并写入
+        with open(self.config_file, 'w') as f:
+            if cleaned_lines:
+                f.writelines(cleaned_lines)
+                f.write('\n\n')
+            f.write(hook_toml)
+
+        TerminalUI.print_dim(f"配置文件: {self.config_file}")
+        for event in ['UserPromptSubmit', 'PermissionRequest', 'Stop']:
+            TerminalUI.print_success(f"{event} — 已配置")
+
+        return True
+
+    def _build_hook_toml(self, hook_timeout):
+        """生成 hooks 段的 TOML 文本"""
+        lines = []
+        for event in ['UserPromptSubmit', 'Stop']:
+            lines.append(f'[[hooks.{event}]]')
+            lines.append('')
+            lines.append(f'  [[hooks.{event}.hooks]]')
+            lines.append('  type = "command"')
+            lines.append(f'  command = "{self.hook_path}"')
+            lines.append('')
+
+        # PermissionRequest 带 timeout
+        lines.append('[[hooks.PermissionRequest]]')
+        lines.append('')
+        lines.append('  [[hooks.PermissionRequest.hooks]]')
+        lines.append('  type = "command"')
+        lines.append(f'  command = "{self.hook_path}"')
+        lines.append(f'  timeout = {hook_timeout}')
+        lines.append('')
+
+        return '\n'.join(lines)
+
+
+# =============================================================================
 # ServiceManager — 服务管理
 # =============================================================================
 
@@ -1194,9 +1293,30 @@ class SetupInit:
             os.path.join(source_dir, '.env'),
             os.path.join(source_dir, '.env.example'))
         self.deps = DependencyChecker()
-        self.hooks = HookConfigurator(
-            os.path.join(source_dir, 'src', 'hook-router.sh'),
-            os.path.join(os.path.expanduser('~'), '.claude', 'settings.json'))
+        hook_path = os.path.join(source_dir, 'src', 'hook-router.sh')
+        # 根据 AGENT_TYPE 选择 hook 配置器
+        agent_type = os.environ.get('AGENT_TYPE', '').strip().lower()
+        # 也尝试从 .env 读取（env 可能尚未加载到环境变量）
+        if not agent_type:
+            try:
+                env_file = os.path.join(source_dir, '.env')
+                if os.path.exists(env_file):
+                    with open(env_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith('AGENT_TYPE=') and not line.startswith('#'):
+                                agent_type = line.split('=', 1)[1].strip().lower()
+                                break
+            except Exception:
+                pass
+        if agent_type == 'codex':
+            self.hooks = CodexHookConfigurator(
+                hook_path,
+                os.path.join(os.path.expanduser('~'), '.codex', 'config.toml'))
+        else:
+            self.hooks = HookConfigurator(
+                hook_path,
+                os.path.join(os.path.expanduser('~'), '.claude', 'settings.json'))
         self.service = ServiceManager(source_dir)
         # 运行状态
         self.deploy_idx = 0

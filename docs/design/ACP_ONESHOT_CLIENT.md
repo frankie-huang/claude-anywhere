@@ -11,7 +11,7 @@
 
 ### 现有痛点
 
-在 [交互式 Claude 会话调研](./INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) 中确定了 `claude -p` (subprocess + headless) 方案，但该模式是非交互式的受限模式：
+在 [交互式 Claude 会话调研](./INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) 中确定了 `claude --print` (subprocess + headless) 方案，但该模式是非交互式的受限模式：
 - 遇到需要权限的工具调用时，直接跳过/拒绝
 - 不触发 PermissionRequest hook
 - 不会阻塞等待用户决策
@@ -21,7 +21,7 @@
 ### 目标
 
 提供一个命令行工具，实现：
-1. 一次性 prompt 执行（类似 `claude -p`）
+1. 一次性 prompt 执行（类似 `claude --print`）
 2. 遇到权限请求时，通过现有飞书审批系统获取用户决策
 3. 支持会话恢复/续接（`--resume`）
 4. 对现有 hooks 代码零侵入

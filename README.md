@@ -294,7 +294,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 9. **自动注册与双向认证**: OpenAPI 模式下 Callback 服务启动时自动向网关注册，通过 `auth_token` 实现双向认证（详见 `docs/design/GATEWAY_AUTH.md`）
 10. **WS 隧道模式**: 分离部署时推荐使用 WebSocket 长连接，Callback 主动接入网关，无需公网可达，支持自动重连
 11. **飞书长连接事件接收**: 支持 `longpoll` 模式通过 lark-oapi SDK 的 WebSocket 长连接接收飞书事件推送，网关无需公网端点
-12. **Headless 权限审批**: 通过 `--permission-prompt-tool` MCP 方案，在 `claude -p` headless 模式下桥接权限请求到飞书审批系统（详见 `docs/design/PERMISSION_PROMPT_TOOL.md`）
+12. **Headless 权限审批**: 通过 `--permission-prompt-tool` MCP 方案，在 `claude --print` headless 模式下桥接权限请求到飞书审批系统（详见 `docs/design/PERMISSION_PROMPT_TOOL.md`）
 
 ## 功能特性
 
@@ -669,13 +669,30 @@ FEISHU_OWNER_ID=ou_admin_user
 | `STOP_THINKING_MAX_LENGTH` | Stop 事件思考过程最大长度（字符数，0 禁用） | 10000 |
 | `STOP_MESSAGE_MAX_LENGTH` | Stop 事件消息最大长度（字符数） | 10000 |
 
-#### 五、Claude 会话配置
+#### 五、Agent 与会话配置
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
+| `AGENT_TYPE` | AI 编码代理类型，支持 `claude` 和 `codex` | `claude` |
 | `DEFAULT_CHAT_DIR` | 默认聊天目录，配置后直接发消息即可自动创建/继续会话，详见下文 | 空（不启用） |
 | `DEFAULT_CHAT_FOLLOW_THREAD` | 默认聊天目录的话题跟随模式，详见下文 | `true` |
 | `CLAUDE_COMMAND` | Claude 命令，支持多命令列表如 `[claude, claude --model opus]`，详见下文 | `claude` |
+| `CODEX_COMMAND` | Codex 命令，仅当 `AGENT_TYPE=codex` 时生效，格式同 `CLAUDE_COMMAND` | `codex` |
+| `CODEX_ARGS_TEMPLATE` | Codex 命令行模板，仅当 `AGENT_TYPE=codex` 时生效 | `{cmd} {args}` |
+
+**Agent 类型切换**
+
+系统支持 Claude Code 和 OpenAI Codex 两种 AI 编码代理后端。通过 `AGENT_TYPE` 配置切换：
+
+```bash
+# 使用 Claude Code（默认）
+AGENT_TYPE=claude
+
+# 使用 OpenAI Codex
+AGENT_TYPE=codex
+```
+
+切换后需执行 `./setup.sh restart` 重启服务。两种 agent 的飞书交互体验一致（/new、/reply、权限审批卡片），主要差异在底层 CLI 调用方式和 session 管理策略。
 
 **默认聊天目录**
 

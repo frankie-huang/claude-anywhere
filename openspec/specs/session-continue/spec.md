@@ -113,7 +113,7 @@ Callback 后端 SHALL 提供 `/cb/claude/continue` 端点，接收并处理继�
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用确定的 `claude_command`（按优先级：请求指定 > session 记录 > 默认）
 - **AND** 通过登录 shell（`bash -lc`）执行，支持 shell 配置文件中的别名和环境变量
-- **AND** 拼接 `-p {prompt} --resume {session_id}` 参数
+- **AND** 拼接 `--print {prompt} --resume {session_id}` 参数
 - **AND** 设置 10 分钟超时
 - **AND** 捕获输出用于日志
 
@@ -135,19 +135,19 @@ Callback 后端 SHALL 提供 `/cb/claude/continue` 端点，接收并处理继�
 
 - **GIVEN** 环境变量 `CLAUDE_COMMAND` 设置为 `claude-glm`
 - **WHEN** 执行继续会话
-- **THEN** 使用 `claude-glm -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用 `claude-glm --print {prompt} --resume {session_id}` 执行
 
 #### Scenario: 带参数的自定义命令
 
 - **GIVEN** 环境变量 `CLAUDE_COMMAND` 设置为 `claude --model opus`
 - **WHEN** 执行继续会话
-- **THEN** 使用 `claude --model opus -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用 `claude --model opus --print {prompt} --resume {session_id}` 执行
 
 #### Scenario: 向后兼容默认命令
 
 - **GIVEN** 环境变量 `CLAUDE_COMMAND` 未设置
 - **WHEN** 执行继续会话
-- **THEN** 使用默认命令 `claude -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用默认命令 `claude --print {prompt} --resume {session_id}` 执行
 
 #### Scenario: 指定的 Command 不在配置列表中
 

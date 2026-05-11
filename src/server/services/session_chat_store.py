@@ -130,6 +130,37 @@ class SessionChatStore:
                 logger.error("[session-chat-store] Failed to save mapping: %s", e)
                 return False
 
+    def rename_session(self, old_id: str, new_id: str) -> bool:
+        """重命名 session ID（将 old_id 的数据迁移到 new_id）
+
+        用于 Codex 路径：临时 ID 替换为从输出捕获的真实 session ID。
+        如果 new_id 已存在，不覆盖并返回 False。
+
+        Args:
+            old_id: 旧 session ID
+            new_id: 新 session ID
+
+        Returns:
+            是否重命名成功
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                if old_id not in data:
+                    logger.warning("[session-chat-store] rename: old_id %s not found", old_id)
+                    return False
+                if new_id in data:
+                    logger.warning("[session-chat-store] rename: new_id %s already exists", new_id)
+                    return False
+                data[new_id] = data.pop(old_id)
+                result = self._save(data)
+                if result:
+                    logger.info("[session-chat-store] Renamed session: %s -> %s", old_id, new_id)
+                return result
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to rename session: %s", e)
+                return False
+
     def set_last_message_id(self, session_id: str, message_id: str) -> bool:
         """更新 last_message_id（链式回复锚点）
 

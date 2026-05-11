@@ -39,6 +39,86 @@ fi
 #   收集其后所有 assistant 消息中的 text 和 thinking 内容。
 #   texts 按 assistant 消息分组，每条 assistant 的文本合并为一个元素。
 # =============================================================================
+# =============================================================================
+# 从 Codex JSONL transcript 提取响应（--json 模式输出）
+# Codex 事件格式:
+#   {"type":"thread.started","thread_id":"xxx"}
+#   {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+# 返回: {"texts":["..."],"thinking":"","session_id":"xxx"} 或空
+# =============================================================================
+extract_codex_response() {
+    local transcript_file="$1"
+
+    if [ ! -f "$transcript_file" ]; then
+        return 1
+    fi
+
+    if [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        "$PYTHON3" -c "
+import sys, json
+
+with open(sys.argv[1], 'r') as f:
+    lines = f.readlines()
+
+session_id = ''
+texts = []
+for line in lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        event = json.loads(line)
+    except:
+        continue
+    etype = event.get('type', '')
+    if etype == 'thread.started':
+        session_id = event.get('thread_id', '')
+    elif etype == 'item.completed':
+        item = event.get('item', {})
+        if item.get('type') == 'agent_message':
+            text = item.get('text', '').strip()
+            if text:
+                texts.append(text)
+
+if not texts:
+    sys.exit(0)
+
+print(json.dumps({'texts': texts, 'thinking': '', 'session_id': session_id}))
+" "$transcript_file" 2>/dev/null
+        return $?
+    elif [ "$JSON_HAS_JQ" = "true" ]; then
+        jq -s '
+(
+    [.[] | select(.type == "thread.started") | .thread_id] |
+    if length > 0 then .[0] else "" end
+) as $sid |
+[
+    .[] | select(.type == "item.completed" and .item.type == "agent_message") |
+    .item.text | gsub("^\\n+|\\n+$"; "") | select(length > 0)
+] |
+if length == 0 then null
+else {texts: ., thinking: "", session_id: $sid}
+end
+' "$transcript_file" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+# =============================================================================
+# 检测 transcript 是否为 Codex 格式（首行含 thread.started）
+# =============================================================================
+is_codex_transcript() {
+    local transcript_file="$1"
+    [ -f "$transcript_file" ] || return 1
+    local first_line
+    first_line=$(head -1 "$transcript_file" 2>/dev/null)
+    case "$first_line" in
+        *'"type"'*'"thread.started"'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 extract_response_from_file() {
     local transcript_file="$1"
     local max_retries="${2:-5}"
@@ -46,6 +126,17 @@ extract_response_from_file() {
     local result=""
 
     if [ ! -f "$transcript_file" ]; then
+        return 1
+    fi
+
+    # Codex 格式检测：首行含 thread.started
+    if is_codex_transcript "$transcript_file"; then
+        log "Detected Codex transcript format"
+        result=$(extract_codex_response "$transcript_file")
+        if [ -n "$result" ] && [ "$result" != "null" ]; then
+            echo "$result"
+            return 0
+        fi
         return 1
     fi
 
@@ -263,8 +354,8 @@ supplement_last_message() {
                     else $raw_parts end) as $parts |
                     ($parts[0] | fromjson) as $resp |
                     $parts[1] as $msg |
-                    $resp |
-                    if (.texts | length) == 0 or (.texts[-1] != $msg) then
+                    if ($msg == null) then $resp
+                    elif (.texts | length) == 0 or (.texts[-1] != $msg) then
                         .texts += [$msg]
                     else . end
                 ' 2>/dev/null)
