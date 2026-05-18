@@ -10,7 +10,7 @@ import logging
 import shlex
 from typing import Dict, List, Optional
 
-from agents import AgentAdapter
+from agents import AgentAdapter, expand_template
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,9 @@ class CodexAdapter(AgentAdapter):
         """构建 Codex CLI 完整命令字符串
 
         新建会话: codex exec --json --cd <dir> <prompt>
-        恢复会话: codex exec resume <id> --json --cd <dir> <prompt>
+        恢复会话: codex exec resume --json <id> <prompt>
+
+        沙箱模式由用户通过 CODEX_COMMAND 或 ~/.codex/config.toml 自行配置。
         """
         from config import get_codex_args_template
 
@@ -58,10 +60,10 @@ class CodexAdapter(AgentAdapter):
         if session_mode == 'new':
             args_argv = ['exec', '--json', '--cd', project_dir, prompt]
         else:
-            args_argv = ['exec', 'resume', session_id,
-                         '--json', '--cd', project_dir, prompt]
+            # resume 不支持 --cd，工作目录由原始会话决定
+            args_argv = ['exec', 'resume', '--json', session_id, prompt]
 
-        return _expand_template(template, cmd_argv, args_argv)
+        return expand_template(template, cmd_argv, args_argv)
 
     def build_debug_command_string(self, command_name: str, session_id: str,
                                    session_mode: str) -> str:
@@ -75,9 +77,9 @@ class CodexAdapter(AgentAdapter):
         if session_mode == 'new':
             debug_args = ['exec', '--json', 'PROMPT']
         else:
-            debug_args = ['exec', 'resume', session_id, '--json', 'PROMPT']
+            debug_args = ['exec', 'resume', '--json', session_id, 'PROMPT']
 
-        return _expand_template(template, cmd_argv, debug_args)
+        return expand_template(template, cmd_argv, debug_args)
 
     def parse_session_id(self, line: str) -> Optional[str]:
         """从 Codex --json 输出行解析 session ID
@@ -101,37 +103,3 @@ class CodexAdapter(AgentAdapter):
         return None
 
 
-# =============================================
-# Codex 专有工具函数
-# =============================================
-
-
-def _shlex_join(argv: List[str]) -> str:
-    """shlex.join 的 Python 3.6 兼容版"""
-    return ' '.join(shlex.quote(a) for a in argv)
-
-
-def _expand_template(template: str, cmd_argv: List[str],
-                     args_argv: List[str]) -> str:
-    """根据模板把 cmd 和 args 组装成 shell 命令字符串
-
-    语义与 agents.claude._expand_template 相同。
-    """
-    tokens = shlex.split(template, posix=False)
-    cmd_joined = _shlex_join(cmd_argv)
-    args_joined = _shlex_join(args_argv)
-
-    result = []
-    for tok in tokens:
-        quoted = len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'")
-        inner = tok[1:-1] if quoted else tok
-
-        if inner == '{cmd}':
-            result.extend(cmd_argv) if not quoted else result.append(cmd_joined)
-        elif inner == '{args}':
-            result.extend(args_argv) if not quoted else result.append(args_joined)
-        else:
-            replaced = inner.replace('{cmd}', cmd_joined).replace('{args}', args_joined)
-            result.append(replaced)
-
-    return _shlex_join(result)

@@ -18,7 +18,7 @@
       "template": "green",
       "title": {
         "tag": "lark_md",
-        "content": "{{at_user}}✅ Claude Code 处理完成 [{{session_id}}]"
+        "content": "{{at_user}}✅ {{agent_display_name}} 处理完成 [{{session_id}}]"
       },
       "padding": "12px 8px 12px 8px"
     },
@@ -113,7 +113,7 @@
           "tag": "div",
           "text": {
             "tag": "lark_md",
-            "content": "恢复会话：`claude --resume {{resume_session_id}}`",
+            "content": "恢复会话：`{{resume_command}}`",
             "text_size": "notation",
             "text_align": "left",
             "text_color": "grey"

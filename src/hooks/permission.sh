@@ -553,22 +553,36 @@ output_decision() {
 
     log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt, agent=${AGENT_TYPE:-claude}"
 
-    # Codex 使用不同的决策输出格式
+    # Codex 决策格式：仅支持 behavior + message
+    # 注意：Codex 源码对 interrupt/updatedInput/updatedPermissions 均 fail closed，不能传
     if [ "${AGENT_TYPE:-}" = "codex" ]; then
-        local codex_decision
-        if [ "$behavior" = "allow" ]; then
-            codex_decision="allow"
-        else
-            codex_decision="block"
+        local codex_behavior="$behavior"
+        if [ "$codex_behavior" != "allow" ]; then
+            codex_behavior="deny"
         fi
-        if [ -n "$message" ]; then
-            cat << EOF
-{"decision": "${codex_decision}", "reason": "${message}"}
-EOF
+        if [ "$JSON_HAS_JQ" = "true" ]; then
+            if [ "$codex_behavior" = "deny" ] && [ -n "$message" ]; then
+                jq -n --arg behavior "$codex_behavior" --arg message "$message" \
+                    '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: $behavior, message: $message}}}'
+            else
+                jq -n --arg behavior "$codex_behavior" \
+                    '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: $behavior}}}'
+            fi
+        elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+            CODEX_BEHAVIOR="$codex_behavior" CODEX_MESSAGE="$message" "$PYTHON3" -c '
+import json
+import os
+decision = {"behavior": os.environ.get("CODEX_BEHAVIOR", "")}
+message = os.environ.get("CODEX_MESSAGE", "")
+if decision["behavior"] == "deny" and message:
+    decision["message"] = message
+data = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+print(json.dumps(data, ensure_ascii=False))
+'
+        elif [ "$codex_behavior" = "deny" ] && [ -n "$message" ]; then
+            printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s","message":"%s"}}}\n' "$codex_behavior" "$(json_escape "$message")"
         else
-            cat << EOF
-{"decision": "${codex_decision}"}
-EOF
+            printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s"}}}\n' "$codex_behavior"
         fi
         log "Decision output complete (codex format)"
         return

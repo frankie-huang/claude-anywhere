@@ -41,24 +41,25 @@
 # 优先级：jq > python3 > grep/sed
 # =============================================================================
 json_init() {
-    # 检测 jq（最可靠）
+    # 独立检测 jq 和 python3，两者可能同时被上层使用
     if command -v jq &> /dev/null; then
-        JSON_PARSER="jq"
         JSON_HAS_JQ=true
-        export JSON_PARSER JSON_HAS_JQ
-        return 0
+        export JSON_HAS_JQ
     fi
 
-    # 检测 python3（比 grep/sed 更可靠）
     if [ -n "$PYTHON3" ]; then
-        JSON_PARSER="python3"
         JSON_HAS_PYTHON3=true
-        export JSON_PARSER JSON_HAS_PYTHON3
-        return 0
+        export JSON_HAS_PYTHON3
     fi
 
-    # 降级到 grep/sed（有已知限制）
-    JSON_PARSER="native"
+    # JSON_PARSER 表示首选解析器，供 json_get 等基础函数使用
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        JSON_PARSER="jq"
+    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        JSON_PARSER="python3"
+    else
+        JSON_PARSER="native"
+    fi
     export JSON_PARSER
     return 0
 }

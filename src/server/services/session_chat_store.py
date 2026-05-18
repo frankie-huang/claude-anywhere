@@ -29,6 +29,7 @@ gateway 转发 /cb/claude/continue 时 callback 校验 session 是否存在，
 import json
 import logging
 import os
+import shlex
 import tempfile
 import threading
 import time
@@ -134,7 +135,7 @@ class SessionChatStore:
         """重命名 session ID（将 old_id 的数据迁移到 new_id）
 
         用于 Codex 路径：临时 ID 替换为从输出捕获的真实 session ID。
-        如果 new_id 已存在，不覆盖并返回 False。
+        如果 new_id 已存在，将 old_id 的数据合并到 new_id（old_id 字段补全 new_id 缺失值）。
 
         Args:
             old_id: 旧 session ID
@@ -150,8 +151,18 @@ class SessionChatStore:
                     logger.warning("[session-chat-store] rename: old_id %s not found", old_id)
                     return False
                 if new_id in data:
-                    logger.warning("[session-chat-store] rename: new_id %s already exists", new_id)
-                    return False
+                    old_entry = data.pop(old_id)
+                    new_entry = dict(data[new_id])
+                    for key, value in old_entry.items():
+                        if key not in new_entry or new_entry.get(key) is None:
+                            new_entry[key] = value
+                    new_entry['updated_at'] = int(time.time())
+                    data[new_id] = new_entry
+                    result = self._save(data)
+                    if result:
+                        logger.info("[session-chat-store] Merged session rename: %s -> %s",
+                                    old_id, new_id)
+                    return result
                 data[new_id] = data.pop(old_id)
                 result = self._save(data)
                 if result:
@@ -159,6 +170,56 @@ class SessionChatStore:
                 return result
             except Exception as e:
                 logger.error("[session-chat-store] Failed to rename session: %s", e)
+                return False
+
+    def adopt_pending_session(self, session_id: str, agent_type: str,
+                              project_dir: str, max_age_seconds: int = 600) -> bool:
+        """将最近的临时新会话记录迁移到真实 agent session_id。
+
+        Codex 新会话的真实 session_id 由 CLI 生成，可能先在 hook 输入中出现，
+        而飞书 /new 链路已经用临时 UUID 创建了 group/chat mapping。这里按
+        agent + project_dir + 最近更新时间匹配 pending 记录，把 skip 标志和
+        chat_id 迁移到真实 session，避免重复建群和重复回显首条 prompt。
+        """
+        if not session_id or not agent_type or not project_dir:
+            return False
+
+        agent_type = agent_type.strip().lower()
+        now = int(time.time())
+
+        with self._file_lock:
+            try:
+                data = self._load()
+                if session_id in data:
+                    return False
+
+                candidates = []
+                for sid, entry in data.items():
+                    if sid == session_id:
+                        continue
+                    if entry.get('project_dir') != project_dir:
+                        continue
+                    if now - int(entry.get('updated_at', 0) or 0) > max_age_seconds:
+                        continue
+                    if not _command_matches_agent(entry.get('claude_command', ''), agent_type):
+                        continue
+                    if not entry.get('skip_next_user_prompt') and entry.get('last_message_id'):
+                        continue
+                    candidates.append((int(entry.get('updated_at', 0) or 0), sid))
+
+                if not candidates:
+                    return False
+
+                _, old_id = max(candidates)
+                data[session_id] = data.pop(old_id)
+                data[session_id]['updated_at'] = now
+                result = self._save(data)
+                if result:
+                    logger.info("[session-chat-store] Adopted pending %s session: %s -> %s",
+                                agent_type, old_id, session_id)
+                return result
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to adopt pending session: %s", e)
                 return False
 
     def set_last_message_id(self, session_id: str, message_id: str) -> bool:
@@ -544,3 +605,18 @@ class SessionChatStore:
         except (IOError, OSError) as e:
             logger.error("[session-chat-store] Failed to save: %s", e)
             return False
+
+
+def _command_matches_agent(command: str, agent_type: str) -> bool:
+    if not command or not agent_type:
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.split()
+    executable = os.path.basename(argv[0]) if argv else ''
+    if agent_type == 'codex':
+        return executable == 'codex' or executable.startswith('codex-')
+    if agent_type == 'claude':
+        return executable == 'claude' or executable.startswith('claude-')
+    return executable == agent_type

@@ -157,23 +157,26 @@ def get_agent_type() -> str:
     return raw
 
 
-def get_claude_commands() -> List[str]:
-    """解析 CLAUDE_COMMAND 配置为命令列表
+def _parse_command_list(config_key: str, default: str) -> List[str]:
+    """解析命令列表配置
 
     支持格式:
     - 单命令字符串: "claude" 或 "claude --model opus"
     - 无引号列表: [claude, claude --model opus]
     - JSON 数组: ["claude", "claude --model opus"]
-    - 空值/缺失: 默认 ["claude"]
+    - 空值/缺失: 返回 [default]
+
+    Args:
+        config_key: 配置项名称
+        default: 默认命令名
 
     Returns:
         命令字符串列表，至少包含一个元素
     """
-    raw = get_config('CLAUDE_COMMAND', '')
-    raw = raw.strip()
+    raw = get_config(config_key, '').strip()
 
     if not raw:
-        return ['claude']
+        return [default]
 
     # 列表格式: 以 [ 开头且以 ] 结尾
     if raw.startswith('[') and raw.endswith(']'):
@@ -182,23 +185,28 @@ def get_claude_commands() -> List[str]:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
                 result = [str(item).strip() for item in parsed if str(item).strip()]
-                return result if result else ['claude']
+                return result if result else [default]
         except (ValueError, TypeError):
             pass
 
         # JSON 失败，按逗号分隔（无引号列表格式）
         inner = raw[1:-1]
         items = [item.strip() for item in inner.split(',') if item.strip()]
-        return items if items else ['claude']
+        return items if items else [default]
 
     # 单命令字符串
     return [raw]
 
 
+def get_claude_commands() -> List[str]:
+    """解析 CLAUDE_COMMAND 配置为命令列表"""
+    return _parse_command_list('CLAUDE_COMMAND', 'claude')
+
+
 def get_claude_args_template() -> str:
     """获取 CLAUDE_ARGS_TEMPLATE 配置
 
-    占位符 {cmd} 和 {args} 的展开语义见 agents.claude._expand_template。
+    占位符 {cmd} 和 {args} 的展开语义见 agents.expand_template。
 
     Returns:
         模板字符串, 默认 '{cmd} {args}'
@@ -208,30 +216,8 @@ def get_claude_args_template() -> str:
 
 
 def get_codex_commands() -> List[str]:
-    """解析 CODEX_COMMAND 配置为命令列表
-
-    格式与 CLAUDE_COMMAND 相同（单命令字符串、列表、JSON 数组）。
-    默认 ["codex"]。
-    """
-    raw = get_config('CODEX_COMMAND', '').strip()
-
-    if not raw:
-        return ['codex']
-
-    if raw.startswith('[') and raw.endswith(']'):
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, list):
-                result = [str(item).strip() for item in parsed if str(item).strip()]
-                return result if result else ['codex']
-        except (ValueError, TypeError):
-            pass
-
-        inner = raw[1:-1]
-        items = [item.strip() for item in inner.split(',') if item.strip()]
-        return items if items else ['codex']
-
-    return [raw]
+    """解析 CODEX_COMMAND 配置为命令列表"""
+    return _parse_command_list('CODEX_COMMAND', 'codex')
 
 
 def get_codex_args_template() -> str:

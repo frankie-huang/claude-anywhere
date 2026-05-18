@@ -2875,9 +2875,24 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
 
     # 新建会话时传递 reply_to，让第一条通知回复用户的 /new 消息
     # 后续通知会通过 last_message_id 链式回复
-    return _forward_claude_request(binding, '/cb/claude/new',
-                                   data, chat_id, reply_to=message_id,
-                                   reply_in_thread=reply_in_thread)
+    final_session_id = _forward_claude_request(binding, '/cb/claude/new',
+                                               data, chat_id, reply_to=message_id,
+                                               reply_in_thread=reply_in_thread)
+
+    # Codex 路径：callback 可能将临时 UUID 替换为从 CLI 输出捕获的真实 session ID，
+    # 需同步更新 GroupSessionStore 的路由映射，否则后续 continue 仍查旧 ID
+    if final_session_id and final_session_id != session_id:
+        from services.group_session_store import GroupSessionStore
+        gs_store = GroupSessionStore.get_instance()
+        owner_id = binding.get('_owner_id', '')
+        if gs_store and owner_id:
+            route_chat_id = gs_store.find_by_session(owner_id, session_id)
+            if route_chat_id:
+                gs_store.save(owner_id, route_chat_id, final_session_id, project_dir=project_dir)
+                logger.info("[feishu] Updated group-session route: %s -> %s (was %s)",
+                            route_chat_id, final_session_id, session_id)
+
+    return final_session_id
 
 
 def create_group_chat_and_record(owner_id: str, session_id: str, project_dir: str,

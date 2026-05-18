@@ -433,6 +433,21 @@ _build_at_user_tag() {
 # 卡片构建函数
 # =============================================================================
 
+_agent_display_name() {
+    case "${AGENT_TYPE:-claude}" in
+        codex) echo "Codex" ;;
+        *) echo "Claude Code" ;;
+    esac
+}
+
+_agent_resume_command() {
+    local session_id="$1"
+    case "${AGENT_TYPE:-claude}" in
+        codex) echo "codex resume $session_id" ;;
+        *) echo "claude --resume $session_id" ;;
+    esac
+}
+
 # ----------------------------------------------------------------------------
 # build_permission_card - 构建权限请求卡片
 # ----------------------------------------------------------------------------
@@ -578,11 +593,14 @@ build_permission_card() {
     local final_footer_hint="$footer_hint"
     if [ -z "$final_footer_hint" ]; then
         if [ -n "$buttons_json" ]; then
-            final_footer_hint="请尽快操作以避免 Claude 超时等待"
+            final_footer_hint="请尽快操作以避免 $(_agent_display_name) 超时等待"
         else
             final_footer_hint="回调服务未运行，请返回终端操作"
         fi
     fi
+
+    local resume_command
+    resume_command=$(_agent_resume_command "$session_id")
 
     local card
     if [ -n "$buttons_json" ]; then
@@ -596,6 +614,7 @@ build_permission_card() {
             "buttons_json=$buttons_json" \
             "at_user=$at_user" \
             "footer_hint=$final_footer_hint" \
+            "resume_command=$resume_command" \
             "resume_session_id=$session_id")
     else
         card=$(render_card_template "$card_type" \
@@ -607,6 +626,7 @@ build_permission_card() {
             "detail_elements=$detail_elements" \
             "at_user=$at_user" \
             "footer_hint=$final_footer_hint" \
+            "resume_command=$resume_command" \
             "resume_session_id=$session_id")
     fi
 
@@ -749,6 +769,11 @@ build_stop_card() {
 
     # 截断 session_id 前 8 字符用于显示
     local session_id_short="${session_id:0:8}"
+    local resume_command
+    resume_command=$(_agent_resume_command "$session_id")
+
+    local agent_display_name
+    agent_display_name="$(_agent_display_name)"
 
     render_card_template "stop" \
         "response_elements=$response_elements" \
@@ -757,7 +782,9 @@ build_stop_card() {
         "session_id=$session_id_short" \
         "at_user=$at_user" \
         "thinking_element=$thinking_element" \
-        "resume_session_id=$session_id"
+        "resume_command=$resume_command" \
+        "resume_session_id=$session_id" \
+        "agent_display_name=$agent_display_name"
 }
 
 # =============================================================================
@@ -862,12 +889,13 @@ _get_chat_id() {
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
     local request_body
+    local agent_type="${AGENT_TYPE:-}"
     if [ -n "$project_dir" ]; then
         local escaped_dir
         escaped_dir=$(json_escape "$project_dir")
-        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\"}"
+        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\",\"agent_type\":\"$(json_escape "$agent_type")\"}"
     else
-        request_body="{\"session_id\":\"$session_id\"}"
+        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$(json_escape "$agent_type")\"}"
     fi
 
     local response
@@ -2193,8 +2221,8 @@ PYTHON_SCRIPT
         "owner_id=$owner_id" \
         "ask_question_form_elements=$form_elements" \
         "at_user=$at_user" \
+        "resume_command=$(_agent_resume_command "$session_id")" \
         "resume_session_id=$session_id")
 
     echo "$card"
 }
-

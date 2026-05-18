@@ -57,19 +57,21 @@ send_user_prompt_async() {
 
     log "UserPromptSubmit: session=$SESSION_ID, prompt=${PROMPT_CONTENT:0:50}..."
 
+    # 前置解析 chat_id 并检查 mute 状态。Codex 新会话可能先用临时
+    # session_id 建 mapping，真实 session_id 会在本 hook 里首次出现；
+    # 提前解析可让 callback 先完成 pending mapping 迁移，再检查 skip 标志。
+    local RESOLVED_CHAT_ID
+    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
+        return 0
+    fi
+
     # 检查 skip 标志（飞书发起的会话会设置此标志）
     local skip_flag
     skip_flag=$(_check_skip_user_prompt "$SESSION_ID")
     if [ "$skip_flag" = "true" ]; then
         log "UserPromptSubmit: skipped (feishu-originated)"
-        return 0
-    fi
-
-    # 前置解析 chat_id 并检查 mute 状态，muted 时跳过发送
-    local RESOLVED_CHAT_ID
-    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
-    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
-        log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
         return 0
     fi
 
@@ -99,10 +101,10 @@ send_user_prompt_async() {
     send_feishu_post "$message_text" "$options" >/dev/null 2>&1
 }
 
-# 启动后台发送（不等待，立即返回）
-# 注意: 不要在 settings.json 中给此 hook 加 async: true，
-# 而是通过 & 将发送函数放到后台，脚本立即 exit 0 返回，不阻塞 Claude Code
-send_user_prompt_async &
+# 后台发送；单独 & 不够——宿主以 pipe 关闭（非 PID 退出）判断 hook 结束，
+# 子进程继承 stdout/stderr 会导致 pipe 未关闭，需要 >/dev/null 2>&1 切断
+# 注意: UserPromptSubmit hook 配置不要加 async: true，而是通过 & 放后台，脚本立即 exit 0 返回
+send_user_prompt_async >/dev/null 2>&1 &
 
 # 立即返回，不阻塞 Claude Code
 exit 0

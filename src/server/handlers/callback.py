@@ -214,12 +214,16 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
         logger.error("[callback] handle_get_chat_id: SessionChatStore not initialized")
         return 500, {'chat_id': '', 'muted': False}
 
+    agent_type = data.get('agent_type', '').strip().lower()
+    project_dir = data.get('project_dir', '').strip()
+    if agent_type and project_dir:
+        store.adopt_pending_session(session_id, agent_type, project_dir)
+
     chat_id = store.get_active_chat_id(session_id)   # 过滤 dissolved + expired（已解散群无可用 chat_id）
     muted = store.is_session_muted(session_id)       # 仅过滤 expired（mute 是 session 维度，与群解散无关）
 
     # 目录级 mute 自动继承：仅对真正不存在（非 dissolved）的新 session 生效
     if not chat_id and not muted and store.get_session(session_id, include_dissolved=True) is None:
-        project_dir = data.get('project_dir', '').strip()
         if project_dir:
             from services.directory_store import DirectoryStore
             dir_store = DirectoryStore.get_instance()

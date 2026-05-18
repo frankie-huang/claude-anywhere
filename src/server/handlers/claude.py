@@ -21,11 +21,6 @@ logger = logging.getLogger(__name__)
 MAX_NOTIFICATION_LENGTH = 500
 
 
-def _get_adapter():
-    """获取当前 agent adapter（延迟初始化，避免模块加载时读配置）"""
-    return get_agent_adapter()
-
-
 class Response:
     """统一的响应格式"""
 
@@ -63,19 +58,18 @@ class Response:
 
 
 def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    处理继续 Claude 会话的请求
+    """处理继续会话的请求
 
     同步等待一小段时间判断命令是否能正常启动，然后返回结果。
 
     Args:
         data: 请求数据
-            - session_id: Claude 会话 ID (必需)
+            - session_id: 会话 ID (必需)
             - project_dir: 项目工作目录 (必需)
             - prompt: 用户的问题 (必需)
-            - chat_id: 飞书聊天 ID（网关调用时必传，飞书事件必定携带；非空时触发 dissolved 自动复活）
+            - chat_id: 飞书聊天 ID（网关调用时必传）
             - message_id: 用户消息 ID (可选，用于回复式通知)
-            - claude_command: 指定使用的 Claude 命令 (可选)
+            - claude_command: 指定使用的命令 (可选)
 
     Returns:
         (success, response):
@@ -112,8 +106,9 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
-    # 验证 claude_command 合法性（如果指定了的话）
-    adapter = _get_adapter()
+    adapter = get_agent_adapter()
+
+    # 验证 command 合法性（如果指定了的话）
     if claude_command:
         if claude_command not in adapter.get_commands():
             return Response.error('invalid claude_command')
@@ -123,7 +118,8 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
         claude_command = session_data.get('claude_command', '')
 
     actual_cmd = adapter.resolve_command(claude_command)
-    logger.info(f"[continue] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
+    logger.info("[%s-continue] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
+                adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
 
     # 更新 session 映射：刷新 claude_command 和 chat_id
     # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
@@ -144,17 +140,13 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
 
     # 添加 session_id 到响应
     if result[0]:  # success
-        response = result[1]
-        response['session_id'] = session_id
+        result[1]['session_id'] = session_id
 
     return result
 
 
 def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    处理新建 Claude 会话的请求
-
-    使用 --session-id 参数发起新会话。
+    """处理新建会话的请求
 
     Args:
         data: 请求数据
@@ -164,7 +156,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
                 仅 group 模式下从 P2P 发起 /new 时为空，
                 由本函数调 do_ensure_chat 建群后回填
             - message_id: 原始消息 ID (可选，用于飞书网关回复用户消息)
-            - claude_command: 指定使用的 Claude 命令 (可选)
+            - claude_command: 指定使用的命令 (可选)
             - skip_user_prompt: 是否跳过首条 UserPromptSubmit 通知 (默认 True)；
                 group 模式 P2P 建群分支需置 False，让 hook 把首条 prompt 补发到新群
 
@@ -195,17 +187,19 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
+    adapter = get_agent_adapter()
+
     # 确定实际命令：网关传入 > store 已有值（/clear clone 继承）> 默认
-    adapter = _get_adapter()
     if claude_command:
-        # 验证 claude_command 合法性（如果指定了的话）
+        # 验证 command 合法性（如果指定了的话）
         if claude_command not in adapter.get_commands():
             return Response.error('invalid claude_command')
     else:
         session_data = session_store.get_session(session_id)
         claude_command = (session_data or {}).get('claude_command', '')
     actual_cmd = adapter.resolve_command(claude_command)
-    logger.info(f"[new] Session: {session_id}, Dir: {project_dir}, Cmd: {actual_cmd}, Prompt: {prompt[:50]}...")
+    logger.info("[%s-new] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
+                adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
 
     from config import FEISHU_SESSION_MODE
     is_group_mode = (FEISHU_SESSION_MODE == 'group')
@@ -214,16 +208,18 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         from handlers.callback import do_ensure_chat
         ok, ensure_result = do_ensure_chat(session_id, project_dir)
         if not ok:
-            logger.warning("[claude-new] ensure-chat failed for %s: %s",
-                           session_id, ensure_result)
+            logger.warning("[%s-new] ensure-chat failed for %s: %s",
+                           adapter.agent_type, session_id, ensure_result)
             return Response.error(f'Failed to create group chat: {ensure_result}')
         chat_id = ensure_result
-        logger.info("[claude-new] ensure-chat created group for %s: %s", session_id, chat_id)
+        logger.info("[%s-new] ensure-chat created group for %s: %s",
+                    adapter.agent_type, session_id, chat_id)
 
     # 写入 claude_command 等业务属性（与 do_ensure_chat 的"建群"职责解耦：
     # group 分支补写、非 group 分支首次写，统一一处）
     session_store.save(session_id, chat_id, claude_command=actual_cmd, project_dir=project_dir)
-    logger.info(f"[claude-new] Saved mapping: {session_id} -> {chat_id}")
+    logger.info("[%s-new] Saved mapping: %s -> %s",
+                adapter.agent_type, session_id, chat_id)
 
     # 防御性 unmute：新会话通常不会有 mute 状态，此处幂等调用，确保不会意外静音
     if session_store.unmute_session(session_id) is True and chat_id:
@@ -236,7 +232,6 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         session_store.set_skip_next_user_prompt(session_id)
 
     # 通过 agent 适配层启动进程
-    adapter = _get_adapter()
     result = launch_agent(
         adapter, session_id, project_dir, prompt,
         chat_id, message_id, session_mode='new',
@@ -244,16 +239,10 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         on_error=_send_error_notification)
     if result[0]:  # success
         response = result[1]
-        # Codex 路径：用从输出捕获的真实 session ID 替换临时 ID
+        # launch_agent 内部已完成 rename，这里只取最终 session_id
         captured_id = response.pop('captured_session_id', None)
-        if captured_id and captured_id != session_id:
-            if session_store.rename_session(session_id, captured_id):
-                logger.info("[new] Session ID replaced: %s -> %s",
-                            session_id, captured_id)
-                session_id = captured_id
-            else:
-                logger.warning("[new] Failed to rename session %s -> %s, keeping original",
-                               session_id, captured_id)
+        if captured_id:
+            session_id = captured_id
         response['session_id'] = session_id
 
     return result
@@ -276,13 +265,16 @@ def _send_error_notification(chat_id: str, message_id: str, error_msg: str):
     """
     from handlers.utils import reply_feishu_text
 
+    adapter = get_agent_adapter()
+    agent_name = adapter.agent_type.capitalize()
+
     truncated = error_msg[:MAX_NOTIFICATION_LENGTH] if len(error_msg) > MAX_NOTIFICATION_LENGTH else error_msg
-    text = f"❌ Claude 执行异常:\n{truncated}"
+    text = f"❌ {agent_name} 执行异常:\n{truncated}"
     success, result = reply_feishu_text(chat_id, message_id, text)
     if success:
-        logger.info(f"[claude] Sent error notification to {chat_id}")
+        logger.info("[%s] Sent error notification to %s", adapter.agent_type, chat_id)
     else:
-        logger.error(f"[claude] Failed to send error notification: {result}")
+        logger.error("[%s] Failed to send error notification: %s", adapter.agent_type, result)
 
 
 def _send_unmute_notification(chat_id: str, session_id: str, message_id: str = ''):
@@ -299,6 +291,6 @@ def _send_unmute_notification(chat_id: str, session_id: str, message_id: str = '
     text = f"已自动解除 session `{sid_tag}` 的静音。"
     success, result = reply_feishu_text(chat_id, message_id, text)
     if success:
-        logger.info(f"[claude] Sent unmute notification to {chat_id}")
+        logger.info("Sent unmute notification to %s", chat_id)
     else:
-        logger.error(f"[claude] Failed to send unmute notification: {result}")
+        logger.error("Failed to send unmute notification: %s", result)

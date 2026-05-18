@@ -53,7 +53,23 @@ log_input "$INPUT"
 HOOK_EVENT=$(json_get "$INPUT" "hook_event_name")
 HOOK_EVENT="${HOOK_EVENT:-unknown}"
 
-log "Hook router received event: $HOOK_EVENT"
+# Codex/Claude 原生 hook 由 CLI 直接启动，不一定继承服务端 launch_agent()
+# 注入的 AGENT_TYPE。hook 输入是事实来源；无法识别时才回退到默认配置。
+TRANSCRIPT_PATH_FOR_AGENT=$(json_get "$INPUT" "transcript_path")
+case "$TRANSCRIPT_PATH_FOR_AGENT" in
+    */.codex/sessions/*)
+        AGENT_TYPE="codex"
+        ;;
+    */.claude/*)
+        AGENT_TYPE="claude"
+        ;;
+    *)
+        AGENT_TYPE="$(get_config "AGENT_TYPE" "${AGENT_TYPE:-claude}")"
+        ;;
+esac
+export AGENT_TYPE
+
+log "Hook router received event: $HOOK_EVENT, agent: $AGENT_TYPE"
 
 # =============================================================================
 # 路由分发

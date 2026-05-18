@@ -102,8 +102,9 @@ class AutoRegister:
             FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
             FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
             DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
-            FEISHU_GROUP_DISSOLVE_DAYS, get_claude_commands
+            FEISHU_GROUP_DISSOLVE_DAYS
         )
+        from agents import get_agent_adapter
 
         logger.info(
             f"[auto-register] Starting registration in background: "
@@ -118,7 +119,7 @@ class AutoRegister:
             reply_in_thread=FEISHU_REPLY_IN_THREAD,
             at_bot_only=FEISHU_AT_BOT_ONLY,
             session_mode=FEISHU_SESSION_MODE,
-            claude_commands=get_claude_commands(),
+            claude_commands=get_agent_adapter().get_commands(),
             default_chat_dir=DEFAULT_CHAT_DIR,
             default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
             group_name_prefix=FEISHU_GROUP_NAME_PREFIX,

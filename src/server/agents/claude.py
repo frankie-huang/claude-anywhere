@@ -11,7 +11,7 @@ import shlex
 import sys
 from typing import Dict, List
 
-from agents import AgentAdapter
+from agents import AgentAdapter, expand_template
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ClaudeAdapter(AgentAdapter):
         # -- 分隔符确保 prompt 中的 --flag 不会被 CLI 误解析为参数
         args_argv = ['--print', session_flag, session_id] + mcp_argv + ['--', prompt]
 
-        return _expand_template(template, cmd_argv, args_argv)
+        return expand_template(template, cmd_argv, args_argv)
 
     def build_debug_command_string(self, command_name: str, session_id: str,
                                    session_mode: str) -> str:
@@ -72,7 +72,7 @@ class ClaudeAdapter(AgentAdapter):
         session_flag = '--session-id' if session_mode == 'new' else '--resume'
         debug_args = ['--print', session_flag, session_id, '--', 'PROMPT']
 
-        return _expand_template(template, cmd_argv, debug_args)
+        return expand_template(template, cmd_argv, debug_args)
 
     def build_env(self, base_env: Dict[str, str]) -> Dict[str, str]:
         """清除 CLAUDECODE 环境变量，避免嵌套会话检测阻止子会话启动
@@ -128,48 +128,3 @@ def _get_mcp_args(project_dir: str, session_id: str) -> List[str]:
     return ['--permission-prompt-tool', MCP_TOOL_NAME, '--mcp-config', config_json]
 
 
-def _shlex_join(argv: List[str]) -> str:
-    """shlex.join 的 Python 3.6 兼容版"""
-    return ' '.join(shlex.quote(a) for a in argv)
-
-
-def _expand_template(template: str, cmd_argv: List[str],
-                     args_argv: List[str]) -> str:
-    """根据模板把 cmd 和 args 组装成 shell 命令字符串
-
-    占位符展开规则:
-      - 裸占位符 {args}  → 各参数独立 shell-quote 后拼接(适合直接透传给 claude)
-      - 引号占位符 "{args}" / '{args}' → 整体打包为一个 shell 参数
-        (用 shlex.quote 包裹, 确保 prompt 中的引号/空格不会破坏外层 shell 解析)
-      - {cmd} 同理
-
-    Args:
-        template: 模板字符串, 如 '{cmd} {args}' 或 '{cmd} -a "{args}"'
-        cmd_argv: claude 命令 argv 列表, 如 ['claude'] 或 ['ccsdk', 'code', '-t', 'claude']
-        args_argv: claude 参数 argv 列表, 如 ['--print', '--resume', 'sid', '--', 'prompt']
-
-    Returns:
-        可直接传给 shell 执行的命令字符串
-    """
-    # posix=False 保留引号字符, 用于区分裸占位符和引号占位符
-    tokens = shlex.split(template, posix=False)
-    cmd_joined = _shlex_join(cmd_argv)
-    args_joined = _shlex_join(args_argv)
-
-    result = []
-    for tok in tokens:
-        # 检测是否被成对引号包裹(单或双)
-        quoted = len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'")
-        inner = tok[1:-1] if quoted else tok
-
-        if inner == '{cmd}':
-            # 裸占位符 → 展开为多个独立 argv; 引号占位符 → 合成单个 argv
-            result.extend(cmd_argv) if not quoted else result.append(cmd_joined)
-        elif inner == '{args}':
-            result.extend(args_argv) if not quoted else result.append(args_joined)
-        else:
-            # 普通 token(如 -a) → 原样 append
-            replaced = inner.replace('{cmd}', cmd_joined).replace('{args}', args_joined)
-            result.append(replaced)
-
-    return _shlex_join(result)
