@@ -26,14 +26,9 @@ class ClaudeAdapter(AgentAdapter):
     def agent_type(self) -> str:
         return 'claude'
 
-    def resolve_command(self, command_name: str = '') -> str:
-        """解析 Claude 命令
-
-        优先使用传入的 command_name，否则从配置列表取默认值。
-        """
-        if command_name:
-            return command_name
-        return self.get_commands()[0]
+    @property
+    def display_name(self) -> str:
+        return 'Claude Code'
 
     def get_commands(self) -> List[str]:
         """获取 Claude 可用命令列表"""

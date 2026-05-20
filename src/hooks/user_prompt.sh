@@ -57,9 +57,9 @@ send_user_prompt_async() {
 
     log "UserPromptSubmit: session=$SESSION_ID, prompt=${PROMPT_CONTENT:0:50}..."
 
-    # 前置解析 chat_id 并检查 mute 状态。Codex 新会话可能先用临时
-    # session_id 建 mapping，真实 session_id 会在本 hook 里首次出现；
-    # 提前解析可让 callback 先完成 pending mapping 迁移，再检查 skip 标志。
+    # 解析 chat_id 并检查 mute 状态
+    # 注：Codex 新会话的真实 session_id 可能先在此 hook 出现，resolve 会
+    # 触发 callback 侧的 adopt_pending_session 完成临时 ID → 真实 ID 迁移
     local RESOLVED_CHAT_ID
     RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
     if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then

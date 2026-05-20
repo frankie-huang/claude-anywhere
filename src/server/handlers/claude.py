@@ -124,7 +124,8 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     # 更新 session 映射：刷新 claude_command 和 chat_id
     # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
     # chat_id 来自飞书消息事件（P2P / 群聊均必定非空），非空 chat_id 自动清除 dissolved
-    session_store.save(session_id, chat_id, claude_command=actual_cmd)
+    session_store.save(session_id, chat_id, claude_command=actual_cmd,
+                       agent_type=adapter.agent_type)
     # 用户发送了新消息，自动解除静音
     if session_store.unmute_session(session_id) is True and chat_id:
         _send_unmute_notification(chat_id, session_id, message_id)
@@ -137,11 +138,6 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
         chat_id, message_id, session_mode='resume',
         command_name=actual_cmd,
         on_error=_send_error_notification)
-
-    # 添加 session_id 到响应
-    if result[0]:  # success
-        result[1]['session_id'] = session_id
-
     return result
 
 
@@ -217,7 +213,8 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
 
     # 写入 claude_command 等业务属性（与 do_ensure_chat 的"建群"职责解耦：
     # group 分支补写、非 group 分支首次写，统一一处）
-    session_store.save(session_id, chat_id, claude_command=actual_cmd, project_dir=project_dir)
+    session_store.save(session_id, chat_id, claude_command=actual_cmd,
+                       project_dir=project_dir, agent_type=adapter.agent_type)
     logger.info("[%s-new] Saved mapping: %s -> %s",
                 adapter.agent_type, session_id, chat_id)
 
@@ -237,14 +234,6 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         chat_id, message_id, session_mode='new',
         command_name=actual_cmd,
         on_error=_send_error_notification)
-    if result[0]:  # success
-        response = result[1]
-        # launch_agent 内部已完成 rename，这里只取最终 session_id
-        captured_id = response.pop('captured_session_id', None)
-        if captured_id:
-            session_id = captured_id
-        response['session_id'] = session_id
-
     return result
 
 
@@ -266,10 +255,9 @@ def _send_error_notification(chat_id: str, message_id: str, error_msg: str):
     from handlers.utils import reply_feishu_text
 
     adapter = get_agent_adapter()
-    agent_name = adapter.agent_type.capitalize()
 
     truncated = error_msg[:MAX_NOTIFICATION_LENGTH] if len(error_msg) > MAX_NOTIFICATION_LENGTH else error_msg
-    text = f"❌ {agent_name} 执行异常:\n{truncated}"
+    text = f"❌ {adapter.display_name} 执行异常:\n{truncated}"
     success, result = reply_feishu_text(chat_id, message_id, text)
     if success:
         logger.info("[%s] Sent error notification to %s", adapter.agent_type, chat_id)

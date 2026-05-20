@@ -27,14 +27,10 @@ class CodexAdapter(AgentAdapter):
         """Codex 新建会话时需要从输出中捕获 session ID"""
         return True
 
-    def resolve_command(self, command_name: str = '') -> str:
-        """解析 Codex 命令
-
-        优先使用传入的 command_name，否则从配置列表取默认值。
-        """
-        if command_name:
-            return command_name
-        return self.get_commands()[0]
+    @property
+    def session_id_capture_timeout(self) -> int:
+        """Codex 首条 JSONL 事件等待时间"""
+        return 10
 
     def get_commands(self) -> List[str]:
         """获取 Codex 可用命令列表"""

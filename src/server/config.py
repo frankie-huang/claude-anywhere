@@ -97,6 +97,20 @@ def get_config(key: str, default: str = '') -> str:
     return default
 
 
+def reload_config():
+    """重新加载 .env 文件
+
+    当 .env 文件内容变化后调用此函数刷新缓存。
+    注意：此函数仅刷新内部缓存，不会更新模块级导出变量
+    （如 PERMISSION_REQUEST_TIMEOUT、FEISHU_APP_ID 等）。其他模块通过
+    from config import XXX 获取的值仍为模块首次加载时的旧值。
+    如需获取最新值，应直接调用 get_config()。
+    """
+    global _env_file_cache
+    _env_file_cache = None
+    _load_env_file()
+
+
 def get_config_positive_int(key: str, default: int) -> int:
     """获取正整数配置值
 
@@ -140,6 +154,11 @@ def get_close_page_timeout() -> int:
         超时秒数
     """
     return get_config_positive_int('CALLBACK_PAGE_CLOSE_DELAY', DEFAULT_CALLBACK_PAGE_CLOSE_DELAY)
+
+
+# =============================================================================
+# Agent 配置
+# =============================================================================
 
 
 def get_agent_type() -> str:
@@ -198,22 +217,34 @@ def _parse_command_list(config_key: str, default: str) -> List[str]:
     return [raw]
 
 
+def _parse_args_template(config_key: str) -> str:
+    """解析命令参数模板配置
+
+    占位符 {cmd} 和 {args} 的展开语义见 agents.expand_template。
+
+    Args:
+        config_key: 配置项名称
+
+    Returns:
+        模板字符串, 默认 '{cmd} {args}'
+    """
+    raw = get_config(config_key, '').strip()
+    return raw if raw else '{cmd} {args}'
+
+
+# ── Claude ──
+
 def get_claude_commands() -> List[str]:
     """解析 CLAUDE_COMMAND 配置为命令列表"""
     return _parse_command_list('CLAUDE_COMMAND', 'claude')
 
 
 def get_claude_args_template() -> str:
-    """获取 CLAUDE_ARGS_TEMPLATE 配置
+    """获取 CLAUDE_ARGS_TEMPLATE 配置"""
+    return _parse_args_template('CLAUDE_ARGS_TEMPLATE')
 
-    占位符 {cmd} 和 {args} 的展开语义见 agents.expand_template。
 
-    Returns:
-        模板字符串, 默认 '{cmd} {args}'
-    """
-    raw = get_config('CLAUDE_ARGS_TEMPLATE', '').strip()
-    return raw if raw else '{cmd} {args}'
-
+# ── Codex ──
 
 def get_codex_commands() -> List[str]:
     """解析 CODEX_COMMAND 配置为命令列表"""
@@ -221,47 +252,8 @@ def get_codex_commands() -> List[str]:
 
 
 def get_codex_args_template() -> str:
-    """获取 CODEX_ARGS_TEMPLATE 配置
-
-    占位符语义与 CLAUDE_ARGS_TEMPLATE 相同。
-
-    Returns:
-        模板字符串, 默认 '{cmd} {args}'
-    """
-    raw = get_config('CODEX_ARGS_TEMPLATE', '').strip()
-    return raw if raw else '{cmd} {args}'
-
-
-def get_session_mode() -> str:
-    """获取会话模式
-
-    优先级：
-    1. FEISHU_SESSION_MODE 显式配置（message/thread/group）
-    2. 向后兼容：FEISHU_REPLY_IN_THREAD=true → 'thread'
-    3. 默认：'message'
-    """
-    mode = get_config('FEISHU_SESSION_MODE', '')
-    if mode in ('message', 'thread', 'group'):
-        return mode
-    # 向后兼容：读取已废弃的 FEISHU_REPLY_IN_THREAD
-    reply_in_thread = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
-    if reply_in_thread:
-        return 'thread'
-    return 'message'
-
-
-def reload_config():
-    """重新加载 .env 文件
-
-    当 .env 文件内容变化后调用此函数刷新缓存。
-    注意：此函数仅刷新内部缓存，不会更新模块级导出变量
-    （如 PERMISSION_REQUEST_TIMEOUT、FEISHU_APP_ID 等）。其他模块通过
-    from config import XXX 获取的值仍为模块首次加载时的旧值。
-    如需获取最新值，应直接调用 get_config()。
-    """
-    global _env_file_cache
-    _env_file_cache = None
-    _load_env_file()
+    """获取 CODEX_ARGS_TEMPLATE 配置"""
+    return _parse_args_template('CODEX_ARGS_TEMPLATE')
 
 
 # =============================================================================
@@ -387,6 +379,24 @@ FEISHU_AT_BOT_ONLY = get_config('FEISHU_AT_BOT_ONLY', 'false').lower() in ('true
 # True: 回复消息仅出现在话题详情中，不会冒泡到群聊主界面
 # False (默认): 回复消息正常显示在群聊主界面
 FEISHU_REPLY_IN_THREAD = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
+
+def get_session_mode() -> str:
+    """获取会话模式
+
+    优先级：
+    1. FEISHU_SESSION_MODE 显式配置（message/thread/group）
+    2. 向后兼容：FEISHU_REPLY_IN_THREAD=true → 'thread'
+    3. 默认：'message'
+    """
+    mode = get_config('FEISHU_SESSION_MODE', '')
+    if mode in ('message', 'thread', 'group'):
+        return mode
+    # 向后兼容：读取已废弃的 FEISHU_REPLY_IN_THREAD
+    rit = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
+    if rit:
+        return 'thread'
+    return 'message'
+
 
 # 会话模式：message（普通消息）/ thread（话题回复）/ group（独立群聊）
 FEISHU_SESSION_MODE = get_session_mode()

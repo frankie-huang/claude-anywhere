@@ -414,7 +414,7 @@ def _handle_message_event(data: dict):
             gateway_ws_url = _get_gateway_ws_url()
             hint = "您（用户 ID：`%s`）尚未注册，无法使用此功能。" % user_id
             if gateway_ws_url:
-                hint += "\n\n请在部署了 Claude Code 的系统终端上执行以下命令完成注册：\n" \
+                hint += "\n\n请在部署了 CLI 的系统终端上执行以下命令完成注册：\n" \
                         "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
                         "\n如果网关地址（`--gateway-url`）非公网可达，请联系管理员获取对外可用的网关地址。" \
                         "\n\n注意：执行命令前，请先申请当前应用的使用权限，否则将无法接收到注册绑定卡片。如未申请，请先申请权限后再执行命令。" % (gateway_ws_url, user_id)
@@ -485,9 +485,9 @@ def _handle_message_event(data: dict):
     # 已注册但未配置默认目录：发送帮助卡片
     hint = "💡 我还不能直接对话哦，可选择以下方式使用：\n" \
            "- **发起新会话**\n\n" \
-           "发送 `/new` 指令创建 Claude 会话\n" \
+           "发送 `/new` 指令创建会话\n" \
            "- **继续会话**\n\n" \
-           "回复 Claude 会话的消息即可继续对话\n" \
+           "回复会话消息即可继续对话\n" \
            "- **指定默认目录**\n\n" \
            "在 `.env` 中配置 `DEFAULT_CHAT_DIR` 并重启服务，即可直接发消息对话"
     _run_in_background(_send_help_card, (binding, chat_id, message_id, hint))
@@ -935,7 +935,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
         # | 继续会话(表情失败时) | 回退发送 ⏳ 文本消息                         | 新发送的通知消息 ID          |
         if is_new:
             # 新建会话 - 发送文本消息，展示会话信息
-            message = f"🆕 Claude 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
+            message = f"🆕 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
             if claude_command:
                 message += f"\n🔧 命令: `{claude_command}`"
             if session_id:
@@ -960,20 +960,20 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
 
             # 表情回应失败或无 reply_to 时，回退为文本消息
             if not success:
-                message = "⏳ Claude 正在处理您的问题，请稍候..."
+                message = "⏳ 正在处理您的问题，请稍候..."
                 success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
                                                               reply_in_thread=reply_in_thread)
 
     elif status == 'completed':
         # 快速完成
         output = response.get('output', '')
-        message = f"✅ Claude 已完成: {_sanitize_user_content(output, 50)}" if output else "✅ Claude 已完成"
+        message = f"✅ 已完成: {_sanitize_user_content(output, 50)}" if output else "✅ 已完成"
         success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
                                                       reply_in_thread=reply_in_thread)
 
     elif error:
         # 执行失败
-        error_prefix = "新建会话失败" if is_new else "Claude 执行失败"
+        error_prefix = "新建会话失败" if is_new else "Agent 执行失败"
         _send_error_notification(chat_id, f"{error_prefix}: {error}", reply_to=reply_to,
                                  session_id=session_id, project_dir=project_dir,
                                  reply_in_thread=reply_in_thread)
@@ -4329,7 +4329,7 @@ def _handle_clear_command(data: dict, args: str) -> None:
     # 幂等：上次 /clear 后还没发消息，不重复 clone
     if current.get('new_session'):
         _run_in_background(_send_notice_message,
-                           (chat_id, "会话上下文已清空，下次发送消息将自动创建新 Claude 会话。",
+                           (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
                             message_id))
         return
 
@@ -4364,7 +4364,7 @@ def _handle_clear_command(data: dict, args: str) -> None:
     logger.info("[feishu] /clear: owner=%s chat=%s old=%s new=%s",
                 owner_id, chat_id, old_session_id[:8], new_session_id[:8])
     _run_in_background(_send_notice_message,
-                       (chat_id, "会话上下文已清空，下次发送消息将自动创建新 Claude 会话。",
+                       (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
                         message_id))
 
 
@@ -4388,14 +4388,14 @@ def _handle_help_command(data: dict, args: str) -> None:
 #   brief: 简短说明
 #   examples: [(示例, 说明), ...]
 _COMMANDS = {
-    'new': (_handle_new_command, False, "发起新的 Claude 会话", [
+    'new': (_handle_new_command, False, "发起新会话", [
         ("/new", "收到卡片，完善会话信息（指定工作目录，填写提示词等）后发起新会话"),
         ("/new prompt", "- 回复已有会话消息时 - 继承工作目录发起新会话\n- 已配置 `DEFAULT_CHAT_DIR` - 从默认目录发起新会话\n- 未配置 `DEFAULT_CHAT_DIR` - 收到卡片完善会话信息"),
         ("/new --dir=/path prompt", "指定工作目录发起新会话"),
-        ("/new --cmd=0 prompt", "指定 Claude Command 发起新会话（需要提前配置 `CLAUDE_COMMAND`）"),
+        ("/new --cmd=0 prompt", "指定 Command 发起新会话（需要提前配置 `CLAUDE_COMMAND` 或 `CODEX_COMMAND`）"),
     ]),
     'reply': (_handle_reply_command, False, "回复消息时继续会话", [
-        ("/reply --cmd=0 prompt", "指定 Claude Command 继续会话（需要提前配置 `CLAUDE_COMMAND`）"),
+        ("/reply --cmd=0 prompt", "指定 Command 继续会话（需要提前配置 `CLAUDE_COMMAND` 或 `CODEX_COMMAND`）"),
     ]),
     'mute': (_handle_mute_command, False, "静音会话或目录", [
         ("/mute", "静音当前会话"),

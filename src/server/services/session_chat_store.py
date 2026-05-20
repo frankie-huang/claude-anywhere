@@ -29,7 +29,6 @@ gateway 转发 /cb/claude/continue 时 callback 校验 session 是否存在，
 import json
 import logging
 import os
-import shlex
 import tempfile
 import threading
 import time
@@ -89,14 +88,16 @@ class SessionChatStore:
     # =========================================================================
 
     def save(self, session_id: str, chat_id: str,
-             project_dir: str = '', claude_command: str = '') -> bool:
+             project_dir: str = '', agent_type: str = '',
+             claude_command: str = '') -> bool:
         """保存 session 属性（merge 方式，不传的字段保留旧值）
 
         Args:
-            session_id: Claude 会话 ID
+            session_id: 会话 ID
             chat_id: 飞书群聊 ID；空串视为不覆盖旧值，非空时自动清除 dissolved 标记（复活）
             project_dir: 项目目录（空串视为不覆盖）
-            claude_command: Claude 命令（空串视为不覆盖）
+            agent_type: agent 类型标识（'claude'/'codex'，空串视为不覆盖）
+            claude_command: 命令字符串（空串视为不覆盖）
 
         Returns:
             是否保存成功
@@ -115,6 +116,8 @@ class SessionChatStore:
                 entry['updated_at'] = int(time.time())
                 if claude_command:
                     entry['claude_command'] = claude_command
+                if agent_type:
+                    entry['agent_type'] = agent_type
                 if project_dir:
                     entry['project_dir'] = project_dir
                 # chat_id 变更时清掉旧 last_message_id（旧消息链不再适用）
@@ -201,7 +204,7 @@ class SessionChatStore:
                         continue
                     if now - int(entry.get('updated_at', 0) or 0) > max_age_seconds:
                         continue
-                    if not _command_matches_agent(entry.get('claude_command', ''), agent_type):
+                    if entry.get('agent_type', '') != agent_type:
                         continue
                     if not entry.get('skip_next_user_prompt') and entry.get('last_message_id'):
                         continue
@@ -607,16 +610,3 @@ class SessionChatStore:
             return False
 
 
-def _command_matches_agent(command: str, agent_type: str) -> bool:
-    if not command or not agent_type:
-        return False
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        argv = command.split()
-    executable = os.path.basename(argv[0]) if argv else ''
-    if agent_type == 'codex':
-        return executable == 'codex' or executable.startswith('codex-')
-    if agent_type == 'claude':
-        return executable == 'claude' or executable.startswith('claude-')
-    return executable == agent_type
