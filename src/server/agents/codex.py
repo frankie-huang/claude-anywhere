@@ -8,7 +8,7 @@ Codex 使用 `codex exec` 子命令进行非交互执行，通过 `--json`
 import json
 import logging
 import shlex
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from agents import AgentAdapter, expand_template
 
@@ -21,6 +21,10 @@ class CodexAdapter(AgentAdapter):
     @property
     def agent_type(self) -> str:
         return 'codex'
+
+    @property
+    def display_name(self) -> str:
+        return 'Codex'
 
     @property
     def needs_output_session_id(self) -> bool:
@@ -71,7 +75,7 @@ class CodexAdapter(AgentAdapter):
         cmd_argv = shlex.split(cmd)
 
         if session_mode == 'new':
-            debug_args = ['exec', '--json', 'PROMPT']
+            debug_args = ['exec', '--json', '--cd', 'DIR', 'PROMPT']
         else:
             debug_args = ['exec', 'resume', '--json', session_id, 'PROMPT']
 
@@ -97,5 +101,3 @@ class CodexAdapter(AgentAdapter):
         except (ValueError, TypeError, AttributeError):
             pass
         return None
-
-

@@ -435,16 +435,18 @@ _build_at_user_tag() {
 
 _agent_display_name() {
     case "${AGENT_TYPE:-claude}" in
+        claude) echo "Claude Code" ;;
         codex) echo "Codex" ;;
-        *) echo "Claude Code" ;;
+        *) echo "${AGENT_TYPE}" ;;
     esac
 }
 
 _agent_resume_command() {
     local session_id="$1"
     case "${AGENT_TYPE:-claude}" in
+        claude) echo "claude --resume $session_id" ;;
         codex) echo "codex resume $session_id" ;;
-        *) echo "claude --resume $session_id" ;;
+        *) echo "${AGENT_TYPE} --resume $session_id" ;;
     esac
 }
 
@@ -885,17 +887,18 @@ _get_chat_id() {
 
     # 调用 Callback 后端的 /cb/session/get-chat-id 接口查询
     # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
+    # 传入 agent_type 用于 auto-mute 创建占位 session 时写入正确的 agent 类型
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
+    local agent_type="${AGENT_TYPE:-claude}"
     local request_body
-    local agent_type="${AGENT_TYPE:-}"
     if [ -n "$project_dir" ]; then
         local escaped_dir
         escaped_dir=$(json_escape "$project_dir")
-        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\",\"agent_type\":\"$(json_escape "$agent_type")\"}"
+        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_dir\"}"
     else
-        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$(json_escape "$agent_type")\"}"
+        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\"}"
     fi
 
     local response
@@ -961,8 +964,9 @@ _ensure_chat() {
     escaped_project_dir=$(json_escape "$project_dir")
 
     local response
+    local agent_type="${AGENT_TYPE:-claude}"
     response=$(_do_curl_post "${callback_url}/cb/session/ensure-chat" \
-        "{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_project_dir\"}" \
+        "{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_project_dir\"}" \
         "cb/session/ensure-chat" \
         "$(_get_auth_token)")
 

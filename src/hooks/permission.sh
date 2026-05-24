@@ -553,9 +553,9 @@ output_decision() {
 
     log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt, agent=${AGENT_TYPE:-claude}"
 
-    # Codex 决策格式：仅支持 behavior + message
-    # 注意：Codex 源码对 interrupt/updatedInput/updatedPermissions 均 fail closed，不能传
     if [ "${AGENT_TYPE:-}" = "codex" ]; then
+        # Codex 格式：仅支持 behavior + message
+        # Codex 源码对 interrupt/updatedInput/updatedPermissions 均 fail closed，不能传
         local codex_behavior="$behavior"
         if [ "$codex_behavior" != "allow" ]; then
             codex_behavior="deny"
@@ -584,31 +584,20 @@ print(json.dumps(data, ensure_ascii=False))
         else
             printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s"}}}\n' "$codex_behavior"
         fi
-        log "Decision output complete (codex format)"
-        return
-    fi
-
-    # Claude 格式
-    local decision_json
-
-    if [ "$behavior" = "allow" ]; then
-        decision_json='{"behavior": "allow"}'
-    elif [ "$interrupt" = "true" ]; then
-        decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
     else
-        decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\"}"
+        # Claude 格式：支持 behavior + message + interrupt
+        local decision_json
+        if [ "$behavior" = "allow" ]; then
+            decision_json='{"behavior": "allow"}'
+        elif [ "$interrupt" = "true" ]; then
+            decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
+        else
+            decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\"}"
+        fi
+        printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":%s}}\n' "$decision_json"
     fi
 
-    cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": ${decision_json}
-  }
-}
-EOF
-
-    log "Decision output complete (claude format)"
+    log "Decision output complete"
 }
 
 # =============================================================================

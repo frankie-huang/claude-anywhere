@@ -14,7 +14,7 @@
 ### 核心功能
 
 - **可交互权限控制** - 飞书卡片 4 键操作（批准/始终允许/拒绝/中断）
-- **飞书回复继续会话** - 直接回复飞书消息在 Claude session 中继续提问（OpenAPI 模式）
+- **飞书回复继续会话** - 直接回复飞书消息继续提问（OpenAPI 模式）
 - **任务完成通知** - 处理完成后自动发送响应摘要和会话标识
 - **优雅降级** - 回调服务不可用时自动降级为仅通知模式
 - **权限持久化** - "始终允许"自动写入项目权限规则
@@ -74,7 +74,7 @@ claude-anywhere/
 │   │       ├── http_handler.py # HTTP 请求处理器（GET/POST 路由分发）
 │   │       ├── callback.py     # 权限回调处理器
 │   │       ├── feishu.py       # 飞书事件处理器（OpenAPI 网关）
-│   │       ├── claude.py       # Claude 会话继续处理器
+│   │       ├── agent.py        # Agent 会话处理器（新建/继续）
 │   │       ├── register.py     # 网关注册处理器
 │   │       ├── permission_mcp.py # MCP 权限审批服务（headless 模式）
 │   │       └── utils.py        # 处理器通用工具函数
@@ -305,7 +305,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 - **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch、ExitPlanMode 等 Claude Code 工具
 
 ### 会话继续（OpenAPI 模式）
-- **飞书回复继续会话**: 用户可回复飞书消息在对应的 Claude session 中继续提问
+- **飞书回复继续会话**: 用户可回复飞书消息在对应的会话中继续提问
 - **群聊支持**: 支持将消息发送到飞书群聊，Session 自动映射到对应群聊
 - **多实例支持**: 分离部署模式下，多个 Claude Code 实例可独立工作
 
@@ -320,7 +320,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 - **飞书长连接事件接收**: 支持 longpoll 模式接收飞书事件，无需公网端点（需 lark-oapi SDK）
 
 ### 通知功能
-- **任务完成通知**: Claude 处理完成后自动发送飞书通知，包含响应摘要
+- **任务完成通知**: Agent 处理完成后自动发送飞书通知，包含响应摘要
 - **延迟发送**: 支持配置延迟时间，避免快速连续请求时的消息轰炸
 - **通知 @ 用户**: 支持在通知中 @ 指定用户或所有人
 
@@ -335,12 +335,12 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 - ✅ **权限通知延迟发送**: 支持配置延迟时间，避免快速连续请求时的消息轰炸（`PERMISSION_NOTIFY_DELAY`）
 - ✅ **飞书卡片模板化**: 支持模块化的飞书卡片模板，便于自定义和扩展
 - ✅ **决策页面自动关闭**: 支持定时自动关闭决策页面（`CALLBACK_PAGE_CLOSE_DELAY`）
-- ✅ **任务完成通知**: Claude 处理完成后自动发送飞书通知，包含响应摘要和会话标识
+- ✅ **任务完成通知**: Agent 处理完成后自动发送飞书通知，包含响应摘要和会话标识
 - ✅ **Write 内容预览**: Write 工具权限卡片展示写入内容代码块预览
 - ✅ **超长内容截断提示**: Permission 请求（Bash/Edit/Write）和 Stop 事件的内容超长时显示截断提示
 
 ### OpenAPI 模式
-- ✅ **飞书回复继续会话**: 用户可回复飞书消息在对应的 Claude session 中继续提问
+- ✅ **飞书回复继续会话**: 用户可回复飞书消息在对应的会话中继续提问
 - ✅ **自动注册与双向认证**: Callback 服务启动时自动向网关注册，获取 `auth_token` 用于双向认证
 - ✅ **用户授权控制**: 分离部署模式下，新设备注册需用户在飞书中确认
 - ✅ **群聊支持**: 支持将消息发送到飞书群聊，Session 自动映射到对应群聊
@@ -372,7 +372,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `src/hooks/stop.sh` | 任务完成通知（含响应摘要） | Stop |
 | `src/server/main.py` | 权限回调服务（HTTP + Socket） | - |
 | `src/server/socket_client.py` | Socket 客户端（替代 socat） | - |
-| `src/server/handlers/claude.py` | Claude 会话继续处理器 | - |
+| `src/server/handlers/agent.py` | Agent 会话处理器（新建/继续） | - |
 | `src/server/services/message_session_store.py` | Message-Session 映射存储服务 | - |
 
 ## Shell 函数库说明
@@ -420,7 +420,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `http_handler.py` | HTTP 请求处理器（GET/POST 路由分发入口） | 全部 |
 | `callback.py` | 权限回调处理器（接收按钮操作） | `/cb/*` |
 | `feishu.py` | 飞书事件处理器（OpenAPI 网关） | `/gw/feishu/*` |
-| `claude.py` | Claude 会话继续处理器 | `/cb/claude/continue` |
+| `agent.py` | Agent 会话处理器 | `/cb/claude/new`, `/cb/claude/continue` |
 | `register.py` | 网关注册处理器 | `/gw/register` |
 | `permission_mcp.py` | MCP 权限审批服务（headless 模式） | MCP stdio |
 | `utils.py` | 处理器通用工具函数 | - |
@@ -673,30 +673,36 @@ FEISHU_OWNER_ID=ou_admin_user
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `AGENT_TYPE` | AI 编码代理类型，支持 `claude` 和 `codex` | `claude` |
+| `ENABLED_AGENTS` | 启用的 Agent，逗号分隔，支持 `claude`、`codex` 或 `claude,codex` | `claude` |
+| `DEFAULT_AGENT` | 默认 Agent，必须在 `ENABLED_AGENTS` 范围内 | `ENABLED_AGENTS` 的第一个 |
 | `DEFAULT_CHAT_DIR` | 默认聊天目录，配置后直接发消息即可自动创建/继续会话，详见下文 | 空（不启用） |
 | `DEFAULT_CHAT_FOLLOW_THREAD` | 默认聊天目录的话题跟随模式，详见下文 | `true` |
 | `CLAUDE_COMMAND` | Claude 命令，支持多命令列表如 `[claude, claude --model opus]`，详见下文 | `claude` |
-| `CODEX_COMMAND` | Codex 命令，仅当 `AGENT_TYPE=codex` 时生效，格式同 `CLAUDE_COMMAND` | `codex` |
-| `CODEX_ARGS_TEMPLATE` | Codex 命令行模板，仅当 `AGENT_TYPE=codex` 时生效 | `{cmd} {args}` |
+| `CLAUDE_ARGS_TEMPLATE` | Claude 命令行模板，详见下文 | `{cmd} {args}` |
+| `CODEX_COMMAND` | Codex 命令，仅当 `ENABLED_AGENTS` 包含 `codex` 时生效，格式同 `CLAUDE_COMMAND` | `codex` |
+| `CODEX_ARGS_TEMPLATE` | Codex 命令行模板，仅当 `ENABLED_AGENTS` 包含 `codex` 时生效 | `{cmd} {args}` |
 
-**Agent 类型切换**
+**多 Agent 支持**
 
-系统支持 Claude Code 和 OpenAI Codex 两种 AI 编码代理后端。通过 `AGENT_TYPE` 配置切换：
+系统支持 Claude Code 和 OpenAI Codex 两种 AI 编码代理后端，可同时启用：
 
 ```bash
-# 使用 Claude Code（默认）
-AGENT_TYPE=claude
+# 仅使用 Claude Code（默认）
+ENABLED_AGENTS=claude
 
-# 使用 OpenAI Codex
-AGENT_TYPE=codex
+# 仅使用 Codex
+ENABLED_AGENTS=codex
+
+# 同时启用，用户在 /new 卡片中选择
+ENABLED_AGENTS=claude,codex
+DEFAULT_AGENT=claude
 ```
 
 切换后需执行 `./setup.sh restart` 重启服务。两种 agent 的飞书交互体验一致（/new、/reply、权限审批卡片），主要差异在底层 CLI 调用方式和 session 管理策略。
 
 **默认聊天目录**
 
-配置 `DEFAULT_CHAT_DIR` 后，无需使用 `/new` 指令，直接发消息即可与 Claude 对话：
+配置 `DEFAULT_CHAT_DIR` 后，无需使用 `/new` 指令，直接发消息即可对话：
 
 ```bash
 DEFAULT_CHAT_DIR=/home/user/my-project
@@ -810,7 +816,7 @@ brew install python3 curl jq socat
 2. `src/hooks/permission.sh` 发送飞书交互卡片（4 个按钮）：
    - **批准运行** - 允许这一次执行
    - **始终允许** - 允许并写入规则
-   - **拒绝运行** - 拒绝，Claude 可继续尝试其他方式
+   - **拒绝运行** - 拒绝，Agent 可继续尝试其他方式
    - **拒绝并中断** - 拒绝并停止当前任务
 3. 用户点击按钮，决策通过 Unix Socket 返回给 Claude Code
 
@@ -822,10 +828,10 @@ brew install python3 curl jq socat
 
 ### 飞书回复继续会话（OpenAPI 模式）
 
-1. Claude 完成响应后，飞书通知包含 `session_id`
+1. Agent 完成响应后，飞书通知包含 `session_id`
 2. 用户直接回复飞书消息
 3. 网关通过 `message_id` 找到对应的 session
-4. 消息注入到 Claude session，继续对话
+4. 消息注入到会话中，继续对话
 
 > 详细原理请参考 [飞书消息回复继续会话方案](docs/design/FEISHU_SESSION_CONTINUE.md)
 
@@ -866,7 +872,7 @@ brew install python3 curl jq socat
 
 ### 架构设计
 - [飞书网关认证与注册机制](docs/design/GATEWAY_AUTH.md) - Callback 后端自动注册与双向认证机制
-- [飞书消息回复继续会话方案](docs/design/FEISHU_SESSION_CONTINUE.md) - 飞书回复继续 Claude 会话的设计与实现
+- [飞书消息回复继续会话方案](docs/design/FEISHU_SESSION_CONTINUE.md) - 飞书回复继续会话的设计与实现
 - [飞书话题内回复模式](docs/design/FEISHU_THREAD_REPLY.md) - 同一会话消息收敛到话题流的链式回复设计
 - [交互式 Claude 会话调研](docs/design/INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) - 交互式 CLI 会话方案调研报告
 - [Headless 权限审批 MCP 方案](docs/design/PERMISSION_PROMPT_TOOL.md) - `--permission-prompt-tool` MCP 权限审批设计

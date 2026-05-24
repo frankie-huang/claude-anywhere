@@ -7,7 +7,6 @@
 
 import logging
 import os
-import select
 import shlex
 import subprocess
 import threading
@@ -44,6 +43,17 @@ class AgentAdapter(ABC):
     @abstractmethod
     def agent_type(self) -> str:
         """代理标识符: 'claude', 'codex', ..."""
+
+    @property
+    @abstractmethod
+    def display_name(self) -> str:
+        """面向用户的产品名（如 'Claude Code'、'Codex'）
+
+        每个 adapter 必须显式声明，确保新增 agent 时不会遗漏。
+
+        Returns:
+            产品名字符串，用于通知和卡片展示
+        """
 
     @abstractmethod
     def get_commands(self) -> List[str]:
@@ -85,18 +95,6 @@ class AgentAdapter(ABC):
         """
 
     # ── 子类可选覆盖（基类提供默认实现）──────────────
-
-    @property
-    def display_name(self) -> str:
-        """面向用户的产品名
-
-        默认将 agent_type 首字母大写（如 'codex' → 'Codex'）。
-        Claude 覆盖为 'Claude Code'。
-
-        Returns:
-            产品名字符串，用于通知和卡片展示
-        """
-        return self.agent_type.capitalize()
 
     @property
     def needs_output_session_id(self) -> bool:
@@ -228,31 +226,49 @@ def expand_template(template: str, cmd_argv: List[str],
 # Agent 工厂
 # =============================================
 
-_adapter_instance: Optional[AgentAdapter] = None
+_adapters: Dict[str, AgentAdapter] = {}
 
 
-def get_agent_adapter() -> AgentAdapter:
-    """根据 AGENT_TYPE 配置返回对应的 adapter 单例
+def get_agent_adapter(agent_type: Optional[str] = None) -> AgentAdapter:
+    """根据 agent_type 返回对应的 adapter（字典缓存）
+
+    Args:
+        agent_type: agent 类型标识，None 时使用 DEFAULT_AGENT 配置
 
     Returns:
         AgentAdapter 实例（ClaudeAdapter 或 CodexAdapter）
     """
-    global _adapter_instance
-    if _adapter_instance is not None:
-        return _adapter_instance
+    if agent_type is None:
+        from config import get_default_agent
+        agent_type = get_default_agent()
 
-    from config import get_agent_type
-    agent_type = get_agent_type()
+    if agent_type in _adapters:
+        return _adapters[agent_type]
 
     if agent_type == 'codex':
         from agents.codex import CodexAdapter
-        _adapter_instance = CodexAdapter()
+        adapter = CodexAdapter()
     else:
         from agents.claude import ClaudeAdapter
-        _adapter_instance = ClaudeAdapter()
+        adapter = ClaudeAdapter()
 
-    logger.info("Agent adapter initialized: %s", _adapter_instance.agent_type)
-    return _adapter_instance
+    _adapters[agent_type] = adapter
+    logger.info("Agent adapter initialized: %s", adapter.agent_type)
+    return adapter
+
+
+def get_all_agent_commands() -> Dict[str, List[str]]:
+    """获取所有启用 agent 的命令映射
+
+    Returns:
+        如 {'claude': ['claude', 'claude --model opus'], 'codex': ['codex']}
+    """
+    from config import get_enabled_agents
+    result: Dict[str, List[str]] = {}
+    for at in get_enabled_agents():
+        adapter = get_agent_adapter(at)
+        result[at] = adapter.get_commands()
+    return result
 
 
 # =============================================
@@ -289,7 +305,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
         on_error: 错误通知回调 (chat_id, message_id, error_msg) -> None
 
     Returns:
-        (success, response): response 中可能包含 captured_session_id（Codex 新建会话时）
+        (success, response): 成功时 response 包含 session_id（Codex 路径可能已 rename 为真实 ID）
     """
     from handlers.utils import build_shell_cmd, run_in_background
 
@@ -335,7 +351,14 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
     did_capture = adapter.needs_output_session_id and session_mode == 'new'
     if did_capture:
         captured_session_id = _capture_session_id(adapter, proc, log_prefix)
-        if captured_session_id and captured_session_id != session_id:
+        if not captured_session_id:
+            # 捕获失败说明 CLI 启动异常，终止进程并报错
+            proc.kill()
+            proc.wait()
+            error_msg = f"{adapter.display_name} 启动异常：未能在 {adapter.session_id_capture_timeout}s 内获取 session ID，请检查 CLI 是否正常"
+            logger.error("%s %s", log_prefix, error_msg)
+            return False, {'error': error_msg}
+        if captured_session_id != session_id:
             new_id = _rename_session_in_store(
                 session_id, captured_session_id, log_prefix)
             if new_id == captured_session_id:
@@ -359,8 +382,12 @@ def _capture_session_id(adapter: AgentAdapter, proc: subprocess.Popen,
                         log_prefix: str) -> Optional[str]:
     """从进程输出中捕获 session ID（Codex 路径）
 
-    循环读取 stdout 行，跳过非 JSON 内容（如代理配置、ANSI 输出），
-    直到找到可解析的 session ID 或超时。
+    启动 daemon 线程逐行读取 stdout 放入 Queue，主线程带超时消费。
+    跳过非 JSON 内容（如代理配置、ANSI 输出），直到找到可解析的
+    session ID 或超时。
+
+    使用线程+Queue 而非 select.select，避免 TextIOWrapper 内部缓冲
+    导致 select 误报超时的问题。
 
     Args:
         adapter: agent 适配器（提供 parse_session_id 方法）
@@ -371,8 +398,28 @@ def _capture_session_id(adapter: AgentAdapter, proc: subprocess.Popen,
         捕获到的 session ID，失败时返回 None
     """
     import time
+    from queue import Queue, Empty
+
     timeout = adapter.session_id_capture_timeout
     deadline = time.monotonic() + timeout
+
+    # daemon 线程逐行读取 stdout，EOF 或异常时放入 None 哨兵
+    line_queue = Queue()
+
+    def _reader():
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line_queue.put(line)
+        except (OSError, ValueError):
+            pass
+        line_queue.put(None)
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -380,12 +427,15 @@ def _capture_session_id(adapter: AgentAdapter, proc: subprocess.Popen,
                 logger.warning("%s Session ID capture timed out after %ss",
                                log_prefix, timeout)
                 break
-            line = _readline_with_timeout(proc.stdout, remaining)
-            if not line:
-                # 超时或进程退出
-                if proc.poll() is not None:
-                    logger.warning("%s Process exited before session ID captured",
-                                   log_prefix)
+            try:
+                line = line_queue.get(timeout=remaining)
+            except Empty:
+                logger.warning("%s Session ID capture timed out after %ss",
+                               log_prefix, timeout)
+                break
+            if line is None:
+                logger.warning("%s Process exited before session ID captured",
+                               log_prefix)
                 break
             stripped = line.strip()
             if not stripped or not stripped.startswith('{'):
@@ -521,7 +571,6 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
             if stdout:
                 logger.debug("%s stdout: %s...", log_prefix,
                              stdout[:MAX_LOG_LENGTH])
-            _handle_late_session_id(agent_type, session_id, stdout)
         else:
             error_summary = (stderr.strip()[:MAX_LOG_LENGTH]
                              if stderr.strip() else '(无错误输出)')
@@ -589,7 +638,6 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
         if returncode == 0:
             logger.info("%s Detached process completed successfully, session: %s",
                         log_prefix, session_id)
-            _handle_late_session_id(agent_type, session_id, stdout_tail)
         else:
             error_output = stderr_tail or stdout_tail
             logger.warning(
@@ -630,51 +678,3 @@ def _drain_pipe(pipe: Any, tail_lines: int = 20) -> str:
     except (ValueError, OSError):
         pass  # pipe 已关闭
     return ''.join(tail).strip()
-
-
-def _readline_with_timeout(pipe: Any, timeout: float) -> str:
-    """带超时的管道单行读取，防止阻塞请求线程
-
-    已知限制: select.select 检测的是 OS pipe buffer，而 universal_newlines=True
-    的 TextIOWrapper 内部有 BufferedReader。若多行数据在同一次 read() 中被拉入
-    Python buffer，后续 select 会因 OS buffer 已空而误报超时。实际影响极低，因为
-    Codex 的 thread.started 事件几乎总是第一行输出。如需彻底解决可改用线程+Queue。
-
-    Args:
-        pipe: 可读的文件对象
-        timeout: 超时秒数
-
-    Returns:
-        读取到的一行文本，超时或错误时返回空字符串
-    """
-    if pipe is None:
-        return ''
-    try:
-        readable, _, _ = select.select([pipe], [], [], timeout)
-        if not readable:
-            return ''
-        return pipe.readline()
-    except (OSError, ValueError):
-        return ''
-
-
-def _handle_late_session_id(agent_type: str, session_id: str,
-                            stdout_text: str) -> None:
-    """从已排空的 stdout 中补捕 Codex session ID（启动超时后的兜底）
-
-    Args:
-        agent_type: agent 类型标识，非需要输出捕获的 agent 时直接返回
-        session_id: 当前 session ID（可能是临时 ID）
-        stdout_text: 已排空的 stdout 文本内容
-    """
-    if not stdout_text:
-        return
-    adapter = get_agent_adapter()
-    if not adapter.needs_output_session_id:
-        return
-    for line in stdout_text.splitlines():
-        captured_id = adapter.parse_session_id(line.strip())
-        if captured_id and captured_id != session_id:
-            _rename_session_in_store(session_id, captured_id,
-                                     '[%s]' % agent_type)
-            return

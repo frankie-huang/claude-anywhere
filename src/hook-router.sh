@@ -53,8 +53,8 @@ log_input "$INPUT"
 HOOK_EVENT=$(json_get "$INPUT" "hook_event_name")
 HOOK_EVENT="${HOOK_EVENT:-unknown}"
 
-# Codex/Claude 原生 hook 由 CLI 直接启动，不一定继承服务端 launch_agent()
-# 注入的 AGENT_TYPE。hook 输入是事实来源；无法识别时才回退到默认配置。
+# Hook 由 CLI 直接启动，进程环境中没有 AGENT_TYPE。
+# 从 transcript 路径推断 agent 类型；无法识别时回退到 DEFAULT_AGENT 配置。
 TRANSCRIPT_PATH_FOR_AGENT=$(json_get "$INPUT" "transcript_path")
 case "$TRANSCRIPT_PATH_FOR_AGENT" in
     */.codex/sessions/*)
@@ -64,7 +64,7 @@ case "$TRANSCRIPT_PATH_FOR_AGENT" in
         AGENT_TYPE="claude"
         ;;
     *)
-        AGENT_TYPE="$(get_config "AGENT_TYPE" "${AGENT_TYPE:-claude}")"
+        AGENT_TYPE="$(get_config "DEFAULT_AGENT" "claude")"
         ;;
 esac
 export AGENT_TYPE

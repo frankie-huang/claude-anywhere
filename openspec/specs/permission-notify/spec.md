@@ -93,24 +93,22 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 
 ### Requirement: Hook Configuration
 
-用户 SHALL 能够通过标准的 Claude Code hooks 配置机制注册权限通知脚本。
+系统 SHALL 根据 `AGENT_TYPE` 在对应 agent 的配置文件中注册 hook。
 
-#### Scenario: PermissionRequest Hook 配置
+#### Scenario: Claude hook 配置
 
-- **GIVEN** 用户希望在权限请求时收到通知并可远程控制
-- **WHEN** 用户在 `.claude/settings.json` 中配置 PermissionRequest hook
-- **THEN** 配置格式符合 Claude Code hooks 规范
-- **AND** 可以使用 matcher 指定监听的工具类型（如 "Bash", "Edit|Write", "*"）
-- **AND** hook 输入包含完整的 `tool_name` 和 `tool_input` 详情
-- **AND** hook 超时配置为 60 秒（允许用户响应时间）
+- **GIVEN** `AGENT_TYPE=claude`
+- **WHEN** 执行 hook 配置初始化
+- **THEN** 在 `~/.claude/settings.json` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
+- **AND** hook command 指向 `src/hook-router.sh`
 
-#### Scenario: 回调服务配置
+#### Scenario: Codex hook 配置
 
-- **GIVEN** 用户需要启用可交互权限控制
-- **WHEN** 用户配置系统
-- **THEN** 用户需要配置飞书 Webhook URL（`FEISHU_WEBHOOK_URL`）
-- **AND** 用户需要启动回调服务
-- **AND** 可选配置回调服务地址（`CALLBACK_SERVER_URL`，默认 `http://localhost:8080`）
+- **GIVEN** `AGENT_TYPE=codex`
+- **WHEN** 执行 hook 配置初始化
+- **THEN** 在 `~/.codex/config.toml` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
+- **AND** hook command 指向 `src/hook-router.sh`
+- **AND** `PermissionRequest` hook 的 timeout 为 `PERMISSION_REQUEST_TIMEOUT + 60` 秒
 
 ### Requirement: Interactive Card Buttons
 
@@ -208,37 +206,32 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 
 ### Requirement: Permission Script Integration
 
-permission-notify.sh 脚本 SHALL 与回调服务协作，等待用户通过飞书卡片做出决策，并将决策返回给 Claude Code。
+permission.sh SHALL 作为 Claude 和 Codex 的共享权限审批脚本，两种 agent 通过不同路径触发但共享同一套审批逻辑。
 
-#### Scenario: 脚本发起请求并等待响应
+#### Scenario: Claude 权限审批路径
 
-- **GIVEN** Claude Code 触发 PermissionRequest hook
-- **WHEN** permission-notify.sh 执行
-- **THEN** 脚本生成唯一请求 ID（格式：`{timestamp}-{uuid[:8]}`）
-- **AND** 通过 Unix Socket 将请求发送给回调服务
-- **AND** 阻塞等待用户响应（最长 55 秒）
+- **GIVEN** `AGENT_TYPE=claude`
+- **WHEN** Claude CLI 遇到需要权限的工具调用
+- **THEN** 通过 `--permission-prompt-tool` MCP 工具触发
+- **AND** `permission_mcp.py` 调用 `hook-router.sh` → `permission.sh`
+- **AND** `permission.sh` 发送飞书审批卡片并等待用户决策
 
-#### Scenario: 返回批准决策
+#### Scenario: Codex 权限审批路径
 
-- **GIVEN** 脚本正在等待用户响应
-- **WHEN** 用户点击"批准运行"按钮
-- **THEN** 脚本收到回调服务的通知
-- **AND** 脚本输出 `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}`
-- **AND** 脚本以退出码 0 结束
+- **GIVEN** `AGENT_TYPE=codex`
+- **WHEN** Codex CLI 遇到需要权限的工具调用
+- **THEN** 通过原生 `PermissionRequest` hook 直接触发
+- **AND** 调用 `hook-router.sh` → `permission.sh`
+- **AND** `permission.sh` 发送飞书审批卡片并等待用户决策
+- **AND** 不经过 `permission_mcp.py`
 
-#### Scenario: 返回拒绝决策
+#### Scenario: 审批卡片展示兼容
 
-- **GIVEN** 脚本正在等待用户响应
-- **WHEN** 用户点击"拒绝运行"按钮
-- **THEN** 脚本输出 `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "用户通过飞书拒绝"}}}`
-- **AND** 脚本以退出码 0 结束
-
-#### Scenario: 返回拒绝并中断决策
-
-- **GIVEN** 脚本正在等待用户响应
-- **WHEN** 用户点击"拒绝并中断"按钮
-- **THEN** 脚本输出 `{"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": "用户通过飞书拒绝并中断", "interrupt": true}}}`
-- **AND** 脚本以退出码 0 结束
+- **GIVEN** 权限请求来自 Codex
+- **AND** `tool_name` 为 Codex 工具名（如 `shell`、`apply_patch`）
+- **WHEN** `permission.sh` 构建飞书审批卡片
+- **THEN** 卡片正常展示 Codex 工具名和工具参数
+- **AND** 用户可以正常点击批准/拒绝按钮
 
 ### Requirement: Connection-Based Request Validity
 

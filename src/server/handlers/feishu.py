@@ -414,7 +414,7 @@ def _handle_message_event(data: dict):
             gateway_ws_url = _get_gateway_ws_url()
             hint = "您（用户 ID：`%s`）尚未注册，无法使用此功能。" % user_id
             if gateway_ws_url:
-                hint += "\n\n请在部署了 CLI 的系统终端上执行以下命令完成注册：\n" \
+                hint += "\n\n请在部署了 CLI（如 Claude Code、Codex 等）的系统终端上执行以下命令完成注册：\n" \
                         "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
                         "\n如果网关地址（`--gateway-url`）非公网可达，请联系管理员获取对外可用的网关地址。" \
                         "\n\n注意：执行命令前，请先申请当前应用的使用权限，否则将无法接收到注册绑定卡片。如未申请，请先申请权限后再执行命令。" % (gateway_ws_url, user_id)
@@ -463,6 +463,7 @@ def _handle_message_event(data: dict):
             if gs_store and owner_id:
                 gs_store.touch(owner_id, chat_id)
         # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
+        # agent_type 和 claude_command 不在路由表中，由 callback 侧从 session store 读取
         if route_info.get('new_session'):
             _run_in_background(_forward_new_request,
                                (binding, route_info['session_id'],
@@ -485,7 +486,7 @@ def _handle_message_event(data: dict):
     # 已注册但未配置默认目录：发送帮助卡片
     hint = "💡 我还不能直接对话哦，可选择以下方式使用：\n" \
            "- **发起新会话**\n\n" \
-           "发送 `/new` 指令创建会话\n" \
+           "发送 `/new` 指令创建新会话\n" \
            "- **继续会话**\n\n" \
            "回复会话消息即可继续对话\n" \
            "- **指定默认目录**\n\n" \
@@ -721,7 +722,7 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
 def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: str,
                                          project_dir: str, prompt: str,
                                          chat_id: str, message_id: str, chat_type: str = '',
-                                         claude_command: str = '') -> str:
+                                         claude_command: str = '', agent_type: str = '') -> str:
     """转发默认聊天新建会话请求，完成后将 session_id 持久化到 BindingStore
 
     此函数在后台线程运行，是 _forward_new_request 的包装：
@@ -732,7 +733,7 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: st
     """
     from services.binding_store import BindingStore
 
-    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, claude_command)
+    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, claude_command, agent_type)
 
     owner_id = binding.get('_owner_id', '') if binding else ''
     if session_id and owner_id:
@@ -807,6 +808,7 @@ def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
         _send_session_result_notification(chat_id, response_data, payload.get('project_dir', ''),
                                           is_new=is_new,
                                           claude_command=payload.get('claude_command', ''),
+                                          agent_type=payload.get('agent_type', ''),
                                           reply_to=reply_to,
                                           reply_in_thread=reply_in_thread,
                                           binding=binding,
@@ -853,7 +855,7 @@ def _extract_http_error_detail(http_error):
 
 def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
                               prompt: str, chat_id: str, message_id: str,
-                              claude_command: str = '') -> str:
+                              claude_command: str = '', agent_type: str = '') -> str:
     """转发继续会话请求到 Callback 后端
 
     Args:
@@ -864,6 +866,7 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         chat_id: 群聊 ID
         message_id: 用户消息 ID（用于回复）
         claude_command: 指定使用的 Claude 命令（可选）
+        agent_type: agent 类型（可选；handle_continue_session 从 session store 读取，此参数用于通知文案动态展示）
 
     Returns:
         session_id
@@ -885,6 +888,8 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
     }
     if claude_command:
         data['claude_command'] = claude_command
+    if agent_type:
+        data['agent_type'] = agent_type
 
     return _forward_claude_request(binding, '/cb/claude/continue',
                                    data, chat_id, reply_to=message_id,
@@ -893,6 +898,7 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
 
 def _send_session_result_notification(chat_id: str, response: dict, project_dir: str,
                                       is_new: bool = False, claude_command: str = '',
+                                      agent_type: str = '',
                                       reply_to: Optional[str] = None,
                                       reply_in_thread: bool = False,
                                       binding: Optional[Dict[str, Any]] = None,
@@ -904,7 +910,8 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
         response: Callback 返回的结果
         project_dir: 项目目录
         is_new: 是否为新建会话（True: 新建会话，False: 继续会话）
-        claude_command: 使用的 Claude 命令（可选，如 'opus', 'sonnet'）
+        claude_command: 使用的命令（可选）
+        agent_type: agent 类型（可选，用于动态显示 agent 名称）
         reply_to: 要回复的消息 ID（可选，用于链式回复）
         reply_in_thread: 是否收进话题详情
         binding: 绑定信息字典（包含 callback_url、auth_token、_owner_id，用于跨网络调用）
@@ -912,12 +919,14 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
     """
     from services.feishu_api import FeishuAPIService
     from services.message_session_store import MessageSessionStore
+    from agents import get_agent_adapter
 
     service = FeishuAPIService.get_instance()
     if not service or not service.enabled:
         logger.error("[feishu] FeishuAPIService not enabled, skipping notification")
         return
 
+    agent_display = get_agent_adapter(agent_type or None).display_name
     status = response.get('status', '')
     error = response.get('error', '')
     session_id = response.get('session_id', '')
@@ -935,7 +944,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
         # | 继续会话(表情失败时) | 回退发送 ⏳ 文本消息                         | 新发送的通知消息 ID          |
         if is_new:
             # 新建会话 - 发送文本消息，展示会话信息
-            message = f"🆕 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
+            message = f"🆕 {agent_display} 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
             if claude_command:
                 message += f"\n🔧 命令: `{claude_command}`"
             if session_id:
@@ -960,20 +969,20 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
 
             # 表情回应失败或无 reply_to 时，回退为文本消息
             if not success:
-                message = "⏳ 正在处理您的问题，请稍候..."
+                message = f"⏳ {agent_display} 正在处理您的问题，请稍候..."
                 success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
                                                               reply_in_thread=reply_in_thread)
 
     elif status == 'completed':
         # 快速完成
         output = response.get('output', '')
-        message = f"✅ 已完成: {_sanitize_user_content(output, 50)}" if output else "✅ 已完成"
+        message = f"✅ {agent_display} 已完成: {_sanitize_user_content(output, 50)}" if output else f"✅ {agent_display} 已完成"
         success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
                                                       reply_in_thread=reply_in_thread)
 
     elif error:
         # 执行失败
-        error_prefix = "新建会话失败" if is_new else "Agent 执行失败"
+        error_prefix = "新建会话失败" if is_new else f"{agent_display} 执行失败"
         _send_error_notification(chat_id, f"{error_prefix}: {error}", reply_to=reply_to,
                                  session_id=session_id, project_dir=project_dir,
                                  reply_in_thread=reply_in_thread)
@@ -1170,72 +1179,127 @@ def _get_binding_from_event(feishu_event: Dict[str, Any]) -> Optional[Dict[str, 
     return None
 
 
-def _resolve_claude_command_from_binding(
+def _build_agent_commands_from_binding(binding):
+    """从 binding 构建 agent commands 映射
+
+    Returns:
+        如 {'claude': ['claude', 'claude --model opus'], 'codex': ['codex']}
+    """
+    if not binding:
+        return {}
+    from config import VALID_AGENTS
+    result = {}
+    for at in VALID_AGENTS:
+        cmds = binding.get('%s_commands' % at)
+        if cmds:
+            result[at] = cmds
+    return result
+
+
+def _merge_agent_commands(agent_commands: Dict[str, List[str]],
+                          default_agent: str) -> List[Tuple[str, str]]:
+    """将多 agent 的命令列表合并为有序列表，default_agent 排在前面
+
+    Returns:
+        如 [('codex', 'codex'), ('claude', 'claude'), ('claude', 'claude --model opus')]
+    """
+    from config import VALID_AGENTS
+    order = [default_agent] + [a for a in VALID_AGENTS if a != default_agent]
+    merged: List[Tuple[str, str]] = []
+    for at in order:
+        for cmd in agent_commands.get(at, []):
+            merged.append((at, cmd))
+    return merged
+
+
+def _resolve_agent_command_from_binding(
     binding: Optional[Dict[str, Any]],
     cmd_arg: str
-) -> Tuple[bool, str]:
-    """从 binding 中获取 claude_commands 并解析用户输入的命令参数
+) -> Tuple[bool, str, str]:
+    """从 binding 解析 agent 类型和命令
 
     Args:
-        binding: 绑定信息字典（包含 claude_commands）
+        binding: 绑定信息字典（包含 claude_commands, codex_commands）
         cmd_arg: 用户输入的 --cmd 参数值，可以是:
-            - 空字符串：返回默认命令（列表第一个）
-            - 数字字符串（索引，从 0 开始）
+            - 空字符串：返回默认 agent 的首条命令
+            - agent_type::command 格式（如 codex::codex）
+            - 数字字符串（索引，从 0 开始，在合并列表中）
             - 名称子串（大小写敏感匹配）
 
     Returns:
-        (success, result):
-            - success=True, result=匹配到的命令字符串
-            - success=False, result=错误提示信息
+        (success, agent_type, command_or_error):
+            - success=True, agent_type=匹配到的 agent 类型, command_or_error=命令字符串
+            - success=False, agent_type='', command_or_error=错误提示信息
     """
     if not binding:
-        return False, '用户未注册，无法获取命令列表'
+        return (False, '', '用户未注册，无法获取命令列表')
 
-    commands = binding.get('claude_commands')
-    if not commands:
-        return False, '该用户注册信息中没有命令列表，请重新注册'
+    agent_commands = _build_agent_commands_from_binding(binding)
+    if not agent_commands:
+        return (False, '', '该用户注册信息中没有命令列表，请重新注册')
+
+    default_agent = binding.get('default_agent', 'claude')
+    merged = _merge_agent_commands(agent_commands, default_agent)
+    available = ', '.join('`[%s] %s::%s`' % (i, at, cmd) for i, (at, cmd) in enumerate(merged))
 
     if not cmd_arg:
-        return True, commands[0]
+        if default_agent in agent_commands:
+            return (True, default_agent, agent_commands[default_agent][0])
+        at, cmd = merged[0]
+        return (True, at, cmd)
 
-    # 尝试索引匹配
+    # agent_type::command 格式（验证 agent_type 和 command 合法性）
+    if '::' in cmd_arg:
+        parts = cmd_arg.split('::', 1)
+        req_at, req_cmd = parts[0], parts[1]
+        if req_at in agent_commands and req_cmd in agent_commands[req_at]:
+            return (True, req_at, req_cmd)
+        return (False, '', '无效的命令 "%s"，可用命令: %s' % (cmd_arg, available))
+
+    # 数字索引
     if cmd_arg.isdigit():
         idx = int(cmd_arg)
-        if 0 <= idx < len(commands):
-            return True, commands[idx]
-        cmd_list = ', '.join(
-            '`[{}] {}`'.format(i, c) for i, c in enumerate(commands)
-        )
-        return False, '索引 {} 超出范围，可用命令: {}'.format(idx, cmd_list)
+        if 0 <= idx < len(merged):
+            at, cmd = merged[idx]
+            return (True, at, cmd)
+        return (False, '', '索引 %s 超出范围，可用命令: %s' % (cmd_arg, available))
 
-    # 名称子串匹配
-    for cmd in commands:
-        if cmd_arg in cmd:
-            return True, cmd
+    # 子串匹配（精确匹配优先，多个子串匹配时报歧义错误）
+    exact = [(at, cmd) for at, cmd in merged if cmd_arg == cmd]
+    if len(exact) == 1:
+        return (True, exact[0][0], exact[0][1])
+    matches = [(at, cmd) for at, cmd in merged if cmd_arg in cmd]
+    if len(matches) == 1:
+        return (True, matches[0][0], matches[0][1])
+    if len(matches) > 1:
+        matched_list = ', '.join('`%s::%s`' % (at, cmd) for at, cmd in matches)
+        return (False, '', '"%s" 匹配到多个命令: %s，请更精确地指定' % (cmd_arg, matched_list))
 
-    cmd_list = ', '.join(
-        '`[{}] {}`'.format(i, c) for i, c in enumerate(commands)
-    )
-    return False, '未找到匹配的命令，可用命令: {}'.format(cmd_list)
+    return (False, '', '未找到匹配 "%s" 的命令，可用命令: %s' % (cmd_arg, available))
 
 
-def _build_creating_session_card(selected_dir: str, prompt: str, claude_command: str = '') -> dict:
+def _build_creating_session_card(selected_dir: str, prompt: str, claude_command: str = '',
+                                 agent_type: str = '') -> dict:
     """构建"正在创建会话"状态卡片
 
     Args:
         selected_dir: 选择的工作目录
         prompt: 用户输入的提示词
         claude_command: 使用的 Claude 命令（可选）
+        agent_type: agent 类型（如 'claude', 'codex'），用于显示名称
 
     Returns:
         卡片字典（包含 type 和 data）
     """
+    from agents import get_agent_adapter
+    agent_display = get_agent_adapter(agent_type or None).display_name
+
     elements = [
         {
             'tag': 'div',
             'text': {
                 'tag': 'plain_text',
-                'content': '请稍候，正在启动 Claude...'
+                'content': f'请稍候，正在启动 {agent_display} 会话...'
             }
         },
         {
@@ -1273,7 +1337,7 @@ def _build_creating_session_card(selected_dir: str, prompt: str, claude_command:
             'schema': '2.0',
             'config': {'wide_screen_mode': True},
             'header': {
-                'title': {'tag': 'plain_text', 'content': '⏳ 正在创建会话'},
+                'title': {'tag': 'plain_text', 'content': f'⏳ 正在创建 {agent_display} 会话'},
                 'template': 'blue'
             },
             'body': {
@@ -1316,14 +1380,22 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
     custom_dir = form_values.get('custom_dir', '')  # 自定义路径输入框的值
     browse_result = form_values.get('browse_result', '')  # 浏览结果下拉选择的值
     prompt = form_values.get('prompt', '')
-    claude_command = form_values.get('claude_command', '')  # Command 选择下拉的值
+    # 兼容新旧卡片：新卡片用 agent_command，旧卡片用 claude_command
+    agent_command = form_values.get('agent_command', '') or form_values.get('claude_command', '')
 
     # 获取 binding（用于解析默认命令和后续请求）
     binding = _get_binding_from_event(event)
 
+    # 解析 agent_type 和 claude_command
+    if '::' in agent_command:
+        agent_type, claude_command = agent_command.split('::', 1)
+    else:
+        agent_type = ''
+        claude_command = agent_command
+
     # 如果没有选择命令，从 binding 获取默认命令
     if not claude_command:
-        ok, result = _resolve_claude_command_from_binding(binding, '')
+        ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
         if not ok:
             return True, {
                 'toast': {
@@ -1333,7 +1405,7 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
             }
         claude_command = result
 
-    logger.info(f"[feishu] Form values: recent_dir={recent_dir}, custom_dir={custom_dir}, browse_result={browse_result}, claude_command={claude_command}, prompt={_sanitize_user_content(prompt)}, trigger={trigger_name}")
+    logger.info(f"[feishu] Form values: recent_dir={recent_dir}, custom_dir={custom_dir}, browse_result={browse_result}, agent_type={agent_type}, claude_command={claude_command}, prompt={_sanitize_user_content(prompt)}, trigger={trigger_name}")
 
     if not chat_id:
         logger.warning("[feishu] No chat_id in button value")
@@ -1382,12 +1454,12 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
             'type': TOAST_INFO,
             'content': '正在创建会话...'
         },
-        'card': _build_creating_session_card(selected_dir, prompt, claude_command)
+        'card': _build_creating_session_card(selected_dir, prompt, claude_command, agent_type=agent_type)
     }
 
     # 在后台线程中异步执行会话创建
     new_session_id = str(uuid.uuid4())
-    _run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, claude_command))
+    _run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, claude_command, agent_type))
 
     return True, response
 
@@ -1504,8 +1576,9 @@ def _build_new_session_card(
     custom_dir: str = '',
     browse_data: Optional[Dict[str, Any]] = None,
     prompt: str = '',
-    claude_commands: Optional[List[str]] = None,
-    claude_command: str = ''
+    agent_commands: Optional[Dict[str, List[str]]] = None,
+    agent_command: str = '',
+    default_agent: str = ''
 ) -> Dict[str, Any]:
     """构建新建会话卡片（统一构建逻辑）
 
@@ -1519,8 +1592,9 @@ def _build_new_session_card(
         custom_dir: 自定义路径输入框默认值
         browse_data: 浏览结果数据 {dirs, parent, current}，为 None 则不显示浏览结果区域
         prompt: 提示词输入框默认值
-        claude_commands: 可用的 Claude 命令列表（从 binding 获取）
-        claude_command: 预选的 Claude 命令
+        agent_commands: agent 命令映射，如 {'claude': ['claude'], 'codex': ['codex']}
+        agent_command: 预选的 agent 命令（agent_type::command 格式）
+        default_agent: 默认 agent 类型（如 'claude'）
 
     Returns:
         飞书卡片字典
@@ -1798,8 +1872,10 @@ def _build_new_session_card(
             }
         })
 
-    # Claude Command 选择（仅当配置了多个命令时显示）
-    if claude_commands:
+    # Agent 命令选择（有命令列表就显示，与原 claude_commands 行为一致）
+    merged_cmds = _merge_agent_commands(agent_commands or {}, default_agent)
+
+    if merged_cmds:
         prompt_step = '3️⃣'
 
         # 分割线：目录选择区域结束
@@ -1809,34 +1885,50 @@ def _build_new_session_card(
             'tag': 'div',
             'text': {
                 'tag': 'plain_text',
-                'content': '2️⃣ 选择 Claude Command'
+                'content': '2️⃣ 选择 Agent 命令'
             }
         })
 
         cmd_options = []
-        for i, cmd in enumerate(claude_commands):
+        for at, cmd in merged_cmds:
+            option_value = f'{at}::{cmd}'
             cmd_options.append({
                 'text': {
                     'tag': 'plain_text',
-                    'content': f'[{i}] {cmd}'
+                    'content': f'[{at.capitalize()}] {cmd}'
                 },
-                'value': cmd
+                'value': option_value
             })
+
+        # 确定默认选中项
+        if agent_command:
+            # 预选值优先（可能是 agent_type::cmd 格式）
+            default_option = agent_command if '::' in agent_command else ''
+            if not default_option:
+                # 尝试从合并列表中匹配
+                for at, cmd in merged_cmds:
+                    if agent_command == cmd or agent_command in cmd:
+                        default_option = f'{at}::{cmd}'
+                        break
+        else:
+            default_option = ''
+
+        if not default_option and merged_cmds:
+            at, cmd = merged_cmds[0]
+            default_option = f'{at}::{cmd}'
 
         cmd_select = {
             'tag': 'select_static',
-            'name': 'claude_command',
+            'name': 'agent_command',
             'placeholder': {
                 'tag': 'plain_text',
-                'content': '选择 Claude 命令'
+                'content': '选择命令'
             },
             'options': cmd_options,
             'width': 'fill'
         }
-        if claude_command and claude_command in claude_commands:
-            cmd_select['initial_option'] = claude_command
-        else:
-            cmd_select['initial_option'] = claude_commands[0]
+        if default_option:
+            cmd_select['initial_option'] = default_option
 
         form_elements.append({
             'tag': 'column_set',
@@ -1997,8 +2089,9 @@ def _build_browse_result_card(browse_data: dict, form_values: dict, custom_dir_v
         custom_dir=custom_dir_value,
         browse_data=browse_data,
         prompt=form_values.get('prompt', ''),
-        claude_commands=binding.get('claude_commands') if binding else None,
-        claude_command=form_values.get('claude_command', '')
+        agent_commands=_build_agent_commands_from_binding(binding),
+        agent_command=form_values.get('agent_command', '') or form_values.get('claude_command', ''),
+        default_agent=binding.get('default_agent', 'claude') if binding else ''
     )
 
     browse_dirs = browse_data.get('dirs', [])
@@ -2112,7 +2205,7 @@ def _handle_card_action(data: dict) -> Tuple[bool, dict]:
 
 
 def _add_typing_reaction(card_message_id: str):
-    """后台任务：给卡片消息添加 Typing 表情，表示 Claude 正在处理
+    """后台任务：给卡片消息添加 Typing 表情，表示 Agent 正在处理
 
     Args:
         card_message_id: 卡片消息 ID
@@ -2456,7 +2549,9 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     request_id = value.get('request_id', '')
     at_bot_only = value.get('at_bot_only')
     session_mode = value.get('session_mode', 'message')
+    default_agent = value.get('default_agent', '')
     claude_commands = value.get('claude_commands', None)
+    codex_commands = value.get('codex_commands', None)
     default_chat_dir = value.get('default_chat_dir', '')
     default_chat_follow_thread = value.get('default_chat_follow_thread', True)
     group_name_prefix = value.get('group_name_prefix')
@@ -2470,7 +2565,9 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
                 owner_id, request_id, request_ip,
                 at_bot_only=at_bot_only,
                 session_mode=session_mode,
+                default_agent=default_agent,
                 claude_commands=claude_commands,
+                codex_commands=codex_commands,
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
@@ -2498,7 +2595,9 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             callback_url, owner_id, request_ip, approved=True,
             at_bot_only=at_bot_only,
             session_mode=session_mode,
+            default_agent=default_agent,
             claude_commands=claude_commands,
+            codex_commands=codex_commands,
             default_chat_dir=default_chat_dir,
             default_chat_follow_thread=default_chat_follow_thread,
             group_name_prefix=group_name_prefix,
@@ -2675,18 +2774,18 @@ _SESSION_UNRESOLVED_HINT = "无法确定目标会话，请在群聊中或回复�
 def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
                            message_id: str, chat_type: str,
                            project_dir: str, prompt: str,
-                           claude_command: str = ''):
+                           agent_command: str = ''):
     """发送工作目录选择卡片
 
     Args:
-        binding: 绑定信息（包含 auth_token, callback_url, claude_commands 等）
+        binding: 绑定信息（包含 auth_token, callback_url, claude_commands, codex_commands 等）
         owner_id: 用户 ID
         chat_id: 群聊 ID
         message_id: 原始消息 ID（用于回复）
         chat_type: 聊天类型（group/p2p），卡片提交时透传
         project_dir: 项目目录（用作 custom_dir 输入框的默认值）
         prompt: 用户输入的 prompt（作为 prompt 输入框的默认值）
-        claude_command: 预选的 Claude 命令（可选，来自 --cmd 参数）
+        agent_command: 预选的 Agent 命令（可选，来自 --cmd 参数）
     """
     from services.feishu_api import FeishuAPIService
 
@@ -2711,8 +2810,9 @@ def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
         recent_dirs=recent_dirs,
         custom_dir=project_dir or '',
         prompt=prompt,
-        claude_commands=binding.get('claude_commands'),
-        claude_command=claude_command
+        agent_commands=_build_agent_commands_from_binding(binding),
+        agent_command=agent_command,
+        default_agent=binding.get('default_agent', 'claude')
     )
 
     # 打印完整卡片 JSON 用于调试
@@ -2761,6 +2861,7 @@ def _handle_new_command(data: dict, args: str):
     # 优先级：--dir/--cmd 参数 > 消息上下文解析到的旧 session > 默认值
     inherited_dir = ''
     inherited_cmd = ''
+    inherited_agent_type = ''
     need_inherit = not project_dir or not cmd_arg
 
     if need_inherit:
@@ -2775,18 +2876,42 @@ def _handle_new_command(data: dict, args: str):
                 inherited_info = SessionFacade.fetch_session_info(
                     binding, route_info.get('session_id', ''))
                 inherited_cmd = inherited_info.get('claude_command', '')
+                inherited_agent_type = inherited_info.get('agent_type', '')
 
     # --cmd 参数优先，继承次之，binding 默认命令兜底
-    if not cmd_arg and inherited_cmd:
-        claude_command = inherited_cmd
-        logger.info(f"[feishu] /new inherited claude_command: {claude_command}")
-    else:
-        # 有 --cmd 时解析用户指定的命令，否则使用 binding 默认命令
-        ok, result = _resolve_claude_command_from_binding(binding, cmd_arg)
+    if cmd_arg:
+        # 用户显式指定 --cmd，从 binding 命令列表解析
+        ok, agent_type, result = _resolve_agent_command_from_binding(binding, cmd_arg)
         if not ok:
             _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
         claude_command = result
+    elif inherited_cmd:
+        # 继承旧 session 的命令和 agent_type
+        claude_command = inherited_cmd
+        agent_type = inherited_agent_type
+        logger.info(f"[feishu] /new inherited claude_command: {claude_command}, agent_type: {agent_type}")
+    else:
+        # 无 --cmd 无继承命令，使用默认命令（有继承 agent_type 时用该 agent 的默认命令）
+        if inherited_agent_type:
+            agent_commands = _build_agent_commands_from_binding(binding)
+            cmds = agent_commands.get(inherited_agent_type)
+            if cmds:
+                agent_type = inherited_agent_type
+                claude_command = cmds[0]
+            else:
+                # 该 agent 未在 binding 中注册，fallback 到全局默认
+                ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
+                if not ok:
+                    _run_in_background(_send_notice_message, (chat_id, result, message_id))
+                    return
+                claude_command = result
+        else:
+            ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
+            if not ok:
+                _run_in_background(_send_notice_message, (chat_id, result, message_id))
+                return
+            claude_command = result
 
     # --dir 参数优先，继承次之
     if not project_dir and inherited_dir:
@@ -2801,23 +2926,25 @@ def _handle_new_command(data: dict, args: str):
 
     # 验证参数：如果没有目录或没有提示词，发送卡片让用户完善
     if not project_dir or not prompt:
-        _run_in_background(_send_new_session_card, (binding, owner_id, chat_id, message_id, msg_chat_type, project_dir, prompt, claude_command))
+        # 拼接 agent_type::command 格式传给卡片，保留用户已选的 agent 类型
+        card_agent_cmd = f'{agent_type}::{claude_command}' if agent_type and claude_command else claude_command
+        _run_in_background(_send_new_session_card, (binding, owner_id, chat_id, message_id, msg_chat_type, project_dir, prompt, card_agent_cmd))
         return
 
-    logger.info(f"[feishu] /new command: dir={project_dir}, cmd={claude_command or '(default)'}, prompt={_sanitize_user_content(prompt)}")
+    logger.info(f"[feishu] /new command: dir={project_dir}, agent={agent_type or '(default)'}, cmd={claude_command or '(default)'}, prompt={_sanitize_user_content(prompt)}")
 
     # 在后台线程中转发到 Callback 后端
     # 如果使用的是默认聊天目录，同时更新活跃默认会话
     new_session_id = str(uuid.uuid4())
     if default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
-        _run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
+        _run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command, agent_type))
     else:
-        _run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command))
+        _run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command, agent_type))
 
 
 def _forward_new_request(binding: dict, session_id: str, project_dir: str, prompt: str,
                          chat_id: str, message_id: str, chat_type: str = '',
-                         claude_command: str = '') -> str:
+                         claude_command: str = '', agent_type: str = '') -> str:
     """转发新建会话请求到 Callback 后端
 
     Args:
@@ -2829,6 +2956,7 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
         message_id: 原始消息 ID（用作 reply_to）
         chat_type: 聊天类型（group/p2p），用于 group 模式下的 chat_id 决策
         claude_command: 指定使用的 Claude 命令（可选）
+        agent_type: agent 类型（如 'claude', 'codex'），可选
 
     Returns:
         session_id，失败时返回空字符串
@@ -2872,6 +3000,8 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
     }
     if claude_command:
         data['claude_command'] = claude_command
+    if agent_type:
+        data['agent_type'] = agent_type
 
     # 新建会话时传递 reply_to，让第一条通知回复用户的 /new 消息
     # 后续通知会通过 last_message_id 链式回复
@@ -3516,8 +3646,9 @@ def _handle_reply_command(data: dict, args: str):
 
     # 解析 --cmd 参数（从 binding 获取命令列表）
     claude_command = ''
+    agent_type = ''
     if cmd_arg:
-        ok, result = _resolve_claude_command_from_binding(binding, cmd_arg)
+        ok, agent_type, result = _resolve_agent_command_from_binding(binding, cmd_arg)
         if not ok:
             _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
@@ -3548,17 +3679,17 @@ def _handle_reply_command(data: dict, args: str):
         if gs_store and owner_id:
             gs_store.touch(owner_id, chat_id)
 
-    logger.info("[feishu] /reply command: session=%s, cmd=%s, prompt=%s",
-                session_id, claude_command or '(default)', _sanitize_user_content(prompt))
+    logger.info("[feishu] /reply command: session=%s, agent=%s, cmd=%s, prompt=%s",
+                session_id, agent_type or '(default)', claude_command or '(default)', _sanitize_user_content(prompt))
 
     # 转发到 Callback 后端
     # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
     if route_info.get('new_session'):
         _run_in_background(_forward_new_request,
                            (binding, session_id, session_project_dir, prompt,
-                            chat_id, message_id, chat_type, claude_command))
+                            chat_id, message_id, chat_type, claude_command, agent_type))
     else:
-        _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command))
+        _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command, agent_type))
 
 
 def _handle_users_command(data: dict, args: str):

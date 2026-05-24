@@ -9,7 +9,7 @@
 
 import json
 import os
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 # =============================================================================
 # 默认配置值
@@ -160,20 +160,36 @@ def get_close_page_timeout() -> int:
 # Agent 配置
 # =============================================================================
 
+VALID_AGENTS = ('claude', 'codex')
 
-def get_agent_type() -> str:
-    """获取当前 agent 类型
+
+def get_enabled_agents() -> List[str]:
+    """获取启用的 agent 列表
+
+    读取 ENABLED_AGENTS 配置，逗号分隔。校验每个值在 VALID_AGENTS 中。
 
     Returns:
-        'claude' 或 'codex'，默认 'claude'
+        启用的 agent 类型列表，至少包含一个元素，默认 ['claude']
     """
-    raw = get_config('AGENT_TYPE', 'claude').strip().lower()
-    if raw not in ('claude', 'codex'):
-        raise ValueError(
-            "不支持的 AGENT_TYPE: '%s'。\n"
-            "  支持的值: claude, codex\n"
-            "  请在 .env 中修改 AGENT_TYPE 配置" % raw)
-    return raw
+    raw = get_config('ENABLED_AGENTS', 'claude')
+    agents = [a.strip().lower() for a in raw.split(',') if a.strip()]
+    valid = [a for a in agents if a in VALID_AGENTS]
+    return valid if valid else ['claude']
+
+
+def get_default_agent() -> str:
+    """获取默认 agent 类型
+
+    读取 DEFAULT_AGENT 配置，校验在 VALID_AGENTS 且在 enabled 范围内。
+
+    Returns:
+        默认 agent 类型字符串
+    """
+    enabled = get_enabled_agents()
+    raw = get_config('DEFAULT_AGENT', '').strip().lower()
+    if raw in VALID_AGENTS and raw in enabled:
+        return raw
+    return enabled[0]
 
 
 def _parse_command_list(config_key: str, default: str) -> List[str]:
@@ -402,7 +418,7 @@ def get_session_mode() -> str:
 FEISHU_SESSION_MODE = get_session_mode()
 
 # 群聊模式配置
-FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Claude')
+FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Agent')
 FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
 
 # Session 过期天数（统一，不区分 group/非 group）

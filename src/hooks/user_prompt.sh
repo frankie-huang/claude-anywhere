@@ -57,21 +57,19 @@ send_user_prompt_async() {
 
     log "UserPromptSubmit: session=$SESSION_ID, prompt=${PROMPT_CONTENT:0:50}..."
 
-    # 解析 chat_id 并检查 mute 状态
-    # 注：Codex 新会话的真实 session_id 可能先在此 hook 出现，resolve 会
-    # 触发 callback 侧的 adopt_pending_session 完成临时 ID → 真实 ID 迁移
-    local RESOLVED_CHAT_ID
-    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
-    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
-        log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
-        return 0
-    fi
-
     # 检查 skip 标志（飞书发起的会话会设置此标志）
     local skip_flag
     skip_flag=$(_check_skip_user_prompt "$SESSION_ID")
     if [ "$skip_flag" = "true" ]; then
         log "UserPromptSubmit: skipped (feishu-originated)"
+        return 0
+    fi
+
+    # 前置解析 chat_id 并检查 mute 状态，muted 时跳过发送
+    local RESOLVED_CHAT_ID
+    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
         return 0
     fi
 

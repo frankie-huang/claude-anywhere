@@ -128,7 +128,7 @@ class SessionFacade:
         需要权威字段的低频场景（/new 继承等）调用此方法，走一次 callback RPC。
 
         Returns:
-            {'project_dir': str, 'claude_command': str, 'chat_id': str, 'dissolved': bool}
+            {'project_dir': str, 'claude_command': str, 'agent_type': str, 'chat_id': str, 'dissolved': bool}
             失败或 session 不存在返回空 dict（所有字段为空的等价）
         """
         if not session_id or cls._forward_fn is None:
@@ -144,6 +144,7 @@ class SessionFacade:
         return {
             'project_dir': resp.get('project_dir', ''),
             'claude_command': resp.get('claude_command', ''),
+            'agent_type': resp.get('agent_type', ''),
             'chat_id': resp.get('chat_id', ''),
             'dissolved': resp.get('dissolved', False),
         }

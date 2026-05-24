@@ -29,11 +29,13 @@ class BindingStore:
             "reply_in_thread": true,
             "at_bot_only": false,
             "session_mode": "message",
+            "default_agent": "claude",
             "claude_commands": ["claude", "claude --model opus"],
+            "codex_commands": ["codex"],
             "default_chat_dir": "/home/user/project",
             "default_chat_follow_thread": true,
             "default_chat_session_id": "uuid-xxx",
-            "group_name_prefix": "Claude",
+            "group_name_prefix": "Agent",
             "group_dissolve_days": 7,
             "updated_at": 1706745600,
             "registered_ip": "1.2.3.4"
@@ -112,7 +114,9 @@ class BindingStore:
         registered_ip: str = '',
         at_bot_only: Optional[bool] = None,
         session_mode: str = 'message',
+        default_agent: str = '',
         claude_commands: Optional[List[str]] = None,
+        codex_commands: Optional[List[str]] = None,
         default_chat_dir: str = '',
         default_chat_follow_thread: bool = True,
         group_name_prefix: Optional[str] = None,
@@ -127,7 +131,9 @@ class BindingStore:
             registered_ip: 注册来源 IP
             at_bot_only: 群聊 @bot 过滤（None = 未传，保留旧值；True/False 显式写入）
             session_mode: 会话模式，message/thread/group
+            default_agent: 默认 agent 标识（如 'claude'、'codex'）
             claude_commands: 可用的 Claude 命令列表（从 Callback 后端传递）
+            codex_commands: 可用的 Codex 命令列表（从 Callback 后端传递）
             default_chat_dir: 默认聊天目录（从 Callback 后端传递）
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
             group_name_prefix: 群聊名称前缀（None = 未传，保留旧值；显式值含 '' 原样写入）
@@ -152,8 +158,10 @@ class BindingStore:
                     logger.info(
                         f"[binding-store] Removed stale binding: {oid} -> {callback_url}"
                     )
-                # 处理 claude_commands：过滤空字符串，为空时默认 ["claude"]
-                valid_commands = [c for c in (claude_commands or []) if c and c.strip()]
+                # 处理 claude_commands：过滤空字符串
+                valid_claude_commands = [c for c in (claude_commands or []) if c and c.strip()]
+                # 处理 codex_commands：过滤空字符串
+                valid_codex_commands = [c for c in (codex_commands or []) if c and c.strip()]
                 # 校验 session_mode（入口处已做 reply_in_thread → session_mode 转换，
                 # 此处为防御性校验，防止未来新调用方传入非法值）
                 if session_mode not in ('message', 'thread', 'group'):
@@ -164,10 +172,18 @@ class BindingStore:
                     'reply_in_thread': (session_mode == 'thread'),  # 兼容旧版读取
                     'session_mode': session_mode,
                     'default_chat_follow_thread': default_chat_follow_thread,
-                    'claude_commands': valid_commands or ['claude'],
                     'updated_at': int(time.time()),
                     'registered_ip': registered_ip
                 }
+                # default_agent：非空才写入
+                if default_agent:
+                    binding_data['default_agent'] = default_agent
+                # claude_commands：非空才写入
+                if valid_claude_commands:
+                    binding_data['claude_commands'] = valid_claude_commands
+                # codex_commands：非空才写入
+                if valid_codex_commands:
+                    binding_data['codex_commands'] = valid_codex_commands
                 # at_bot_only：None = 调用方未传，保留旧值；True/False 显式写入
                 if at_bot_only is not None:
                     binding_data['at_bot_only'] = bool(at_bot_only)

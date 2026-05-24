@@ -63,7 +63,7 @@ def handle_decision(
     if req_status == request_manager.STATUS_RESOLVED:
         return False, None, '请求已被处理，请勿重复操作'
     if req_status == request_manager.STATUS_DISCONNECTED:
-        return False, None, '连接已断开，Claude 可能已继续执行其他操作'
+        return False, None, '连接已断开，Agent 可能已继续执行其他操作'
 
     # 提前保存 extra_data（resolve 后可能被清理）
     extra_data = {

@@ -20,6 +20,7 @@ import signal
 import socket
 import subprocess
 import sys
+from typing import List, Optional
 
 
 # =============================================================================
@@ -406,6 +407,72 @@ class TerminalUI:
             cls.print_warning("已取消")
             sys.exit(0)
         return idx
+
+    @classmethod
+    def select_multi(cls, prompt, options, default=None, validate=None):
+        """多选选择器（空格切换选中，回车确认）
+
+        Args:
+            prompt: 提示文字
+            options: [(label, description), ...] 选项列表
+            default: 默认选中的索引列表，如 [0, 1]
+            validate: 校验函数，接收选中索引列表，返回 None 通过，返回字符串为错误提示
+
+        Returns:
+            选中的索引列表
+        """
+        if default is None:
+            default = []
+        selected = set(default)
+        current = 0
+        error_msg = ''
+
+        sys.stdout.write(f"\n{cls.CYAN}?{cls.NC} {cls.BOLD}{prompt}{cls.NC}\n")
+        sys.stdout.flush()
+
+        with cls.hidden_cursor():
+            while True:
+                total_lines = 0
+                for i, (label, desc) in enumerate(options):
+                    check = f"{cls.GREEN}✓{cls.NC}" if i in selected else " "
+                    if i == current:
+                        line = f"  {cls.CYAN}>{cls.NC} [{check}] {cls.BOLD}{label}{cls.NC}"
+                    else:
+                        line = f"    [{check}] {cls.DIM}{label}{cls.NC}"
+                    if desc:
+                        line += f"  {cls.DIM}{desc}{cls.NC}"
+                    sys.stdout.write(line + '\n')
+                    total_lines += cls._visual_line_count(line)
+                if error_msg:
+                    err_line = f"  {cls.YELLOW}\u26a0{cls.NC} {error_msg}"
+                    sys.stdout.write(err_line + '\n')
+                    total_lines += 1
+                    error_msg = ''
+                sys.stdout.flush()
+
+                key = cls._read_key()
+                if key == 'up' and current > 0:
+                    current -= 1
+                elif key == 'down' and current < len(options) - 1:
+                    current += 1
+                elif key == ' ':
+                    if current in selected:
+                        selected.discard(current)
+                    else:
+                        selected.add(current)
+                elif key == 'enter':
+                    result = sorted(selected)
+                    if validate:
+                        error_msg = validate(result) or ''
+                    if not error_msg:
+                        sys.stdout.write(f"\033[{total_lines}A\033[J")
+                        labels = [options[i][0] for i in result]
+                        sys.stdout.write(f"  {cls.GREEN}>{cls.NC} {', '.join(labels)}\n")
+                        sys.stdout.flush()
+                        return result
+
+                sys.stdout.write(f"\033[{total_lines}A\033[J")
+                sys.stdout.flush()
 
     @classmethod
     def input_value(cls, prompt, required=False, secret=False, hint='', validate=None):
@@ -853,7 +920,7 @@ class DependencyChecker:
     def __init__(self, python_path=''):
         self.python_path = python_path or sys.executable
 
-    def check_all(self):
+    def check_all(self, enabled_agents: Optional[List[str]] = None):
         """检测所有依赖，返回是否全部满足"""
         TerminalUI.print_section("检测环境依赖")
         all_ok = True
@@ -888,8 +955,8 @@ class DependencyChecker:
             else:
                 TerminalUI.print_info(f"{dep}: 未安装 (可选，{fallback})")
 
-        # claude CLI
-        self._check_claude_command()
+        # Agent CLI 检测
+        self._check_agent_commands(enabled_agents or ['claude'])
 
         if all_ok:
             TerminalUI.print_text()
@@ -931,21 +998,27 @@ class DependencyChecker:
         except Exception:
             return None
 
-    def _check_claude_command(self):
-        """通过用户 shell 检测 claude CLI"""
-        result = self.run_in_user_shell('command -v claude')
-        if result is None:
-            TerminalUI.print_warning("claude: 检测超时")
-            return
-
-        claude_path = result.stdout.strip().split('\n')[-1] if result.returncode == 0 else ''
-        if claude_path:
-            ver_result = self.run_in_user_shell('claude --version')
-            version = ver_result.stdout.strip().split('\n')[-1] if ver_result and ver_result.returncode == 0 else ''
-            TerminalUI.print_success(f"claude: {version or claude_path}")
-        else:
-            TerminalUI.print_warning("claude: 未找到")
-            TerminalUI.print_dim("请确保已安装 Claude Code CLI: https://claude.ai/code")
+    def _check_agent_commands(self, enabled_agents: List[str]):
+        """通过用户 shell 检测已启用 agent 的 CLI"""
+        agents = {
+            'claude': ('claude', 'https://claude.ai/code'),
+            'codex': ('codex', 'https://github.com/openai/codex'),
+        }
+        for agent_type in enabled_agents:
+            cmd, url = agents.get(agent_type, (agent_type, ''))
+            result = self.run_in_user_shell(f'command -v {cmd}')
+            if result is None:
+                TerminalUI.print_warning(f"{cmd}: 检测超时")
+                continue
+            cmd_path = result.stdout.strip().split('\n')[-1] if result.returncode == 0 else ''
+            if cmd_path:
+                ver_result = self.run_in_user_shell(f'{cmd} --version')
+                version = ver_result.stdout.strip().split('\n')[-1] if ver_result and ver_result.returncode == 0 else ''
+                TerminalUI.print_success(f"{cmd}: {version or cmd_path}")
+            else:
+                TerminalUI.print_warning(f"{cmd}: 未找到")
+                if url:
+                    TerminalUI.print_dim(f"请确保已安装: {url}")
 
     def check_supports_print_flag(self, cmd):
         """检测命令是否支持 --print 参数
@@ -968,9 +1041,36 @@ class DependencyChecker:
         stderr_lower = (result.stderr or '').lower()
         if 'unknown option' in stderr_lower or 'unrecognized option' in stderr_lower \
                 or 'invalid option' in stderr_lower or 'unknown flag' in stderr_lower \
-                or 'no such option' in stderr_lower:
+                or 'no such option' in stderr_lower or 'unexpected argument' in stderr_lower:
             return False
         if result.returncode == 127:
+            return False
+        return True
+
+    def check_supports_exec_subcommand(self, cmd):
+        """检测命令是否支持 exec 子命令（Codex 非交互模式）
+
+        通过 login shell 执行 `cmd exec --help`，检查退出码和输出。
+
+        Args:
+            cmd: 要检测的命令
+
+        Returns:
+            True 表示支持 exec 子命令，False 表示不支持或检测失败
+        """
+        result = self.run_in_user_shell(cmd + ' exec --help')
+        if result is None:
+            return False
+        if result.returncode == 127:
+            return False
+        # exec --help 成功返回帮助信息
+        if result.returncode == 0:
+            return True
+        stderr_lower = (result.stderr or '').lower()
+        stdout_lower = (result.stdout or '').lower()
+        # 无此子命令的常见错误提示
+        if 'unknown command' in stderr_lower or 'unknown command' in stdout_lower \
+                or 'no such subcommand' in stderr_lower or 'unrecognized' in stderr_lower:
             return False
         return True
 
@@ -1003,10 +1103,10 @@ class DependencyChecker:
 
 
 # =============================================================================
-# HookConfigurator — settings.json Hook 配置
+# ClaudeHookConfigurator — settings.json Hook 配置
 # =============================================================================
 
-class HookConfigurator:
+class ClaudeHookConfigurator:
     """管理 Claude Code Hook 配置"""
 
     def __init__(self, hook_path, settings_file):
@@ -1228,17 +1328,17 @@ class CodexHookConfigurator:
             lines.append(f'[[hooks.{event}]]')
             lines.append('')
             lines.append(f'  [[hooks.{event}.hooks]]')
-            lines.append('  type = "command"')
-            lines.append(f'  command = "{self.hook_path}"')
+            lines.append(f'    type = "command"')
+            lines.append(f'    command = "{self.hook_path}"')
             lines.append('')
 
         # PermissionRequest 带 timeout
         lines.append('[[hooks.PermissionRequest]]')
         lines.append('')
         lines.append('  [[hooks.PermissionRequest.hooks]]')
-        lines.append('  type = "command"')
-        lines.append(f'  command = "{self.hook_path}"')
-        lines.append(f'  timeout = {hook_timeout}')
+        lines.append(f'    type = "command"')
+        lines.append(f'    command = "{self.hook_path}"')
+        lines.append(f'    timeout = {hook_timeout}')
         lines.append('')
 
         return '\n'.join(lines)
@@ -1293,30 +1393,8 @@ class SetupInit:
             os.path.join(source_dir, '.env'),
             os.path.join(source_dir, '.env.example'))
         self.deps = DependencyChecker()
-        hook_path = os.path.join(source_dir, 'src', 'hook-router.sh')
-        # 根据 AGENT_TYPE 选择 hook 配置器
-        agent_type = os.environ.get('AGENT_TYPE', '').strip().lower()
-        # 也尝试从 .env 读取（env 可能尚未加载到环境变量）
-        if not agent_type:
-            try:
-                env_file = os.path.join(source_dir, '.env')
-                if os.path.exists(env_file):
-                    with open(env_file, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if line.startswith('AGENT_TYPE=') and not line.startswith('#'):
-                                agent_type = line.split('=', 1)[1].strip().lower()
-                                break
-            except Exception:
-                pass
-        if agent_type == 'codex':
-            self.hooks = CodexHookConfigurator(
-                hook_path,
-                os.path.join(os.path.expanduser('~'), '.codex', 'config.toml'))
-        else:
-            self.hooks = HookConfigurator(
-                hook_path,
-                os.path.join(os.path.expanduser('~'), '.claude', 'settings.json'))
+        self.hook_path = os.path.join(source_dir, 'src', 'hook-router.sh')
+        self.enabled_agents = ['claude']
         self.service = ServiceManager(source_dir)
         # 运行状态
         self.deploy_idx = 0
@@ -1342,7 +1420,7 @@ class SetupInit:
         self._configure_owner_id()
         self._configure_callback_service()
         self._configure_session_mode()
-        self._configure_claude_command()
+        self._configure_agent_commands()
         self._configure_permission()
 
         # 确认写入
@@ -1357,7 +1435,7 @@ class SetupInit:
         TerminalUI.print_banner("环境部署")
 
         # 7: 依赖检测
-        if not self.deps.check_all():
+        if not self.deps.check_all(self.enabled_agents):
             TerminalUI.print_error("依赖检测失败，请先安装缺失的依赖")
             sys.exit(1)
 
@@ -1374,7 +1452,8 @@ class SetupInit:
             server_timeout = int(self.env.get('PERMISSION_REQUEST_TIMEOUT') or '600')
         except ValueError:
             server_timeout = 600
-        self.hooks.configure(server_timeout=server_timeout)
+        for configurator in self._get_hook_configurators():
+            configurator.configure(server_timeout=server_timeout)
 
         # 11: 启动服务
         self.service.restart()
@@ -1388,6 +1467,23 @@ class SetupInit:
         TerminalUI.print_text()
         TerminalUI.print_dim("可通过 ./setup.sh init 重新配置，或直接编辑 .env 后 ./setup.sh restart")
         TerminalUI.print_text()
+
+    def _get_hook_configurators(self):
+        """根据 self.enabled_agents 返回对应的 hook 配置器列表"""
+        configurators = []
+        if 'claude' in self.enabled_agents:
+            configurators.append(ClaudeHookConfigurator(
+                self.hook_path,
+                os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')))
+        if 'codex' in self.enabled_agents:
+            configurators.append(CodexHookConfigurator(
+                self.hook_path,
+                os.path.join(os.path.expanduser('~'), '.codex', 'config.toml')))
+        if not configurators:
+            configurators.append(ClaudeHookConfigurator(
+                self.hook_path,
+                os.path.join(os.path.expanduser('~'), '.claude', 'settings.json')))
+        return configurators
 
     # --- .env 配置步骤（从原 main() 迁移，逻辑不变） ---
 
@@ -1636,103 +1732,175 @@ class SetupInit:
             self.env.set('FEISHU_GROUP_NAME_PREFIX', results['FEISHU_GROUP_NAME_PREFIX'])
             self.env.set('FEISHU_GROUP_DISSOLVE_DAYS', results['FEISHU_GROUP_DISSOLVE_DAYS'] or '0')
 
-    def _configure_claude_command(self):
-        TerminalUI.print_section("Claude 命令")
-        TerminalUI.print_dim("本服务通过调用 Claude CLI 来执行会话，默认使用 claude 命令。")
-        TerminalUI.print_dim("如果你使用了第三方封装、别名、或需要多个命令切换，请配置自定义命令。")
+    def _configure_agent_commands(self):
+        TerminalUI.print_section("Agent 命令")
+        TerminalUI.print_dim("本服务支持 Claude Code 和 Codex 两种 AI 编码代理。")
+        TerminalUI.print_dim("请选择要启用的 Agent，然后为每个 Agent 配置命令。")
         TerminalUI.print_text()
-        existing_cmd = self.env.get('CLAUDE_COMMAND')
-        has_custom_cmd = existing_cmd and existing_cmd.strip() not in ('claude', '')
+
+        # 读取已有配置
+        existing_enabled = self.env.get('ENABLED_AGENTS') or 'claude'
+        enabled_list = [a.strip().lower() for a in existing_enabled.split(',') if a.strip()]
+
+        # 选择启用的 Agent
+        agent_options = [
+            ("Claude Code", "Anthropic Claude CLI"),
+            ("Codex", "OpenAI Codex CLI"),
+        ]
+        all_agents = ['claude', 'codex']
+        default_selected = [i for i, a in enumerate(all_agents) if a in enabled_list]
+        if not default_selected:
+            default_selected = [0]
+
+        selected = TerminalUI.select_multi("选择要启用的 Agent（空格切换，回车确认）",
+                                           agent_options, default=default_selected,
+                                           validate=lambda s: "请至少选择一个 Agent" if not s else None)
+
+        enabled_agents = [all_agents[i] for i in selected]
+        self.env.set('ENABLED_AGENTS', ','.join(enabled_agents))
+        self.enabled_agents = enabled_agents
+
+        # 为每个启用的 Agent 配置命令
+        agent_configs = [
+            ('claude', 'Claude Code', 'CLAUDE_COMMAND', 'claude', 'CLAUDE_ARGS_TEMPLATE'),
+            ('codex', 'Codex', 'CODEX_COMMAND', 'codex', 'CODEX_ARGS_TEMPLATE'),
+        ]
+        for agent_type, display_name, env_key, default_cmd, template_key in agent_configs:
+            if agent_type in enabled_agents:
+                self._configure_single_agent_command(
+                    agent_type, display_name, env_key, default_cmd, template_key)
+
+        # 默认 Agent 选择
+        if len(enabled_agents) > 1:
+            existing_default = self.env.get('DEFAULT_AGENT') or enabled_agents[0]
+            default_idx = enabled_agents.index(existing_default) if existing_default in enabled_agents else 0
+            options = [(a.capitalize(), "") for a in enabled_agents]
+            idx = TerminalUI.select_option("选择默认 Agent", options, default=default_idx,
+                                           hint="用户未指定时使用的 Agent")
+            self.env.set('DEFAULT_AGENT', enabled_agents[idx])
+        else:
+            self.env.set('DEFAULT_AGENT', enabled_agents[0])
+
+    def _configure_single_agent_command(self, agent_type: str, display_name: str,
+                                        env_key: str, default_cmd: str, template_key: str):
+        """为单个 Agent 配置命令和参数模板
+
+        Args:
+            agent_type: agent 类型标识（如 'claude'、'codex'）
+            display_name: 显示名称（如 'Claude Code'）
+            env_key: 命令配置项（如 'CLAUDE_COMMAND'）
+            default_cmd: 默认命令（如 'claude'）
+            template_key: 模板配置项（如 'CLAUDE_ARGS_TEMPLATE'）
+        """
+        TerminalUI.print_text()
+        TerminalUI.print_dim(f"── {display_name} 命令配置 ──")
+        existing_cmd = self.env.get(env_key)
+        has_custom_cmd = existing_cmd and existing_cmd.strip() not in (default_cmd, '')
 
         if not has_custom_cmd:
-            custom_cmd_idx = TerminalUI.select_option("是否只通过默认的 claude 命令启动会话", [
-                ("是", "只使用默认的 claude 命令"),
-                ("否", "使用第三方 CLI、别名或自定义命令"),
-            ], hint="如需使用其他命令或配置多个命令切换，请选「否」")
+            custom_cmd_idx = TerminalUI.select_option(
+                f"是否只通过默认的 {default_cmd} 命令启动会话", [
+                    ("是", f"只使用默认的 {default_cmd} 命令"),
+                    ("否", "使用第三方 CLI、别名或自定义命令"),
+                ], hint="如需使用其他命令或配置多个命令切换，请选「否」")
         else:
             custom_cmd_idx = 1
 
         if custom_cmd_idx == 0:
-            self.env.set('CLAUDE_COMMAND', 'claude')
+            self.env.set(env_key, default_cmd)
+            self.env.set(template_key, '{cmd} {args}')
+            return
+
+        existing_cmds = []
+        if existing_cmd:
+            stripped = existing_cmd.strip()
+            if stripped.startswith('[') and stripped.endswith(']'):
+                inner = stripped[1:-1]
+                existing_cmds = [c.strip().strip('"').strip("'") for c in inner.split(',') if c.strip()]
+            else:
+                existing_cmds = [stripped]
+
+        cmds = TerminalUI.input_list(env_key, existing=existing_cmds,
+                                     hint="如使用第三方 CLI、别名或自定义环境变量封装，请按实际情况配置\n"
+                                          "支持多个命令（默认使用第一个，/new 和 /reply 时可切换）")
+        if cmds:
+            if len(cmds) == 1:
+                self.env.set(env_key, cmds[0])
+            else:
+                self.env.set(env_key, '[' + ', '.join(cmds) + ']')
         else:
-            existing_cmds = []
-            if existing_cmd:
-                stripped = existing_cmd.strip()
-                if stripped.startswith('[') and stripped.endswith(']'):
-                    inner = stripped[1:-1]
-                    existing_cmds = [c.strip().strip('"').strip("'") for c in inner.split(',') if c.strip()]
-                else:
-                    existing_cmds = [stripped]
+            self.env.set(env_key, default_cmd)
+            self.env.set(template_key, '{cmd} {args}')
+            return
 
-            cmds = TerminalUI.input_list("CLAUDE_COMMAND", existing=existing_cmds,
-                                         hint="如使用第三方 CLI、别名或自定义环境变量封装，请按实际情况配置\n"
-                                              "支持多个命令（默认使用第一个，/new 和 /reply 时可切换）")
-            if cmds:
-                if len(cmds) == 1:
-                    self.env.set('CLAUDE_COMMAND', cmds[0])
-                else:
-                    self.env.set('CLAUDE_COMMAND', '[' + ', '.join(cmds) + ']')
+        # 按 agent 类型检测对应的执行模式
+        # Claude: --print（非交互输出模式）
+        # Codex: exec（非交互执行子命令）
+        if agent_type == 'claude':
+            check_fn = self.deps.check_supports_print_flag
+            flag_name = '--print'
+        else:
+            check_fn = self.deps.check_supports_exec_subcommand
+            flag_name = 'exec'
+
+        TerminalUI.print_text()
+        TerminalUI.print_dim("正在检测命令参数支持情况（需加载用户 shell 环境，请稍候）...")
+        supported = []
+        unsupported = []
+        for cmd_item in cmds:
+            if check_fn(cmd_item):
+                supported.append(cmd_item)
             else:
-                self.env.set('CLAUDE_COMMAND', 'claude')
+                unsupported.append(cmd_item)
 
-            # 检测自定义命令是否支持 --print 参数
-            TerminalUI.print_text()
-            TerminalUI.print_dim("正在检测命令参数支持情况（需加载用户 shell 环境，请稍候）...")
-            supported = []
-            unsupported = []
-            for cmd_item in cmds:
-                if self.deps.check_supports_print_flag(cmd_item):
-                    supported.append(cmd_item)
-                else:
-                    unsupported.append(cmd_item)
+        if not unsupported:
+            TerminalUI.print_success(f"所有命令均支持 {flag_name} 参数，将使用默认参数模板")
+        else:
+            for s in supported:
+                TerminalUI.print_success(f"{s}: 支持 {flag_name}")
+            for u in unsupported:
+                TerminalUI.print_warning(f"{u}: 不支持 {flag_name}")
 
-            # 输出检测结果
-            if not unsupported:
-                TerminalUI.print_success("所有命令均支持 --print 参数，将使用默认参数模板")
+        if len(unsupported) == len(cmds):
+            needs_template = True
+        elif unsupported:
+            choice = TerminalUI.select_option("命令参数模式不一致，如何处理？", [
+                ("重新输入命令", "修改为参数模式一致的命令列表"),
+                ("跳过", "保持当前配置，不配置参数模板（不支持的命令可能无法正常工作）"),
+                ("取消", "退出初始化"),
+            ])
+            if choice == 0:
+                self._configure_single_agent_command(
+                    agent_type, display_name, env_key, default_cmd, template_key)
+                return
+            needs_template = False
+        else:
+            needs_template = False
+
+        if needs_template:
+            TerminalUI.print_dim(f"命令不支持 {flag_name} 参数，需要通过模板告诉系统如何传递参数")
+
+            def _validate_template(v):
+                if '{cmd}' not in v or '{args}' not in v:
+                    return "模板必须同时包含 {cmd} 和 {args}"
+                return None
+
+            if agent_type == 'claude':
+                example_args = '--print prompt --session-id xxx'
             else:
-                for s in supported:
-                    TerminalUI.print_success(f"{s}: 支持 --print")
-                for u in unsupported:
-                    TerminalUI.print_warning(f"{u}: 不支持 --print")
+                example_args = 'exec --json --cd /path prompt'
 
-            if len(unsupported) == len(cmds):
-                # 全部不支持 → 必须配置 template
-                needs_template = True
-            elif unsupported:
-                # 部分支持 → 让用户选择
-                choice = TerminalUI.select_option("命令参数模式不一致，如何处理？", [
-                    ("重新输入命令", "修改为参数模式一致的命令列表"),
-                    ("跳过", "保持当前配置，不配置参数模板（不支持的命令可能无法正常工作）"),
-                    ("取消", "退出初始化"),
-                ])
-                if choice == 0:
-                    # 递归回到命令输入
-                    self._configure_claude_command()
-                    return
-                # choice == 1: 跳过，不配 template
-                needs_template = False
-            else:
-                # 全部支持 → 不需要 template
-                needs_template = False
-
-            if needs_template:
-                TerminalUI.print_dim("命令不支持 --print 参数，需要通过模板告诉系统如何传递参数")
-                def _validate_template(v):
-                    if '{cmd}' not in v or '{args}' not in v:
-                        return "模板必须同时包含 {cmd} 和 {args}"
-                    return None
-
-                existing_template = self.env.get('CLAUDE_ARGS_TEMPLATE')
-                template = TerminalUI.input_or_keep("CLAUDE_ARGS_TEMPLATE", existing=existing_template, required=False,
-                                                    validate=_validate_template,
-                                                    hint="命令行模板，默认 {cmd} {args}，其中:\n"
-                                                         "  {cmd} = CLAUDE_COMMAND 的值，{args} = --print prompt 等参数\n"
-                                                         "  默认执行效果: claude --print prompt --session-id xxx\n"
-                                                         "仅当第三方 CLI 参数传递方式不同时才需修改，如:\n"
-                                                         "  某 CLI 需要 wrapper -a \"--print prompt\" → 模板填 {cmd} -a \"{args}\"")
-                self.env.set('CLAUDE_ARGS_TEMPLATE', template or '{cmd} {args}')
-            else:
-                self.env.set('CLAUDE_ARGS_TEMPLATE', '{cmd} {args}')
+            existing_template = self.env.get(template_key)
+            template = TerminalUI.input_or_keep(
+                template_key, existing=existing_template, required=False,
+                validate=_validate_template,
+                hint=f"命令行模板，默认 {{cmd}} {{args}}，其中:\n"
+                     f"  {{cmd}} = {env_key} 的值，{{args}} = {example_args} 等参数\n"
+                     f"  默认执行效果: {default_cmd} {example_args}\n"
+                     f"仅当第三方 CLI 参数传递方式不同时才需修改")
+            self.env.set(template_key, template or '{cmd} {args}')
+        else:
+            self.env.set(template_key, '{cmd} {args}')
 
     def _configure_permission(self):
         TerminalUI.print_section("权限请求")
@@ -1758,7 +1926,7 @@ class SetupInit:
              "飞书审批卡片延迟发送秒数，0 = 立即发送"),
             ("PERMISSION_REQUEST_TIMEOUT", self.env.get('PERMISSION_REQUEST_TIMEOUT') or '600', _validate_positive_int,
              "权限请求超时秒数，超时后回退到终端交互"),
-        ], hint="Claude 触发权限请求时的飞书通知和超时行为")
+        ], hint="Agent 触发权限请求时的飞书通知和超时行为")
         self.env.set('PERMISSION_NOTIFY_DELAY', results['PERMISSION_NOTIFY_DELAY'] or '60')
         self.env.set('PERMISSION_REQUEST_TIMEOUT', results['PERMISSION_REQUEST_TIMEOUT'] or '600')
 

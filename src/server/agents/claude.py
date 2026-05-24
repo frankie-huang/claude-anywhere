@@ -96,7 +96,7 @@ def _get_mcp_args(project_dir: str, session_id: str) -> List[str]:
     Returns:
         MCP 相关参数 argv 列表(未经 shell quote), MCP 脚本缺失时返回空列表
     """
-    # 动态定位 MCP 脚本路径（与 handlers/claude.py 同级目录下的 permission_mcp.py）
+    # 动态定位 MCP 脚本路径（与 handlers/agent.py 同级目录下的 permission_mcp.py）
     handlers_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'handlers')
     mcp_script = os.path.join(handlers_dir, "permission_mcp.py")
 

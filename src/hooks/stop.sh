@@ -396,11 +396,7 @@ extract_response_from_file() {
     fi
 
     while [ $retry_count -lt $max_retries ]; do
-        if [ "$extract_fn" = "extract_codex_response" ]; then
-            result=$($extract_fn "$transcript_file" "$turn_id")
-        else
-            result=$($extract_fn "$transcript_file")
-        fi
+        result=$($extract_fn "$transcript_file" "$turn_id")
 
         if [ -n "$result" ] && [ "$result" != "null" ]; then
             echo "$result"

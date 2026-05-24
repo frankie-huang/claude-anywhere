@@ -37,7 +37,6 @@ import json
 import logging
 import os
 import threading
-import time
 from typing import Any, Callable, Dict, List, Tuple
 
 from services.auth_token import check_global_auth_token
@@ -45,7 +44,7 @@ from services.request_manager import RequestManager
 from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
-from handlers.claude import handle_continue_session, handle_new_session
+from handlers.agent import handle_continue_session, handle_new_session
 from handlers.utils import send_json, send_html_response, create_feishu_group
 
 logger = logging.getLogger(__name__)
@@ -62,11 +61,11 @@ ACTION_HTML_RESPONSES = {
     },
     'deny': {
         'title': '已拒绝运行',
-        'message': '权限请求已拒绝。Claude 可能会尝试其他方式继续工作。'
+        'message': '权限请求已拒绝。Agent 可能会尝试其他方式继续工作。'
     },
     'interrupt': {
         'title': '已拒绝并中断',
-        'message': '权限请求已拒绝，Claude 已停止当前任务。'
+        'message': '权限请求已拒绝，Agent 已停止当前任务。'
     }
 }
 
@@ -214,22 +213,19 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
         logger.error("[callback] handle_get_chat_id: SessionChatStore not initialized")
         return 500, {'chat_id': '', 'muted': False}
 
-    agent_type = data.get('agent_type', '').strip().lower()
-    project_dir = data.get('project_dir', '').strip()
-    if agent_type and project_dir:
-        store.adopt_pending_session(session_id, agent_type, project_dir)
-
     chat_id = store.get_active_chat_id(session_id)   # 过滤 dissolved + expired（已解散群无可用 chat_id）
     muted = store.is_session_muted(session_id)       # 仅过滤 expired（mute 是 session 维度，与群解散无关）
 
     # 目录级 mute 自动继承：仅对真正不存在（非 dissolved）的新 session 生效
     if not chat_id and not muted and store.get_session(session_id, include_dissolved=True) is None:
+        project_dir = data.get('project_dir', '').strip()
         if project_dir:
             from services.directory_store import DirectoryStore
             dir_store = DirectoryStore.get_instance()
             if dir_store and dir_store.is_dir_muted(project_dir):
-                # 创建 muted session 记录（只写 project_dir + muted，无 chat_id）
-                if not store.save(session_id, '', project_dir=project_dir):
+                # 创建 muted session 记录（只写 project_dir + agent_type + muted，无 chat_id）
+                agent_type = data.get('agent_type', '')
+                if not store.save(session_id, '', project_dir=project_dir, agent_type=agent_type):
                     logger.error("[callback] Auto-muted session %s: save failed", session_id)
                     return 200, {'chat_id': '', 'muted': False}
                 if store.mute_session(session_id) is None:
@@ -598,7 +594,7 @@ _ensure_chat_locks: Dict[str, threading.Lock] = {}
 _ensure_chat_global_lock = threading.Lock()
 
 
-def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
+def do_ensure_chat(agent_type: str, session_id: str, project_dir: str) -> Tuple[bool, str]:
     """确保 session 有对应的 chat_id（group 模式下创建群聊）
 
     调用方（各自负责鉴权）:
@@ -613,7 +609,8 @@ def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
     成功后 save(chat_id) 自动清除 dissolved（复活）。
 
     Args:
-        session_id: Claude 会话 ID
+        agent_type: agent 类型标识（'claude'/'codex'），写入 session 记录
+        session_id: 会话 ID
         project_dir: 项目工作目录（建群命名用，同时存入 session 字段）
 
     Returns:
@@ -657,7 +654,8 @@ def do_ensure_chat(session_id: str, project_dir: str) -> Tuple[bool, str]:
 
         chat_id = result
         # 建群成功才写 session 记录（新建或 dissolved 自动复活）
-        session_store.save(session_id, chat_id, project_dir=project_dir)
+        session_store.save(session_id, chat_id, project_dir=project_dir,
+                           agent_type=agent_type)
         logger.info("[ensure-chat] Created group: session=%s, chat_id=%s",
                     session_id, chat_id)
 
@@ -682,7 +680,8 @@ def handle_ensure_chat(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     if not session_id:
         return 400, {'error': 'Missing session_id'}
 
-    ok, result = do_ensure_chat(session_id, project_dir)
+    agent_type = data.get('agent_type', '')
+    ok, result = do_ensure_chat(agent_type, session_id, project_dir)
     if ok:
         return 200, {'chat_id': result}
     else:
@@ -911,7 +910,7 @@ def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
         - session_id: Claude 会话 ID
 
     响应:
-        {project_dir: str, claude_command: str, chat_id: str, dissolved: bool}
+        {project_dir: str, claude_command: str, agent_type: str, chat_id: str, dissolved: bool}
         session 不存在或已过期返回全空（非错误）
     """
     from services.session_chat_store import SessionChatStore
@@ -930,10 +929,11 @@ def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
     # include_dissolved=True：只读属性继承场景，dissolved 不应阻断
     item = store.get_session(session_id, include_dissolved=True)
     if not item:
-        return 200, {'project_dir': '', 'claude_command': '', 'chat_id': '', 'dissolved': False}
+        return 200, {'project_dir': '', 'claude_command': '', 'agent_type': '', 'chat_id': '', 'dissolved': False}
     return 200, {
         'project_dir': item.get('project_dir', ''),
         'claude_command': item.get('claude_command', ''),
+        'agent_type': item.get('agent_type', ''),
         'chat_id': item.get('chat_id', ''),
         'dissolved': bool(item.get('dissolved')),
     }
@@ -978,15 +978,18 @@ def handle_session_clone(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple
     # 从旧 session 读取继承属性（允许 dissolved，只读不改）
     project_dir = ''
     claude_command = ''
+    agent_type = ''
     if old_session_id:
         old_item = store.get_session(old_session_id, include_dissolved=True)
         if old_item:
             project_dir = old_item.get('project_dir', '')
             claude_command = old_item.get('claude_command', '')
+            agent_type = old_item.get('agent_type', '')
 
     # 创建新 session 记录
     ok = store.save(new_session_id, chat_id,
-                    project_dir=project_dir, claude_command=claude_command)
+                    project_dir=project_dir, claude_command=claude_command,
+                    agent_type=agent_type)
     if not ok:
         return 500, {'error': 'Failed to save new session'}
 

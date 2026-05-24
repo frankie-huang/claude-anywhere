@@ -42,8 +42,9 @@ class GroupSessionStore:
             "ou_xxx_owner": {
                 "oc_yyy_chat": {
                     "session_id": "...",
-                    "project_dir": "/path/to/project",   # 入站消息转发到 /cb/claude/continue 时必传
-                    "last_active_at": 1706745600,        # 最近一次群聊活动时间（供自动解散判断）
+                    "project_dir": "/path/to/project",  # 入站消息转发到 /cb/claude/continue 时必传
+                    "new_session": false,               # /clear 后为 true，首条消息触发新建会话后自动清除
+                    "last_active_at": 1706745600,       # 最近一次群聊活动时间（供自动解散判断）
                     "created_at": 1706745600
                 }
             }
@@ -159,7 +160,7 @@ class GroupSessionStore:
         /attach 切换）。新记录的 last_active_at 初始化为当前时间。
 
         Args:
-            new_session: 标记该 session 尚未启动 Claude 进程，下次消息应走 /new
+            new_session: 标记该 session 尚未启动 agent 进程，下次消息应走 /new
                          而非 /continue。/clear 预创建 session 时设为 True，
                          后续 _forward_new_request 中的 save() 不传此参数自动清除。
         """

@@ -499,8 +499,10 @@ def main():
 
     # 初始化 SessionChatStore（callback 后端存储 session_id -> chat_id 映射）
     from config import SESSION_EXPIRE_DAYS
-    SessionChatStore.initialize(runtime_dir, expire_seconds=SESSION_EXPIRE_DAYS * 86400)
+    session_store = SessionChatStore.initialize(runtime_dir, expire_seconds=SESSION_EXPIRE_DAYS * 86400)
     logger.info(f"SessionChatStore initialized with runtime_dir={runtime_dir}, expire={SESSION_EXPIRE_DAYS}d")
+    # 旧 session 都是 Claude 创建的（Codex 支持是新增的），固定补 'claude'
+    session_store.backfill_agent_type('claude')
 
     GroupChatStore.initialize(runtime_dir)
     logger.info(f"GroupChatStore initialized with runtime_dir={runtime_dir}")
@@ -563,14 +565,18 @@ def main():
             from config import (FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
                                 FEISHU_SESSION_MODE,
                                 DEFAULT_CHAT_FOLLOW_THREAD,
-                                FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS)
-            from agents import get_agent_adapter
+                                FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS,
+                                get_default_agent)
+            from agents import get_all_agent_commands
+            all_cmds = get_all_agent_commands()
             start_ws_tunnel_client(
                 FEISHU_GATEWAY_URL, FEISHU_OWNER_ID,
                 reply_in_thread=FEISHU_REPLY_IN_THREAD,
                 at_bot_only=FEISHU_AT_BOT_ONLY,
                 session_mode=FEISHU_SESSION_MODE,
-                claude_commands=get_agent_adapter().get_commands(),
+                default_agent=get_default_agent(),
+                claude_commands=all_cmds.get('claude'),
+                codex_commands=all_cmds.get('codex'),
                 default_chat_dir=DEFAULT_CHAT_DIR,
                 default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
                 group_name_prefix=FEISHU_GROUP_NAME_PREFIX,

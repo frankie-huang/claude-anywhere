@@ -45,7 +45,8 @@ class SessionChatStore:
         {
             "session_id": {
                 "chat_id": "oc_xxx",               # 飞书群聊 ID；空表示需要 ensure-chat 重建
-                "claude_command": "claude",        # 使用的 Claude 命令（可选）
+                "agent_type": "claude",            # agent 类型: 'claude' / 'codex'（旧数据可能缺失，默认视为 claude）
+                "claude_command": "claude",        # 使用的命令（可选）
                 "last_message_id": "om_xxx",       # 链式回复锚点（可选）
                 "skip_next_user_prompt": true,     # 跳过下一条 UserPromptSubmit（飞书发起时设置，可选）
                 "updated_at": 1706745600,          # 最近更新时间戳
@@ -83,6 +84,31 @@ class SessionChatStore:
     def get_instance(cls) -> Optional['SessionChatStore']:
         return cls._instance
 
+    def backfill_agent_type(self, default: str = 'claude') -> int:
+        """为缺少 agent_type 的旧 session 记录补写默认值
+
+        启动时调用一次，处理从旧版本升级的历史数据。
+
+        Returns:
+            补写的记录数
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                count = 0
+                for entry in data.values():
+                    if isinstance(entry, dict) and not entry.get('agent_type'):
+                        entry['agent_type'] = default
+                        count += 1
+                if count > 0:
+                    self._save(data)
+                    logger.info("[session-chat-store] Backfilled agent_type='%s' for %d sessions",
+                                default, count)
+                return count
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to backfill agent_type: %s", e)
+                return 0
+
     # =========================================================================
     # 写
     # =========================================================================
@@ -116,6 +142,7 @@ class SessionChatStore:
                 entry['updated_at'] = int(time.time())
                 if claude_command:
                     entry['claude_command'] = claude_command
+                # agent_type：传了才写，空串不动（旧 session 缺失时在读取侧 fallback 到默认值）
                 if agent_type:
                     entry['agent_type'] = agent_type
                 if project_dir:
@@ -173,56 +200,6 @@ class SessionChatStore:
                 return result
             except Exception as e:
                 logger.error("[session-chat-store] Failed to rename session: %s", e)
-                return False
-
-    def adopt_pending_session(self, session_id: str, agent_type: str,
-                              project_dir: str, max_age_seconds: int = 600) -> bool:
-        """将最近的临时新会话记录迁移到真实 agent session_id。
-
-        Codex 新会话的真实 session_id 由 CLI 生成，可能先在 hook 输入中出现，
-        而飞书 /new 链路已经用临时 UUID 创建了 group/chat mapping。这里按
-        agent + project_dir + 最近更新时间匹配 pending 记录，把 skip 标志和
-        chat_id 迁移到真实 session，避免重复建群和重复回显首条 prompt。
-        """
-        if not session_id or not agent_type or not project_dir:
-            return False
-
-        agent_type = agent_type.strip().lower()
-        now = int(time.time())
-
-        with self._file_lock:
-            try:
-                data = self._load()
-                if session_id in data:
-                    return False
-
-                candidates = []
-                for sid, entry in data.items():
-                    if sid == session_id:
-                        continue
-                    if entry.get('project_dir') != project_dir:
-                        continue
-                    if now - int(entry.get('updated_at', 0) or 0) > max_age_seconds:
-                        continue
-                    if entry.get('agent_type', '') != agent_type:
-                        continue
-                    if not entry.get('skip_next_user_prompt') and entry.get('last_message_id'):
-                        continue
-                    candidates.append((int(entry.get('updated_at', 0) or 0), sid))
-
-                if not candidates:
-                    return False
-
-                _, old_id = max(candidates)
-                data[session_id] = data.pop(old_id)
-                data[session_id]['updated_at'] = now
-                result = self._save(data)
-                if result:
-                    logger.info("[session-chat-store] Adopted pending %s session: %s -> %s",
-                                agent_type, old_id, session_id)
-                return result
-            except Exception as e:
-                logger.error("[session-chat-store] Failed to adopt pending session: %s", e)
                 return False
 
     def set_last_message_id(self, session_id: str, message_id: str) -> bool:
@@ -608,5 +585,3 @@ class SessionChatStore:
         except (IOError, OSError) as e:
             logger.error("[session-chat-store] Failed to save: %s", e)
             return False
-
-

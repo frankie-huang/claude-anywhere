@@ -70,6 +70,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             - chat_id: 飞书聊天 ID（网关调用时必传）
             - message_id: 用户消息 ID (可选，用于回复式通知)
             - claude_command: 指定使用的命令 (可选)
+            - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 读取)
 
     Returns:
         (success, response):
@@ -106,12 +107,15 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
-    adapter = get_agent_adapter()
+    # 从 session 记录获取 agent_type，确保 reply 延续创建时的 agent
+    agent_type = session_data.get('agent_type', '') or None
+    adapter = get_agent_adapter(agent_type)
 
     # 验证 command 合法性（如果指定了的话）
-    if claude_command:
-        if claude_command not in adapter.get_commands():
-            return Response.error('invalid claude_command')
+    if claude_command and claude_command not in adapter.get_commands():
+        available = ', '.join(adapter.get_commands())
+        return Response.error(
+            '无效的命令 "%s"，%s 可用命令: %s' % (claude_command, adapter.display_name, available))
 
     # Command 优先级: 请求指定 > session 记录 > 默认
     if not claude_command:
@@ -153,6 +157,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
                 由本函数调 do_ensure_chat 建群后回填
             - message_id: 原始消息 ID (可选，用于飞书网关回复用户消息)
             - claude_command: 指定使用的命令 (可选)
+            - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 或默认值获取)
             - skip_user_prompt: 是否跳过首条 UserPromptSubmit 通知 (默认 True)；
                 group 模式 P2P 建群分支需置 False，让 hook 把首条 prompt 补发到新群
 
@@ -166,11 +171,12 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if not session_store:
         return Response.error('Session store not initialized')
 
-    project_dir = data.get('project_dir', '')
-    prompt = data.get('prompt', '')
-    chat_id = data.get('chat_id', '') or ''  # 确保 None 转为空字符串
+    project_dir = data.get('project_dir', '') or ''
+    prompt = data.get('prompt', '') or ''
+    chat_id = data.get('chat_id', '') or ''
     message_id = data.get('message_id', '') or ''
     claude_command = data.get('claude_command', '') or ''
+    agent_type = data.get('agent_type', '') or ''
     # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
     session_id = data.get('session_id', '') or str(uuid.uuid4())
 
@@ -183,16 +189,21 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
-    adapter = get_agent_adapter()
-
-    # 确定实际命令：网关传入 > store 已有值（/clear clone 继承）> 默认
-    if claude_command:
-        # 验证 command 合法性（如果指定了的话）
-        if claude_command not in adapter.get_commands():
-            return Response.error('invalid claude_command')
-    else:
+    # agent_type / claude_command 优先级：网关传入 > store 已有值（/clear clone 继承）> 默认
+    if not agent_type or not claude_command:
         session_data = session_store.get_session(session_id)
-        claude_command = (session_data or {}).get('claude_command', '')
+        if session_data:
+            if not agent_type:
+                agent_type = session_data.get('agent_type', '')
+            if not claude_command:
+                claude_command = session_data.get('claude_command', '')
+    adapter = get_agent_adapter(agent_type or None)
+
+    # 验证 command 合法性（如果指定了的话）
+    if claude_command and claude_command not in adapter.get_commands():
+        available = ', '.join(adapter.get_commands())
+        return Response.error(
+            '无效的命令 "%s"，%s 可用命令: %s' % (claude_command, adapter.display_name, available))
     actual_cmd = adapter.resolve_command(claude_command)
     logger.info("[%s-new] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
                 adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
@@ -202,7 +213,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if is_group_mode and not chat_id:
         # group 模式无 chat_id → 委托给 do_ensure_chat 创建群聊并绑定
         from handlers.callback import do_ensure_chat
-        ok, ensure_result = do_ensure_chat(session_id, project_dir)
+        ok, ensure_result = do_ensure_chat(adapter.agent_type, session_id, project_dir)
         if not ok:
             logger.warning("[%s-new] ensure-chat failed for %s: %s",
                            adapter.agent_type, session_id, ensure_result)

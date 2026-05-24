@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
-### Added - 2026-05-11
+### Added - 2026-05-23
 
 #### 支持 OpenAI Codex CLI 作为第二 Agent
 
