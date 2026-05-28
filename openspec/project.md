@@ -1,7 +1,7 @@
 # Project Context
 
 ## Purpose
-claude-anywhere 是一个为 Claude Code 提供飞书通知机制的工具，支持可交互权限控制。当 Claude Code 发起权限请求时，通过飞书 Webhook 发送通知卡片，用户可以直接在飞书中点击按钮批准或拒绝请求，无需返回终端操作。
+code-anywhere 是一个为 AI 编码 Agent 提供飞书通知机制的工具，当前支持 Claude Code 和 OpenAI Codex，并支持可交互权限控制。当 Agent 发起权限请求时，通过飞书 Webhook 或 OpenAPI 发送通知卡片，用户可以直接在飞书中点击按钮批准或拒绝请求，无需返回终端操作。
 
 ## Tech Stack
 - **Shell Script**: Hook 脚本（Bash）

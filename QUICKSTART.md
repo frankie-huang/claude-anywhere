@@ -1,6 +1,6 @@
 # QuickStart - 5 分钟快速上手
 
-本指南帮助你以最快速度跑通 claude-anywhere，让 Claude Code 的权限请求和任务通知发送到飞书。
+本指南帮助你以最快速度跑通 code-anywhere，让 Claude Code、Codex 等 Agent 的权限请求和任务通知发送到飞书。
 
 ---
 
@@ -289,6 +289,6 @@ VSCODE_SSH_PROXY_PORT=9527    # 需与本地代理端口一致
 
 - [部署模式架构](docs/deploy/DEPLOYMENT_MODES.md) - Webhook vs OpenAPI 详细对比
 - [OpenAPI 部署](docs/deploy/DEPLOYMENT_OPENAPI.md) - OpenAPI 模式完整指南
-- [会话继续功能](docs/design/FEISHU_SESSION_CONTINUE.md) - 飞书回复继续 Claude 会话
+- [会话继续功能](docs/design/FEISHU_SESSION_CONTINUE.md) - 飞书回复继续 Agent 会话
 - [安全分析](docs/design/SECURITY_ANALYSIS.md) - 安全性说明
 - [用户使用指南](docs/reference/USER_GUIDE.md) - 飞书端使用说明（指令、卡片交互、错误处理）

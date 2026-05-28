@@ -119,8 +119,8 @@
 | 项目 | Claude | Codex |
 |------|--------|-------|
 | 进程 env 清理 | 清除 `CLAUDECODE` 变量（防止嵌套会话检测） | 无特殊清理 |
-| AGENT_TYPE 传递 | hook 由 CLI 直接启动，不一定继承服务端 env | 同左 |
-| AGENT_TYPE 检测 | `hook-router.sh` 从 `transcript_path` 路径匹配 `/.claude/` | 从 `transcript_path` 匹配 `/.codex/sessions/` |
+| Hook agent_type 传递 | hook 由 CLI 直接启动，不一定继承服务端 env | 同左 |
+| Hook agent_type 检测 | `hook-router.sh` 从 `transcript_path` 路径匹配 `/.claude/` | 从 `transcript_path` 匹配 `/.codex/sessions/` |
 
 **文件**：`hook-router.sh`、`agents/claude.py` `build_env()`
 
@@ -134,4 +134,4 @@
 | 超时提示 | "请尽快操作以避免 Claude Code 超时等待" | "请尽快操作以避免 Codex 超时等待" |
 | 错误通知 | "❌ Claude 执行异常" | "❌ Codex 执行异常" |
 
-**文件**：`feishu.sh` `_agent_display_name()` / `_agent_resume_command()`、`handlers/feishu.py`、`handlers/claude.py`
+**文件**：`feishu.sh` `_agent_display_name()` / `_agent_resume_command()`、`handlers/feishu.py`、`handlers/agent.py`

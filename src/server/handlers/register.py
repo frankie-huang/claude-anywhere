@@ -83,7 +83,9 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
             - at_bot_only: 群聊 @bot 过滤（可选）
             - session_mode: 会话模式，message/thread/group（可选，默认 message）
             - reply_in_thread: 已废弃，兼容旧客户端（True 映射为 session_mode='thread'）
+            - default_agent: 默认 agent 类型（可选）
             - claude_commands: 可用的 Claude 命令列表（可选）
+            - codex_commands: 可用的 Codex 命令列表（可选）
             - default_chat_dir: 默认聊天目录（可选）
             - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（可选）
             - group_name_prefix: 群聊名称前缀（可选）

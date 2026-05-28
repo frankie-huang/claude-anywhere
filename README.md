@@ -1,10 +1,10 @@
-# claude-anywhere
+# code-anywhere
 
-用于实现 Claude Code 的飞书通知机制，支持可交互权限控制、会话继续和远程决策。
+用于实现 AI 编码 Agent 的飞书通知机制，支持 Claude Code、OpenAI Codex、可交互权限控制、会话继续和远程决策。
 
 ## 项目概述
 
-本项目为 Claude Code 提供飞书通知功能，允许用户远程响应权限请求，无需返回终端操作。项目支持两种部署模式：
+本项目为 AI 编码 Agent 提供飞书通知功能，允许用户远程响应权限请求，无需返回终端操作。当前支持 Claude Code 和 OpenAI Codex，并支持两种部署模式：
 
 | 模式 | 说明 | 适用场景 |
 |------|------|----------|
@@ -15,13 +15,14 @@
 
 - **可交互权限控制** - 飞书卡片 4 键操作（批准/始终允许/拒绝/中断）
 - **飞书回复继续会话** - 直接回复飞书消息继续提问（OpenAPI 模式）
+- **多 Agent 支持** - 同一服务可同时启用 Claude Code 和 OpenAI Codex
 - **任务完成通知** - 处理完成后自动发送响应摘要和会话标识
 - **优雅降级** - 回调服务不可用时自动降级为仅通知模式
 - **权限持久化** - "始终允许"自动写入项目权限规则
 
 ### 项目组件
 
-1. **统一 Hook 路由** (`src/hook-router.sh`) - Claude Code Hook 统一入口，事件分发
+1. **统一 Hook 路由** (`src/hook-router.sh`) - Agent Hook 统一入口，事件分发
 2. **用户 Prompt 同步脚本** (`src/hooks/user_prompt.sh`) - UserPromptSubmit 事件处理
 3. **权限处理脚本** (`src/hooks/permission.sh`) - PermissionRequest 事件处理
 4. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
@@ -33,12 +34,12 @@
 ## 项目结构
 
 ```
-claude-anywhere/
+code-anywhere/
 ├── setup.sh                    # 一键安装脚本（推荐）
 ├── install.sh                  # 安装配置脚本（手动安装）
 ├── .env.example                # 环境变量模板
 ├── src/                        # 源代码目录
-│   ├── hook-router.sh          # Hook 统一入口（配置到 Claude Code）
+│   ├── hook-router.sh          # Hook 统一入口（配置到 Claude/Codex）
 │   ├── start-server.sh         # 回调服务启动脚本
 │   ├── hooks/                  # Hook 事件处理脚本
 │   │   ├── user_prompt.sh      # 用户 Prompt 同步（UserPromptSubmit 事件）
@@ -146,7 +147,7 @@ curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/
 
 安装脚本会：
 - 检测环境依赖（python3, curl 等）
-- 配置 Claude Code hook
+- 配置已启用 Agent 的 hook
 - 生成环境变量配置模板
 
 #### 2. 配置环境变量
@@ -178,7 +179,7 @@ vim .env
 
 #### 4. 开始使用
 
-启动 Claude Code，权限请求将自动发送到飞书。
+启动已配置的 Agent，权限请求和完成通知将自动发送到飞书。
 
 ## 架构设计
 
@@ -247,7 +248,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
                               │  WS 长连接      │   WS 长连接  │   WS 长连接   │
                               ▼                 ▼              ▼              ▼
 ┌──────────────┐      ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│ Claude Code  │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
+│ Agent CLI    │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
 │  本地 MacBook│      │ (本地电脑)   │   │ (本地电脑)   │   │ (云服务器)   │
 └──────────────┘      └─────────────┘   └─────────────┘   └─────────────┘
                               │                 │              │
@@ -270,7 +271,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
                               │                 │              │              │
                               ▼                 ▼              ▼              ▼
 ┌──────────────┐      ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│ Claude Code  │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
+│ Agent CLI    │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
 │   实例 A     │      │ :8081       │   │ :8082       │   │ :8083       │
 └──────────────┘      └─────────────┘   └─────────────┘   └─────────────┘
                               │                 │              │
@@ -302,12 +303,12 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 - **可交互权限控制**: 用户可直接在飞书消息中点击按钮批准/拒绝权限请求
 - **四种操作模式**: 批准运行、始终允许、拒绝运行、拒绝并中断
 - **权限持久化**: 支持"始终允许"选项，自动写入项目权限规则
-- **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch、ExitPlanMode 等 Claude Code 工具
+- **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch、ExitPlanMode 等 Agent 工具
 
 ### 会话继续（OpenAPI 模式）
 - **飞书回复继续会话**: 用户可回复飞书消息在对应的会话中继续提问
 - **群聊支持**: 支持将消息发送到飞书群聊，Session 自动映射到对应群聊
-- **多实例支持**: 分离部署模式下，多个 Claude Code 实例可独立工作
+- **多实例支持**: 分离部署模式下，多个 Agent 实例可独立工作
 
 ### 系统特性
 - **优雅降级**: 回调服务不可用时自动降级为仅通知模式
@@ -420,7 +421,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `http_handler.py` | HTTP 请求处理器（GET/POST 路由分发入口） | 全部 |
 | `callback.py` | 权限回调处理器（接收按钮操作） | `/cb/*` |
 | `feishu.py` | 飞书事件处理器（OpenAPI 网关） | `/gw/feishu/*` |
-| `agent.py` | Agent 会话处理器 | `/cb/claude/new`, `/cb/claude/continue` |
+| `agent.py` | Agent 会话处理器 | `/cb/agent/new`, `/cb/agent/continue` |
 | `register.py` | 网关注册处理器 | `/gw/register` |
 | `permission_mcp.py` | MCP 权限审批服务（headless 模式） | MCP stdio |
 | `utils.py` | 处理器通用工具函数 | - |
@@ -493,7 +494,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-anywhere/src/hook-router.sh"
+            "command": "/path/to/code-anywhere/src/hook-router.sh"
           }
         ]
       }
@@ -504,7 +505,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-anywhere/src/hook-router.sh",
+            "command": "/path/to/code-anywhere/src/hook-router.sh",
             "timeout": 660
           }
         ]
@@ -515,7 +516,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/claude-anywhere/src/hook-router.sh"
+            "command": "/path/to/code-anywhere/src/hook-router.sh"
           }
         ]
       }
@@ -733,7 +734,7 @@ DEFAULT_CHAT_FOLLOW_THREAD=false
 
 **多命令配置**
 
-支持配置多个 Claude 命令，在创建/继续会话时选择使用哪个：
+支持为每个 Agent 配置多个命令，在创建/继续会话时选择使用哪个：
 
 ```bash
 # 单命令（向后兼容）
@@ -741,12 +742,16 @@ CLAUDE_COMMAND=claude
 
 # 多命令（列表格式，无需引号）
 CLAUDE_COMMAND=[claude, claude --model opus]
+
+# Codex 同样支持单命令或多命令
+CODEX_COMMAND=[codex, codex --model gpt-5]
 ```
 
 配置多命令后：
-- `/new` 卡片会显示 Command 选择下拉框
+- `/new` 卡片会显示 Agent Command 选择下拉框
 - `/new --cmd=1 --dir=/path prompt` — 按索引选择
 - `/new --cmd=opus --dir=/path prompt` — 按名称子串匹配
+- `/new --cmd=codex::codex --dir=/path prompt` — 明确指定 agent 和命令
 - `/reply --cmd=opus prompt` — 回复消息时指定 Command（仅在回复消息时可用）
 - 每个 session 会记忆最近使用的 Command，后续回复自动复用
 
@@ -812,13 +817,13 @@ brew install python3 curl jq socat
 
 ### 权限交互流程
 
-1. Claude Code 发起权限请求
+1. Agent 发起权限请求
 2. `src/hooks/permission.sh` 发送飞书交互卡片（4 个按钮）：
    - **批准运行** - 允许这一次执行
    - **始终允许** - 允许并写入规则
    - **拒绝运行** - 拒绝，Agent 可继续尝试其他方式
    - **拒绝并中断** - 拒绝并停止当前任务
-3. 用户点击按钮，决策通过 Unix Socket 返回给 Claude Code
+3. 用户点击按钮，决策通过 Unix Socket 返回给触发请求的 Agent
 
 ### 降级模式
 
@@ -841,7 +846,7 @@ brew install python3 curl jq socat
 |------|------|
 | `/new` | 发起新会话，弹出目录选择卡片 |
 | `/new --dir=/path prompt` | 直接指定目录和提示词创建会话 |
-| `/new --cmd=1 --dir=/path prompt` | 指定 Claude Command（按索引或名称子串） |
+| `/new --cmd=1 --dir=/path prompt` | 指定 Agent Command（按索引或名称子串） |
 | `/reply --cmd=opus prompt` | 回复消息时指定 Command 继续会话 |
 
 - `/reply` 仅在回复消息时可用，用于临时切换 Command 继续会话

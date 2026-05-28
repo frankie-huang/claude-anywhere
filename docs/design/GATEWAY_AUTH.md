@@ -458,7 +458,7 @@ ou_xxx     | https://callback.example  | abc123.def456     | false           | [
 网关转发消息时在请求头中携带 auth_token：
 
 ```
-POST {callback_url}/cb/claude/continue
+POST {callback_url}/cb/agent/continue
 X-Auth-Token: {auth_token}
 Content-Type: application/json
 

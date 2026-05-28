@@ -64,7 +64,7 @@ def _forward_via_ws_or_http(binding: Dict[str, Any], endpoint: str, payload: Dic
 
     Args:
         binding: 绑定信息字典（包含 _owner_id、callback_url、auth_token）
-        endpoint: API 端点（如 /cb/decision, /cb/claude/new）
+        endpoint: API 端点（如 /cb/decision, /cb/agent/new）
         payload: 请求数据
         timeout: 请求超时（秒），默认使用各通道的默认超时
 
@@ -462,8 +462,8 @@ def _handle_message_event(data: dict):
             owner_id = binding.get('_owner_id', '')
             if gs_store and owner_id:
                 gs_store.touch(owner_id, chat_id)
-        # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
-        # agent_type 和 claude_command 不在路由表中，由 callback 侧从 session store 读取
+        # /clear 后首条消息：new_session 标志表示需要启动新 Agent 进程
+        # agent_type 和 command 不在路由表中，由 callback 侧从 session store 读取
         if route_info.get('new_session'):
             _run_in_background(_forward_new_request,
                                (binding, route_info['session_id'],
@@ -722,7 +722,7 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
 def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: str,
                                          project_dir: str, prompt: str,
                                          chat_id: str, message_id: str, chat_type: str = '',
-                                         claude_command: str = '', agent_type: str = '') -> str:
+                                         command: str = '', agent_type: str = '') -> str:
     """转发默认聊天新建会话请求，完成后将 session_id 持久化到 BindingStore
 
     此函数在后台线程运行，是 _forward_new_request 的包装：
@@ -733,7 +733,7 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: st
     """
     from services.binding_store import BindingStore
 
-    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, claude_command, agent_type)
+    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, command, agent_type)
 
     owner_id = binding.get('_owner_id', '') if binding else ''
     if session_id and owner_id:
@@ -745,17 +745,17 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: st
     return session_id
 
 
-def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
+def _forward_agent_request(binding: Dict[str, Any], endpoint: str,
                             payload: Dict[str, Any], chat_id: str,
                             reply_to: Optional[str] = None,
                             reply_in_thread: bool = False) -> str:
-    """转发 Claude 会话请求到 Callback 后端
+    """转发会话请求到 Callback 后端
 
     优先使用 WS 隧道，fallback 到 HTTP。
 
     Args:
         binding: 绑定信息字典（包含 _owner_id、callback_url、auth_token）
-        endpoint: API 端点（如 /cb/claude/new, /cb/claude/continue）
+        endpoint: API 端点（如 /cb/agent/new, /cb/agent/continue）
         payload: 请求数据
         chat_id: 群聊 ID（用于错误通知）
         reply_to: 要回复的消息 ID（可选）
@@ -768,7 +768,7 @@ def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
 
     owner_id = binding.get('_owner_id', '')
 
-    # 从 endpoint 提取 action（如 /cb/claude/new -> new）
+    # 从 endpoint 提取 action（如 /cb/agent/new -> new）
     action = endpoint.rstrip('/').split('/')[-1]
     known_actions = ('new', 'continue')
     if action not in known_actions:
@@ -807,8 +807,8 @@ def _forward_claude_request(binding: Dict[str, Any], endpoint: str,
         # 会导致当前聊天的 Typing 可能无法被移除，所以不加
         _send_session_result_notification(chat_id, response_data, payload.get('project_dir', ''),
                                           is_new=is_new,
-                                          claude_command=payload.get('claude_command', ''),
-                                          agent_type=payload.get('agent_type', ''),
+                                          command=payload.get('command', ''),
+                                          agent_type=response_data.get('agent_type', '') or payload.get('agent_type', ''),
                                           reply_to=reply_to,
                                           reply_in_thread=reply_in_thread,
                                           binding=binding,
@@ -855,7 +855,7 @@ def _extract_http_error_detail(http_error):
 
 def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
                               prompt: str, chat_id: str, message_id: str,
-                              claude_command: str = '', agent_type: str = '') -> str:
+                              command: str = '', agent_type: str = '') -> str:
     """转发继续会话请求到 Callback 后端
 
     Args:
@@ -865,7 +865,7 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         prompt: 用户回复内容
         chat_id: 群聊 ID
         message_id: 用户消息 ID（用于回复）
-        claude_command: 指定使用的 Claude 命令（可选）
+        command: 指定使用的命令（可选）
         agent_type: agent 类型（可选；handle_continue_session 从 session store 读取，此参数用于通知文案动态展示）
 
     Returns:
@@ -886,18 +886,18 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         'chat_id': chat_id,
         'message_id': message_id
     }
-    if claude_command:
-        data['claude_command'] = claude_command
+    if command:
+        data['command'] = command
     if agent_type:
         data['agent_type'] = agent_type
 
-    return _forward_claude_request(binding, '/cb/claude/continue',
+    return _forward_agent_request(binding, '/cb/agent/continue',
                                    data, chat_id, reply_to=message_id,
                                    reply_in_thread=reply_in_thread)
 
 
 def _send_session_result_notification(chat_id: str, response: dict, project_dir: str,
-                                      is_new: bool = False, claude_command: str = '',
+                                      is_new: bool = False, command: str = '',
                                       agent_type: str = '',
                                       reply_to: Optional[str] = None,
                                       reply_in_thread: bool = False,
@@ -910,7 +910,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
         response: Callback 返回的结果
         project_dir: 项目目录
         is_new: 是否为新建会话（True: 新建会话，False: 继续会话）
-        claude_command: 使用的命令（可选）
+        command: 使用的命令（可选）
         agent_type: agent 类型（可选，用于动态显示 agent 名称）
         reply_to: 要回复的消息 ID（可选，用于链式回复）
         reply_in_thread: 是否收进话题详情
@@ -945,8 +945,8 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
         if is_new:
             # 新建会话 - 发送文本消息，展示会话信息
             message = f"🆕 {agent_display} 会话已创建\n📁 项目: {_truncate_path(project_dir)}"
-            if claude_command:
-                message += f"\n🔧 命令: `{claude_command}`"
+            if command:
+                message += f"\n🔧 命令: `{command}`"
             if session_id:
                 message += f"\n🔑 Session: `{session_id}`"
             success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
@@ -1278,14 +1278,14 @@ def _resolve_agent_command_from_binding(
     return (False, '', '未找到匹配 "%s" 的命令，可用命令: %s' % (cmd_arg, available))
 
 
-def _build_creating_session_card(selected_dir: str, prompt: str, claude_command: str = '',
+def _build_creating_session_card(selected_dir: str, prompt: str, command: str = '',
                                  agent_type: str = '') -> dict:
     """构建"正在创建会话"状态卡片
 
     Args:
         selected_dir: 选择的工作目录
         prompt: 用户输入的提示词
-        claude_command: 使用的 Claude 命令（可选）
+        command: 使用的命令（可选）
         agent_type: agent 类型（如 'claude', 'codex'），用于显示名称
 
     Returns:
@@ -1314,12 +1314,12 @@ def _build_creating_session_card(selected_dir: str, prompt: str, claude_command:
         }
     ]
 
-    if claude_command:
+    if command:
         elements.append({
             'tag': 'div',
             'text': {
                 'tag': 'plain_text',
-                'content': f'🔧 命令：{claude_command}'
+                'content': f'🔧 命令：{command}'
             }
         })
 
@@ -1386,15 +1386,15 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
     # 获取 binding（用于解析默认命令和后续请求）
     binding = _get_binding_from_event(event)
 
-    # 解析 agent_type 和 claude_command
+    # 解析 agent_type 和 command
     if '::' in agent_command:
-        agent_type, claude_command = agent_command.split('::', 1)
+        agent_type, command = agent_command.split('::', 1)
     else:
         agent_type = ''
-        claude_command = agent_command
+        command = agent_command
 
     # 如果没有选择命令，从 binding 获取默认命令
-    if not claude_command:
+    if not command:
         ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
         if not ok:
             return True, {
@@ -1403,9 +1403,9 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
                     'content': result
                 }
             }
-        claude_command = result
+        command = result
 
-    logger.info(f"[feishu] Form values: recent_dir={recent_dir}, custom_dir={custom_dir}, browse_result={browse_result}, agent_type={agent_type}, claude_command={claude_command}, prompt={_sanitize_user_content(prompt)}, trigger={trigger_name}")
+    logger.info(f"[feishu] Form values: recent_dir={recent_dir}, custom_dir={custom_dir}, browse_result={browse_result}, agent_type={agent_type}, command={command}, prompt={_sanitize_user_content(prompt)}, trigger={trigger_name}")
 
     if not chat_id:
         logger.warning("[feishu] No chat_id in button value")
@@ -1454,12 +1454,12 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
             'type': TOAST_INFO,
             'content': '正在创建会话...'
         },
-        'card': _build_creating_session_card(selected_dir, prompt, claude_command, agent_type=agent_type)
+        'card': _build_creating_session_card(selected_dir, prompt, command, agent_type=agent_type)
     }
 
     # 在后台线程中异步执行会话创建
     new_session_id = str(uuid.uuid4())
-    _run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, claude_command, agent_type))
+    _run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, command, agent_type))
 
     return True, response
 
@@ -2529,7 +2529,9 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             - request_id: 注册请求 ID（WS 模式需要）
             - at_bot_only: 群聊 @bot 过滤（仅 approve_register 需要）
             - session_mode: 会话模式 message/thread/group（仅 approve_register 需要）
+            - default_agent: 默认 agent 类型（仅 approve_register 需要）
             - claude_commands: 可用的 Claude 命令列表（仅 approve_register 需要）
+            - codex_commands: 可用的 Codex 命令列表（仅 approve_register 需要）
             - default_chat_dir: 默认聊天目录（仅 approve_register 需要）
             - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（仅 approve_register 需要）
             - group_name_prefix: 群聊名称前缀（仅 approve_register 需要）
@@ -2737,7 +2739,7 @@ def _set_last_message_id_to_callback(binding: Dict[str, Any],
 
     Args:
         binding: 绑定信息字典（包含 _owner_id、callback_url、auth_token）
-        session_id: Claude 会话 ID
+        session_id: 会话 ID
         message_id: 飞书消息 ID
 
     Returns:
@@ -2832,7 +2834,7 @@ def _send_new_session_card(binding: dict, owner_id: str, chat_id: str,
 
 
 def _handle_new_command(data: dict, args: str):
-    """处理 /new 指令，发起新的 Claude 会话
+    """处理 /new 指令，发起新会话
 
     Args:
         data: 飞书事件数据
@@ -2857,7 +2859,7 @@ def _handle_new_command(data: dict, args: str):
     owner_id = binding.get('_owner_id', '')
     msg_chat_type = message.get('chat_type', '')
 
-    # 从上下文继承 project_dir 和 claude_command（用户未显式指定时）
+    # 从上下文继承 project_dir 和 command（用户未显式指定时）
     # 优先级：--dir/--cmd 参数 > 消息上下文解析到的旧 session > 默认值
     inherited_dir = ''
     inherited_cmd = ''
@@ -2870,12 +2872,12 @@ def _handle_new_command(data: dict, args: str):
         route_source = route_info.get('source', '')
         if SessionFacade.RouteSource.is_resolved(route_source):
             inherited_dir = route_info.get('project_dir', '')
-            # claude_command 本地路由 store 不存，回源 callback 拿权威值
+            # command 本地路由 store 不存，回源 callback 拿权威值
             # （/new 低频场景，1 次 RPC 可接受）
             if not cmd_arg:
                 inherited_info = SessionFacade.fetch_session_info(
                     binding, route_info.get('session_id', ''))
-                inherited_cmd = inherited_info.get('claude_command', '')
+                inherited_cmd = inherited_info.get('command', '')
                 inherited_agent_type = inherited_info.get('agent_type', '')
 
     # --cmd 参数优先，继承次之，binding 默认命令兜底
@@ -2885,12 +2887,12 @@ def _handle_new_command(data: dict, args: str):
         if not ok:
             _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
-        claude_command = result
+        command = result
     elif inherited_cmd:
         # 继承旧 session 的命令和 agent_type
-        claude_command = inherited_cmd
+        command = inherited_cmd
         agent_type = inherited_agent_type
-        logger.info(f"[feishu] /new inherited claude_command: {claude_command}, agent_type: {agent_type}")
+        logger.info(f"[feishu] /new inherited command: {command}, agent_type: {agent_type}")
     else:
         # 无 --cmd 无继承命令，使用默认命令（有继承 agent_type 时用该 agent 的默认命令）
         if inherited_agent_type:
@@ -2898,20 +2900,20 @@ def _handle_new_command(data: dict, args: str):
             cmds = agent_commands.get(inherited_agent_type)
             if cmds:
                 agent_type = inherited_agent_type
-                claude_command = cmds[0]
+                command = cmds[0]
             else:
                 # 该 agent 未在 binding 中注册，fallback 到全局默认
                 ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
                 if not ok:
                     _run_in_background(_send_notice_message, (chat_id, result, message_id))
                     return
-                claude_command = result
+                command = result
         else:
             ok, agent_type, result = _resolve_agent_command_from_binding(binding, '')
             if not ok:
                 _run_in_background(_send_notice_message, (chat_id, result, message_id))
                 return
-            claude_command = result
+            command = result
 
     # --dir 参数优先，继承次之
     if not project_dir and inherited_dir:
@@ -2927,24 +2929,24 @@ def _handle_new_command(data: dict, args: str):
     # 验证参数：如果没有目录或没有提示词，发送卡片让用户完善
     if not project_dir or not prompt:
         # 拼接 agent_type::command 格式传给卡片，保留用户已选的 agent 类型
-        card_agent_cmd = f'{agent_type}::{claude_command}' if agent_type and claude_command else claude_command
+        card_agent_cmd = f'{agent_type}::{command}' if agent_type and command else command
         _run_in_background(_send_new_session_card, (binding, owner_id, chat_id, message_id, msg_chat_type, project_dir, prompt, card_agent_cmd))
         return
 
-    logger.info(f"[feishu] /new command: dir={project_dir}, agent={agent_type or '(default)'}, cmd={claude_command or '(default)'}, prompt={_sanitize_user_content(prompt)}")
+    logger.info(f"[feishu] /new command: dir={project_dir}, agent={agent_type or '(default)'}, cmd={command or '(default)'}, prompt={_sanitize_user_content(prompt)}")
 
     # 在后台线程中转发到 Callback 后端
     # 如果使用的是默认聊天目录，同时更新活跃默认会话
     new_session_id = str(uuid.uuid4())
     if default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
-        _run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command, agent_type))
+        _run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, command, agent_type))
     else:
-        _run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, claude_command, agent_type))
+        _run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, command, agent_type))
 
 
 def _forward_new_request(binding: dict, session_id: str, project_dir: str, prompt: str,
                          chat_id: str, message_id: str, chat_type: str = '',
-                         claude_command: str = '', agent_type: str = '') -> str:
+                         command: str = '', agent_type: str = '') -> str:
     """转发新建会话请求到 Callback 后端
 
     Args:
@@ -2955,7 +2957,7 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
         chat_id: 聊天 ID（P2P 或群聊）
         message_id: 原始消息 ID（用作 reply_to）
         chat_type: 聊天类型（group/p2p），用于 group 模式下的 chat_id 决策
-        claude_command: 指定使用的 Claude 命令（可选）
+        command: 指定使用的命令（可选）
         agent_type: agent 类型（如 'claude', 'codex'），可选
 
     Returns:
@@ -2998,14 +3000,14 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
         'session_id': session_id,
         'skip_user_prompt': skip_user_prompt
     }
-    if claude_command:
-        data['claude_command'] = claude_command
+    if command:
+        data['command'] = command
     if agent_type:
         data['agent_type'] = agent_type
 
     # 新建会话时传递 reply_to，让第一条通知回复用户的 /new 消息
     # 后续通知会通过 last_message_id 链式回复
-    final_session_id = _forward_claude_request(binding, '/cb/claude/new',
+    final_session_id = _forward_agent_request(binding, '/cb/agent/new',
                                                data, chat_id, reply_to=message_id,
                                                reply_in_thread=reply_in_thread)
 
@@ -3253,7 +3255,7 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
                 - image_key: 图片的 key
             - chat_id: 群聊 ID（可选，优先使用）
             - receive_id_type: 接收者类型（可选，默认自动检测）
-            - session_id: Claude 会话 ID（可选，用于继续会话）
+            - session_id: 会话 ID（可选，用于继续会话）
             - project_dir: 项目工作目录（可选，用于继续会话）
             - reply_to_message_id: 要回复的消息 ID（可选，使用 reply API）
             - add_typing: 发送成功后是否添加 Typing 表情（可选，默认 false）
@@ -3645,14 +3647,14 @@ def _handle_reply_command(data: dict, args: str):
         return
 
     # 解析 --cmd 参数（从 binding 获取命令列表）
-    claude_command = ''
+    command = ''
     agent_type = ''
     if cmd_arg:
         ok, agent_type, result = _resolve_agent_command_from_binding(binding, cmd_arg)
         if not ok:
             _run_in_background(_send_notice_message, (chat_id, result, message_id))
             return
-        claude_command = result
+        command = result
 
     # 路由 session（统一走 SessionFacade）
     route_info = SessionFacade.resolve_from_message(data, binding)
@@ -3680,16 +3682,16 @@ def _handle_reply_command(data: dict, args: str):
             gs_store.touch(owner_id, chat_id)
 
     logger.info("[feishu] /reply command: session=%s, agent=%s, cmd=%s, prompt=%s",
-                session_id, agent_type or '(default)', claude_command or '(default)', _sanitize_user_content(prompt))
+                session_id, agent_type or '(default)', command or '(default)', _sanitize_user_content(prompt))
 
     # 转发到 Callback 后端
-    # /clear 后首条消息：new_session 标志表示需要启动新 Claude 进程
+    # /clear 后首条消息：new_session 标志表示需要启动新 Agent 进程
     if route_info.get('new_session'):
         _run_in_background(_forward_new_request,
                            (binding, session_id, session_project_dir, prompt,
-                            chat_id, message_id, chat_type, claude_command, agent_type))
+                            chat_id, message_id, chat_type, command, agent_type))
     else:
-        _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, claude_command, agent_type))
+        _run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, command, agent_type))
 
 
 def _handle_users_command(data: dict, args: str):
@@ -4417,7 +4419,7 @@ def _handle_clear_command(data: dict, args: str) -> None:
     """处理 /clear 命令：清空当前群聊会话，预创建新 session
 
     仅支持 group 模式的群聊中使用。解绑旧 session 并预创建新 session（继承
-    project_dir + claude_command），下次发送消息自动启动新 Claude 进程。
+    project_dir + command），下次发送消息自动启动新 Agent 进程。
     """
     event = data.get('event', {})
     message = event.get('message', {})

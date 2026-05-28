@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code Permission Callback Server
+Agent Permission Callback Server
 
 功能：
     HTTP 服务接收飞书卡片按钮的 URL 跳转请求，
@@ -10,7 +10,7 @@ Claude Code Permission Callback Server
     1. hooks/permission-notify.sh 发送飞书交互卡片（带按钮）
     2. 用户点击飞书按钮，浏览器访问回调服务器 HTTP 端点
     3. 回调服务器接收 HTTP 请求，通过 Unix Socket 返回决策
-    4. hooks/permission-notify.sh 接收决策并返回给 Claude Code
+    4. hooks/permission-notify.sh 接收决策并返回给触发 hook 的 Agent
 
 WebSocket 隧道模式：
     当 FEISHU_GATEWAY_URL 配置为 ws:// 或 wss:// 时启用。
@@ -443,7 +443,7 @@ def main():
         10. FeishuAPIService - 飞书 OpenAPI 服务（OpenAPI 模式）
         11. AutoRegister - 启动时自动向飞书网关注册（可选）
     """
-    logger.info("Starting Claude Code Permission Callback Server")
+    logger.info("Starting Agent Permission Callback Server")
     logger.info(f"HTTP Port: {HTTP_PORT}")
     logger.info(f"Socket Path: {SOCKET_PATH}")
     env_timeout = os.environ.get('PERMISSION_REQUEST_TIMEOUT', '')
@@ -503,6 +503,7 @@ def main():
     logger.info(f"SessionChatStore initialized with runtime_dir={runtime_dir}, expire={SESSION_EXPIRE_DAYS}d")
     # 旧 session 都是 Claude 创建的（Codex 支持是新增的），固定补 'claude'
     session_store.backfill_agent_type('claude')
+    session_store.migrate_claude_command()
 
     GroupChatStore.initialize(runtime_dir)
     logger.info(f"GroupChatStore initialized with runtime_dir={runtime_dir}")

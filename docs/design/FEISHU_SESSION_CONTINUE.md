@@ -1,5 +1,7 @@
 # 飞书回复继续 Claude 会话方案
 
+> 历史设计文档：本文记录早期 Claude-only 会话继续方案。当前实现已迁移到多 Agent 架构，实际接口以 `/cb/agent/continue` 和 `src/server/handlers/agent.py` 为准。
+
 ## 1. 需求概述
 
 当 Claude 触发 Stop 事件后，`stop.sh` 发送一条完成消息到飞书。用户可以通过回复这条消息，在对应的 Claude Session 中继续发起提问。

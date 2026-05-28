@@ -226,7 +226,7 @@ MCP server 通过 stdio 使用 JSON-RPC 2.0 与 Claude CLI 通信。完整生命
 
 ### 4.1 当前状态
 
-当前 `src/server/handlers/claude.py` 未启用 `--output-format stream-json`；以下内容是后续可选增强建议。理由：
+当前 `src/server/agents/claude.py` 未启用 `--output-format stream-json`；以下内容是后续可选增强建议。理由：
 
 | 能力 | text 模式 | stream-json 模式 |
 |------|----------|-----------------|
@@ -263,7 +263,7 @@ MCP server 通过 stdio 使用 JSON-RPC 2.0 与 Claude CLI 通信。完整生命
 
 ### 4.3 未来在现有系统中的应用
 
-后续可以在 `src/server/handlers/claude.py` 的 subprocess 处理中，逐行读取 stream-json 输出：
+后续可以在 agent 启动流程的 subprocess 处理中，逐行读取 stream-json 输出：
 
 ```python
 proc = subprocess.Popen(
@@ -403,7 +403,7 @@ MCP server 直接调用 `permission.sh`，完全复用现有流程：
 
 ### 7.1 自动检测
 
-网关服务（`src/server/handlers/claude.py`）的 `_get_mcp_args()` 会自动检测 MCP 脚本是否存在：
+Claude adapter（`src/server/agents/claude.py`）会自动检测 MCP 脚本是否存在：
 
 ```python
 # 检测同目录下的 permission_mcp.py

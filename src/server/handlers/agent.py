@@ -25,9 +25,11 @@ class Response:
     """统一的响应格式"""
 
     @staticmethod
-    def error(msg: str) -> Tuple[bool, Dict[str, Any]]:
+    def error(msg: str, **extra: Any) -> Tuple[bool, Dict[str, Any]]:
         """错误响应"""
-        return False, {'error': msg}
+        response = {'error': msg}
+        response.update(extra)
+        return False, response
 
     @staticmethod
     def processing() -> Tuple[bool, Dict[str, Any]]:
@@ -69,7 +71,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             - prompt: 用户的问题 (必需)
             - chat_id: 飞书聊天 ID（网关调用时必传）
             - message_id: 用户消息 ID (可选，用于回复式通知)
-            - claude_command: 指定使用的命令 (可选)
+            - command: 指定使用的命令 (可选)
             - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 读取)
 
     Returns:
@@ -83,7 +85,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     prompt = data.get('prompt', '')
     chat_id = data.get('chat_id', '') or ''  # 确保 None 转为空字符串
     message_id = data.get('message_id', '') or ''
-    claude_command = data.get('claude_command', '') or ''
+    command = data.get('command', '') or ''
 
     # 参数验证
     if not session_id:
@@ -109,26 +111,30 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
 
     # 从 session 记录获取 agent_type，确保 reply 延续创建时的 agent
     agent_type = session_data.get('agent_type', '') or None
-    adapter = get_agent_adapter(agent_type)
+    try:
+        adapter = get_agent_adapter(agent_type)
+    except ValueError as e:
+        return Response.error(str(e), agent_type=agent_type or '')
 
     # 验证 command 合法性（如果指定了的话）
-    if claude_command and claude_command not in adapter.get_commands():
+    if command and command not in adapter.get_commands():
         available = ', '.join(adapter.get_commands())
         return Response.error(
-            '无效的命令 "%s"，%s 可用命令: %s' % (claude_command, adapter.display_name, available))
+            '无效的命令 "%s"，%s 可用命令: %s' % (command, adapter.display_name, available),
+            agent_type=adapter.agent_type)
 
     # Command 优先级: 请求指定 > session 记录 > 默认
-    if not claude_command:
-        claude_command = session_data.get('claude_command', '')
+    if not command:
+        command = session_data.get('command', '')
 
-    actual_cmd = adapter.resolve_command(claude_command)
+    actual_cmd = adapter.resolve_command(command)
     logger.info("[%s-continue] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
                 adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
 
-    # 更新 session 映射：刷新 claude_command 和 chat_id
+    # 更新 session 映射：刷新 command 和 chat_id
     # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
     # chat_id 来自飞书消息事件（P2P / 群聊均必定非空），非空 chat_id 自动清除 dissolved
-    session_store.save(session_id, chat_id, claude_command=actual_cmd,
+    session_store.save(session_id, chat_id, command=actual_cmd,
                        agent_type=adapter.agent_type)
     # 用户发送了新消息，自动解除静音
     if session_store.unmute_session(session_id) is True and chat_id:
@@ -156,7 +162,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
                 仅 group 模式下从 P2P 发起 /new 时为空，
                 由本函数调 do_ensure_chat 建群后回填
             - message_id: 原始消息 ID (可选，用于飞书网关回复用户消息)
-            - claude_command: 指定使用的命令 (可选)
+            - command: 指定使用的命令 (可选)
             - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 或默认值获取)
             - skip_user_prompt: 是否跳过首条 UserPromptSubmit 通知 (默认 True)；
                 group 模式 P2P 建群分支需置 False，让 hook 把首条 prompt 补发到新群
@@ -175,7 +181,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     prompt = data.get('prompt', '') or ''
     chat_id = data.get('chat_id', '') or ''
     message_id = data.get('message_id', '') or ''
-    claude_command = data.get('claude_command', '') or ''
+    command = data.get('command', '') or ''
     agent_type = data.get('agent_type', '') or ''
     # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
     session_id = data.get('session_id', '') or str(uuid.uuid4())
@@ -189,22 +195,26 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if not os.path.exists(project_dir):
         return Response.error(f'Project directory not found: {project_dir}')
 
-    # agent_type / claude_command 优先级：网关传入 > store 已有值（/clear clone 继承）> 默认
-    if not agent_type or not claude_command:
+    # agent_type / command 优先级：网关传入 > store 已有值（/clear clone 继承）> 默认
+    if not agent_type or not command:
         session_data = session_store.get_session(session_id)
         if session_data:
             if not agent_type:
                 agent_type = session_data.get('agent_type', '')
-            if not claude_command:
-                claude_command = session_data.get('claude_command', '')
-    adapter = get_agent_adapter(agent_type or None)
+            if not command:
+                command = session_data.get('command', '')
+    try:
+        adapter = get_agent_adapter(agent_type or None)
+    except ValueError as e:
+        return Response.error(str(e), agent_type=agent_type or '')
 
     # 验证 command 合法性（如果指定了的话）
-    if claude_command and claude_command not in adapter.get_commands():
+    if command and command not in adapter.get_commands():
         available = ', '.join(adapter.get_commands())
         return Response.error(
-            '无效的命令 "%s"，%s 可用命令: %s' % (claude_command, adapter.display_name, available))
-    actual_cmd = adapter.resolve_command(claude_command)
+            '无效的命令 "%s"，%s 可用命令: %s' % (command, adapter.display_name, available),
+            agent_type=adapter.agent_type)
+    actual_cmd = adapter.resolve_command(command)
     logger.info("[%s-new] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
                 adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
 
@@ -217,14 +227,15 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         if not ok:
             logger.warning("[%s-new] ensure-chat failed for %s: %s",
                            adapter.agent_type, session_id, ensure_result)
-            return Response.error(f'Failed to create group chat: {ensure_result}')
+            return Response.error(f'Failed to create group chat: {ensure_result}',
+                                  agent_type=adapter.agent_type)
         chat_id = ensure_result
         logger.info("[%s-new] ensure-chat created group for %s: %s",
                     adapter.agent_type, session_id, chat_id)
 
-    # 写入 claude_command 等业务属性（与 do_ensure_chat 的"建群"职责解耦：
+    # 写入 command 等业务属性（与 do_ensure_chat 的"建群"职责解耦：
     # group 分支补写、非 group 分支首次写，统一一处）
-    session_store.save(session_id, chat_id, claude_command=actual_cmd,
+    session_store.save(session_id, chat_id, command=actual_cmd,
                        project_dir=project_dir, agent_type=adapter.agent_type)
     logger.info("[%s-new] Saved mapping: %s -> %s",
                 adapter.agent_type, session_id, chat_id)
@@ -253,19 +264,24 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
 # =============================================
 
 
-def _send_error_notification(chat_id: str, message_id: str, error_msg: str):
+def _send_error_notification(agent_type: str, chat_id: str, message_id: str, error_msg: str):
     """发送错误通知到飞书
 
     截断过长的错误消息，防止飞书消息超限。
 
     Args:
+        agent_type: agent 类型标识（用于展示正确产品名）
         chat_id: 群聊 ID
         message_id: 要回复的消息 ID（为空时降级为普通消息）
         error_msg: 错误消息
     """
     from handlers.utils import reply_feishu_text
 
-    adapter = get_agent_adapter()
+    try:
+        adapter = get_agent_adapter(agent_type or None)
+    except ValueError:
+        logger.warning("Unknown agent_type for error notification: %s", agent_type)
+        adapter = get_agent_adapter()
 
     truncated = error_msg[:MAX_NOTIFICATION_LENGTH] if len(error_msg) > MAX_NOTIFICATION_LENGTH else error_msg
     text = f"❌ {adapter.display_name} 执行异常:\n{truncated}"

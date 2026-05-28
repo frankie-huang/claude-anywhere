@@ -81,7 +81,7 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 - **GIVEN** stdin 输入的 JSON 格式无效或缺少必要字段
 - **WHEN** 脚本尝试解析 JSON（无论使用 jq 还是原生命令）
 - **THEN** 脚本发送降级通知消息，说明有权限请求但无法解析详情
-- **AND** 脚本以退出码 0 结束，不阻塞 Claude Code
+- **AND** 脚本以退出码 0 结束，不阻塞触发 hook 的 Agent
 
 #### Scenario: Webhook 请求失败静默处理
 
@@ -89,22 +89,22 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 - **WHEN** `lib/feishu.sh` 中的 `send_feishu_card()` 尝试发送通知
 - **THEN** 函数记录错误日志
 - **AND** 脚本以退出码 0 结束
-- **AND** 不影响 Claude Code 继续运行
+- **AND** 不影响触发 hook 的 Agent 继续运行
 
 ### Requirement: Hook Configuration
 
-系统 SHALL 根据 `AGENT_TYPE` 在对应 agent 的配置文件中注册 hook。
+系统 SHALL 根据 `ENABLED_AGENTS` 在已启用 agent 的配置文件中注册 hook。
 
 #### Scenario: Claude hook 配置
 
-- **GIVEN** `AGENT_TYPE=claude`
+- **GIVEN** `ENABLED_AGENTS` 包含 `claude`
 - **WHEN** 执行 hook 配置初始化
 - **THEN** 在 `~/.claude/settings.json` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
 - **AND** hook command 指向 `src/hook-router.sh`
 
 #### Scenario: Codex hook 配置
 
-- **GIVEN** `AGENT_TYPE=codex`
+- **GIVEN** `ENABLED_AGENTS` 包含 `codex`
 - **WHEN** 执行 hook 配置初始化
 - **THEN** 在 `~/.codex/config.toml` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
 - **AND** hook command 指向 `src/hook-router.sh`
@@ -112,7 +112,7 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 
 ### Requirement: Interactive Card Buttons
 
-通知消息卡片 SHALL 包含可交互按钮（URL 跳转类型），支持用户直接控制权限请求。按钮行为与 Claude Code 终端权限操作保持一致。
+通知消息卡片 SHALL 包含可交互按钮（URL 跳转类型），支持用户直接控制权限请求。按钮行为与触发请求的 Agent 终端权限操作保持一致。
 
 #### Scenario: 卡片包含批准按钮
 
@@ -210,7 +210,7 @@ permission.sh SHALL 作为 Claude 和 Codex 的共享权限审批脚本，两种
 
 #### Scenario: Claude 权限审批路径
 
-- **GIVEN** `AGENT_TYPE=claude`
+- **GIVEN** 当前 agent 为 `claude`
 - **WHEN** Claude CLI 遇到需要权限的工具调用
 - **THEN** 通过 `--permission-prompt-tool` MCP 工具触发
 - **AND** `permission_mcp.py` 调用 `hook-router.sh` → `permission.sh`
@@ -218,7 +218,7 @@ permission.sh SHALL 作为 Claude 和 Codex 的共享权限审批脚本，两种
 
 #### Scenario: Codex 权限审批路径
 
-- **GIVEN** `AGENT_TYPE=codex`
+- **GIVEN** 当前 agent 为 `codex`
 - **WHEN** Codex CLI 遇到需要权限的工具调用
 - **THEN** 通过原生 `PermissionRequest` hook 直接触发
 - **AND** 调用 `hook-router.sh` → `permission.sh`
@@ -788,4 +788,3 @@ Stop 事件通知 SHALL 支持提取并展示 Claude 的思考过程（thinking�
     }
   }
   ```
-

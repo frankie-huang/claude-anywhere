@@ -42,7 +42,7 @@ class GroupSessionStore:
             "ou_xxx_owner": {
                 "oc_yyy_chat": {
                     "session_id": "...",
-                    "project_dir": "/path/to/project",  # 入站消息转发到 /cb/claude/continue 时必传
+                    "project_dir": "/path/to/project",  # 入站消息转发到 /cb/agent/continue 时必传
                     "new_session": false,               # /clear 后为 true，首条消息触发新建会话后自动清除
                     "last_active_at": 1706745600,       # 最近一次群聊活动时间（供自动解散判断）
                     "created_at": 1706745600
@@ -60,7 +60,7 @@ class GroupSessionStore:
 
     字段对齐 MessageSessionStore：
       - 只存入站转发必需的字段（session_id + project_dir）
-      - claude_command 不存——入站 /cb/claude/continue 不是必传；/new 继承
+      - command 不存——入站 /cb/agent/continue 不是必传；/new 继承
         这个低频场景通过其他路径回源 callback 拿权威值
 
     内存反向索引: (owner_id, session_id) → chat_id

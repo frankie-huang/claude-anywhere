@@ -35,40 +35,50 @@ TBD - created by archiving change add-codex-support. Update Purpose after archiv
 
 ### Requirement: Agent 类型配置
 
-系统 SHALL 支持通过 `AGENT_TYPE` 环境变量选择使用的 AI 编码代理。
+系统 SHALL 支持通过 `ENABLED_AGENTS` 启用一个或多个 AI 编码代理，并通过 `DEFAULT_AGENT` 指定未显式选择时使用的默认代理。
 
-#### Scenario: 默认使用 Claude
+#### Scenario: 默认启用 Claude
 
-- **GIVEN** `AGENT_TYPE` 未设置或为空
-- **WHEN** 系统初始化 agent adapter
-- **THEN** 使用 `ClaudeAdapter`
+- **GIVEN** `ENABLED_AGENTS` 未设置或为空
+- **WHEN** 系统读取 agent 配置
+- **THEN** 启用列表为 `['claude']`
+- **AND** 默认 agent 为 `claude`
 
-#### Scenario: 选择 Codex
+#### Scenario: 同时启用 Claude 和 Codex
 
-- **GIVEN** `AGENT_TYPE` 设置为 `codex`
-- **WHEN** 系统初始化 agent adapter
-- **THEN** 使用 `CodexAdapter`
+- **GIVEN** `ENABLED_AGENTS=claude,codex`
+- **AND** `DEFAULT_AGENT=codex`
+- **WHEN** 系统读取 agent 配置
+- **THEN** 启用列表为 `['claude', 'codex']`
+- **AND** 默认 agent 为 `codex`
 
 #### Scenario: 不支持的 agent 类型
 
-- **GIVEN** `AGENT_TYPE` 设置为不支持的值
-- **WHEN** 系统初始化 agent adapter
-- **THEN** 启动失败并记录错误日志
+- **GIVEN** `ENABLED_AGENTS` 包含不支持的值
+- **WHEN** 系统读取 agent 配置
+- **THEN** 忽略无效值
+- **AND** 如果无有效值则回退为 `['claude']`
 
 ### Requirement: Agent 注册与工厂
 
-`agents/__init__.py` SHALL 提供 `get_agent_adapter()` 工厂函数，根据 `AGENT_TYPE` 配置返回对应的 adapter 单例。
+`agents/__init__.py` SHALL 提供 `get_agent_adapter(agent_type=None)` 工厂函数，按传入的 `agent_type` 返回对应 adapter 单例；未传时使用 `DEFAULT_AGENT`。
 
 #### Scenario: 获取 adapter 实例
 
-- **GIVEN** `AGENT_TYPE=claude`
-- **WHEN** 调用 `get_agent_adapter()`
+- **GIVEN** `agent_type='claude'`
+- **WHEN** 调用 `get_agent_adapter('claude')`
 - **THEN** 返回 `ClaudeAdapter` 实例
 - **AND** 多次调用返回同一实例（单例）
 
 #### Scenario: 获取 Codex adapter
 
-- **GIVEN** `AGENT_TYPE=codex`
+- **GIVEN** `agent_type='codex'`
+- **WHEN** 调用 `get_agent_adapter('codex')`
+- **THEN** 返回 `CodexAdapter` 实例
+
+#### Scenario: 默认 adapter
+
+- **GIVEN** `DEFAULT_AGENT=codex`
 - **WHEN** 调用 `get_agent_adapter()`
 - **THEN** 返回 `CodexAdapter` 实例
 
@@ -151,11 +161,11 @@ TBD - created by archiving change add-codex-support. Update Purpose after archiv
 
 ### Requirement: Codex Hook 配置写入
 
-`setup_init.py` SHALL 根据 `AGENT_TYPE` 为 Codex 生成 `config.toml` 格式的 hook 配置。
+`setup_init.py` SHALL 在 `ENABLED_AGENTS` 包含 `codex` 时为 Codex 生成 `config.toml` 格式的 hook 配置。
 
 #### Scenario: 写入 Codex hook 配置
 
-- **GIVEN** `AGENT_TYPE=codex`
+- **GIVEN** `ENABLED_AGENTS` 包含 `codex`
 - **WHEN** 执行 `setup_init.py` 初始化
 - **THEN** 在 `~/.codex/config.toml` 中写入 `[hooks]` 段
 - **AND** 注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` 三个 hook 事件
@@ -184,7 +194,7 @@ Codex SHALL 通过原生 `PermissionRequest` hook 实现权限审批，共享 `p
 
 #### Scenario: Codex 不使用 MCP 桥接
 
-- **GIVEN** `AGENT_TYPE=codex`
+- **GIVEN** 当前 agent 为 `codex`
 - **WHEN** `CodexAdapter.build_command_string()` 被调用
 - **THEN** 命令字符串中不包含 `--permission-prompt-tool` 和 `--mcp-config` 参数
 
@@ -230,4 +240,3 @@ Codex SHALL 通过原生 `PermissionRequest` hook 实现权限审批，共享 `p
 - **AND** hook-router.sh 从 `transcript_path` 推断 AGENT_TYPE（`/.codex/sessions/` → codex，`/.claude/` → claude）
 - **AND** 导出 `AGENT_TYPE` 环境变量供下游 hook 脚本使用
 - **AND** 正常分发到对应 hook 脚本
-

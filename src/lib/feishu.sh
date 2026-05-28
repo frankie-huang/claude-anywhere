@@ -867,7 +867,7 @@ _get_bot_open_id() {
 # 功能: 调用 Callback 后端的 /cb/session/get-chat-id 接口查询 session_id 对应的 chat_id
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 输出:
 #   echos 返回: chat_id 字符串，查询失败返回空字符串
@@ -942,7 +942,7 @@ _get_chat_id() {
 #       如果 session 已有 chat_id 则直接返回，否则在 group 模式下创建群聊
 #
 # 参数:
-#   $1 - session_id   Claude 会话 ID
+#   $1 - session_id   Agent 会话 ID
 #   $2 - project_dir  项目工作目录（用于群聊命名）
 #
 # 输出:
@@ -999,7 +999,7 @@ _ensure_chat() {
 #       3. 使用配置的 FEISHU_CHAT_ID 兜底
 #
 # 参数:
-#   $1 - session_id   Claude 会话 ID（可选）
+#   $1 - session_id   Agent 会话 ID（可选）
 #   $2 - project_dir  项目工作目录（创建群聊时用于命名）
 #
 # 输出:
@@ -1055,7 +1055,7 @@ _resolve_chat_id() {
 # 功能: 调用 Callback 后端的 /cb/session/get-last-message-id 接口查询 session 的最近消息
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 输出:
 #   echos 返回: last_message_id 字符串，查询失败返回空字符串
@@ -1107,7 +1107,7 @@ _get_last_message_id() {
 # 功能: 查询 Callback 后端，判断本次 prompt 是否由飞书发起（需要跳过）
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 返回:
 #   0 + stdout "true"  - 应跳过
@@ -1767,7 +1767,7 @@ _send_feishu_card_webhook() {
 #                  - 分离部署: 传入 FEISHU_GATEWAY_URL
 #                  - 单机部署: 不传，默认使用 CALLBACK_SERVER_URL
 #   $3 - options     可选参数 JSON（可选），可包含：
-#                   - session_id   Claude 会话 ID（用于继续会话）
+#                   - session_id   Agent 会话 ID（用于继续会话）
 #                   - project_dir  项目工作目录（用于继续会话）
 #                   - callback_url Callback 后端 URL（用于继续会话）
 #
@@ -1940,7 +1940,7 @@ send_feishu_text() {
 #   $1 - message_text  文本消息内容
 #   $2 - options       可选参数 JSON，可包含：
 #                      - project_dir    项目工作目录
-#                      - session_id     Claude 会话 ID（用于链式回复）
+#                      - session_id     Agent 会话 ID（用于链式回复）
 #                      - callback_url   Callback 服务地址（可选，透传给网关）
 #
 # 返回:

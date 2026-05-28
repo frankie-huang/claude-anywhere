@@ -70,14 +70,14 @@ Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简�
                                                                  │ Decision JSON
                                                                  ▼
                                                             ┌─────────────────┐
-                                                            │  Claude Code    │
+                                                            │  Agent CLI      │
                                                             │  (继续/拒绝)     │
                                                             └─────────────────┘
 ```
 
 ### 核心组件
 
-1. **Hook 路由** (`src/hook-router.sh`) - Claude Code Hook 统一入口
+1. **Hook 路由** (`src/hook-router.sh`) - Agent Hook 统一入口
 2. **权限处理** (`src/hooks/permission.sh`) - 构建并发送飞书卡片
 3. **回调服务** (`src/server/main.py`) - HTTP 服务器处理浏览器回调
 4. **Socket 服务** (`src/server/main.py`) - Unix Socket 服务器
@@ -89,7 +89,7 @@ Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简�
 ### 发送通知流程
 
 ```
-1. Claude Code 触发权限请求
+1. Agent 触发权限请求
        ↓
 2. hook-router.sh 接收 Hook 事件
        ↓
@@ -115,7 +115,7 @@ Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简�
        ↓
 5. permission.sh 接收决策
        ↓
-6. Claude Code 继续或拒绝执行
+6. Agent 继续或拒绝执行
 ```
 
 ---
@@ -124,7 +124,7 @@ Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简�
 
 | 组件 | 路径 | 说明 |
 |------|------|------|
-| Hook 路由 | `src/hook-router.sh` | Claude Code Hook 统一入口 |
+| Hook 路由 | `src/hook-router.sh` | Agent Hook 统一入口 |
 | 权限处理 | `src/hooks/permission.sh` | 构建并发送飞书卡片 |
 | 卡片模板 | `src/templates/feishu/buttons.json` | Webhook 模式卡片模板 |
 | 回调服务 | `src/server/main.py` | ThreadedHTTPServer，处理浏览器回调请求 |

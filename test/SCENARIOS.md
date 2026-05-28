@@ -1,6 +1,6 @@
-# 测试文档 - claude-anywhere
+# 测试文档 - code-anywhere
 
-本文档描述 claude-anywhere 项目的各种测试场景和预期行为。
+本文档描述 code-anywhere 项目的各种测试场景和预期行为。
 
 ## 测试环境准备
 
@@ -30,7 +30,7 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
         "hooks": [
           {
             "type": "command",
-            "command": "bash /root/claude/claude-anywhere/src/hook-router.sh"
+            "command": "bash /root/claude/code-anywhere/src/hook-router.sh"
           }
         ]
       }

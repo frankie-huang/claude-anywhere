@@ -5,7 +5,7 @@
 
 ## 前置条件
 
-1. `.env` 中设置 `AGENT_TYPE=codex`
+1. `.env` 中设置 `ENABLED_AGENTS=codex`，或 `ENABLED_AGENTS=claude,codex` 且 `DEFAULT_AGENT=codex`
 2. 执行 `./setup.sh restart` 重启后端
 3. 确认 `~/.codex/config.toml` 中 hook 已注入（`./setup.sh init`）
 4. Codex CLI 已安装且可用（`codex --version`）
@@ -67,7 +67,7 @@
 
 | # | 测试项 | 操作 | 预期结果 |
 |---|--------|------|----------|
-| 22 | AGENT_TYPE 检测 | 任意会话触发 | 日志显示 `Hook router received event: Stop, agent: codex` |
+| 22 | agent 类型检测 | 任意会话触发 | 日志显示 `Hook router received event: Stop, agent: codex` |
 | 23 | hook 不阻塞 Codex | 观察 Codex CLI 输出 | "Running Stop hook" 立即消失（不长时间停留） |
 | 24 | 后台进程不继承 pipe | 同上 | `send_stop_notification_async >/dev/null 2>&1 &` 不阻塞 CLI |
 
@@ -76,7 +76,7 @@
 | # | 测试项 | 操作 | 预期结果 |
 |---|--------|------|----------|
 | 25 | 进程启动失败 | 配置错误的 CODEX_COMMAND | 群聊收到 "❌ Codex 执行异常" 通知 |
-| 26 | Session ID 捕获超时 | 模拟 Codex 启动慢（>10s） | 日志 warning，会话仍可用（用临时 ID） |
+| 26 | Session ID 捕获超时 | 模拟 Codex 启动慢（>10s） | 日志 warning，进程被终止，并返回启动失败错误 |
 
 ## 八、Group 模式
 
@@ -90,7 +90,7 @@
 
 | # | 测试项 | 操作 | 预期结果 |
 |---|--------|------|----------|
-| 30 | 切回 Claude | `.env` 改回 `AGENT_TYPE=claude` + `./setup.sh restart` | Claude 会话一切正常 |
+| 30 | 切回 Claude | `.env` 改回 `ENABLED_AGENTS=claude` 或 `DEFAULT_AGENT=claude` + `./setup.sh restart` | Claude 会话一切正常 |
 | 31 | Stop 卡片标题 | 新建 Claude 会话 | 显示 "Claude Code 处理完成" |
 | 32 | 恢复命令 | 观察卡片底部 | 显示 `claude --resume <session_id>` |
 | 33 | 错误通知 | 模拟失败 | 显示 "❌ Claude 执行异常" |

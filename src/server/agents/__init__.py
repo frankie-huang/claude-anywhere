@@ -21,8 +21,8 @@ STARTUP_TIMEOUT_SECONDS = 30   # 后台启动阶段等待时间（秒），兜�
 STARTUP_CHECK_SECONDS = 2      # 启动检查等待时间（秒）
 MAX_LOG_LENGTH = 500           # 日志最大长度
 
-# on_error 回调类型: (chat_id, message_id, error_msg) -> None
-ErrorCallback = Optional[Callable[[str, str, str], None]]
+# on_error 回调类型: (agent_type, chat_id, message_id, error_msg) -> None
+ErrorCallback = Optional[Callable[[str, str, str, str], None]]
 
 
 # =============================================
@@ -241,6 +241,11 @@ def get_agent_adapter(agent_type: Optional[str] = None) -> AgentAdapter:
     if agent_type is None:
         from config import get_default_agent
         agent_type = get_default_agent()
+    agent_type = agent_type.strip().lower()
+
+    from config import VALID_AGENTS
+    if agent_type not in VALID_AGENTS:
+        raise ValueError(f"Unsupported agent_type: {agent_type}")
 
     if agent_type in _adapters:
         return _adapters[agent_type]
@@ -248,9 +253,11 @@ def get_agent_adapter(agent_type: Optional[str] = None) -> AgentAdapter:
     if agent_type == 'codex':
         from agents.codex import CodexAdapter
         adapter = CodexAdapter()
-    else:
+    elif agent_type == 'claude':
         from agents.claude import ClaudeAdapter
         adapter = ClaudeAdapter()
+    else:
+        raise ValueError(f"Unsupported agent_type: {agent_type}")
 
     _adapters[agent_type] = adapter
     logger.info("Agent adapter initialized: %s", adapter.agent_type)
@@ -302,7 +309,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
         message_id: 用户消息 ID（用于回复式通知）
         session_mode: 会话模式，'resume' 继续会话，'new' 新建会话
         command_name: 指定使用的命令（可选，为空时使用默认）
-        on_error: 错误通知回调 (chat_id, message_id, error_msg) -> None
+        on_error: 错误通知回调 (agent_type, chat_id, message_id, error_msg) -> None
 
     Returns:
         (success, response): 成功时 response 包含 session_id（Codex 路径可能已 rename 为真实 ID）
@@ -345,7 +352,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
     except Exception as e:
         error_msg = str(e)
         logger.error("%s Failed to start process: %s", log_prefix, error_msg)
-        return False, {'error': error_msg}
+        return False, {'error': error_msg, 'agent_type': agent_type}
 
     # ── 3. Session ID 捕获（Codex 新建会话时从 stdout 读取真实 ID）──
     did_capture = adapter.needs_output_session_id and session_mode == 'new'
@@ -357,7 +364,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
             proc.wait()
             error_msg = f"{adapter.display_name} 启动异常：未能在 {adapter.session_id_capture_timeout}s 内获取 session ID，请检查 CLI 是否正常"
             logger.error("%s %s", log_prefix, error_msg)
-            return False, {'error': error_msg}
+            return False, {'error': error_msg, 'agent_type': agent_type}
         if captured_session_id != session_id:
             new_id = _rename_session_in_store(
                 session_id, captured_session_id, log_prefix)
@@ -523,13 +530,15 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
         run_in_background(
             _monitor_startup,
             (proc, agent_type, session_id, chat_id, message_id, on_error))
-        return True, {'status': 'processing', 'session_id': session_id}
+        return True, {'status': 'processing', 'session_id': session_id,
+                      'agent_type': agent_type}
 
     # 进程已退出
     returncode = proc.returncode
     if returncode == 0:
         logger.info("%s Command completed quickly", log_prefix)
         return True, {'status': 'completed', 'session_id': session_id,
+                      'agent_type': agent_type,
                       'output': (stdout or '')[:MAX_LOG_LENGTH * 2]}
     else:
         error_msg = (stderr or '').strip() or (stdout or '').strip()
@@ -537,7 +546,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
             error_msg = f"命令执行失败，退出码: {returncode}"
         logger.warning("%s Command failed with exit code %s: %s",
                        log_prefix, returncode, error_msg)
-        return False, {'error': error_msg}
+        return False, {'error': error_msg, 'agent_type': agent_type}
 
 
 # =============================================
@@ -579,7 +588,7 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
                 log_prefix, proc.returncode, session_id, error_summary)
             if chat_id and on_error:
                 error_msg = stderr.strip() or f"{agent_type} 进程异常退出 (code={proc.returncode})"
-                on_error(chat_id, message_id, error_msg)
+                on_error(agent_type, chat_id, message_id, error_msg)
     except subprocess.TimeoutExpired:
         logger.info(
             "%s Process still running after %ss, session: %s "
@@ -594,7 +603,7 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
         logger.error("%s Execution error: %s, session: %s",
                      log_prefix, e, session_id)
         if chat_id and on_error:
-            on_error(chat_id, message_id, str(e))
+            on_error(agent_type, chat_id, message_id, str(e))
 
 
 def _monitor_detached(proc: subprocess.Popen, agent_type: str,
@@ -646,7 +655,7 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
                 error_output[:MAX_LOG_LENGTH])
             if chat_id and on_error:
                 error_msg = error_output or f"{agent_type} 进程异常退出 (code={returncode})"
-                on_error(chat_id, message_id, error_msg)
+                on_error(agent_type, chat_id, message_id, error_msg)
     except Exception as e:
         logger.error("%s Error waiting for detached process: %s, session: %s",
                      log_prefix, e, session_id)

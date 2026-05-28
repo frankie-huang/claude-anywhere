@@ -28,7 +28,7 @@
 | `/status` | GET | 查看服务状态 | 低 | ✅ X-Auth-Token |
 | `/cb/decision` | POST | 纯决策接口（网关调用） | 中 | ✅ X-Auth-Token |
 | `/gw/feishu/send` | POST | 发送飞书消息 | 中 | ✅ owner_id + X-Auth-Token |
-| `/cb/claude/continue` | POST | 继续 Claude 会话 | 中 | ✅ X-Auth-Token |
+| `/cb/agent/continue` | POST | 继续 Agent 会话 | 中 | ✅ X-Auth-Token |
 | `/` (POST) | POST | 飞书事件回调 | 中 | ✅ Verification Token |
 
 > ***风险等级说明**：`/allow` 和 `/always` 因 request_id 已优化为 32 位随机字符，从「严重」降为「中」。实际风险取决于部署场景：
@@ -252,7 +252,7 @@ POST http://attacker-server:9000/cb/decision
 
 **等级**: **中**（已从「高」降级）
 
-**描述**: 历史版本中 `/cb/claude/continue` 接口无额外验证；当前实现通过 `X-Auth-Token` 校验网关/Callback 之间的调用。
+**描述**: 历史版本中 `/cb/claude/continue` 接口无额外验证；当前实现已迁移为 `/cb/agent/continue`，并通过 `X-Auth-Token` 校验网关/Callback 之间的调用。
 
 **影响范围**: 历史版本；当前版本需保护好 auth_token。
 
@@ -260,7 +260,7 @@ POST http://attacker-server:9000/cb/decision
 
 ```bash
 # 场景 1: 在他人会话中执行恶意命令
-curl -X POST http://target-server:8080/cb/claude/continue \
+curl -X POST http://target-server:8080/cb/agent/continue \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -272,12 +272,12 @@ curl -X POST http://target-server:8080/cb/claude/continue \
 # session_id 是 UUID v4 格式，可以暴力枚举
 for i in {1..10000}; do
   uuid=$(cat /proc/sys/kernel/random/uuid)
-  curl -X POST http://target-server:8080/cb/claude/continue \
+  curl -X POST http://target-server:8080/cb/agent/continue \
     -d "{\"session_id\": \"$uuid\", \"prompt\": \"whoami\"}"
 done
 
 # 场景 3: 路径遍历
-curl -X POST http://target-server:8080/cb/claude/continue \
+curl -X POST http://target-server:8080/cb/agent/continue \
   -d '{
     "session_id": "xxx",
     "project_dir": "/etc",
@@ -500,8 +500,8 @@ ALLOWED_CALLBACK_DOMAINS=localhost,127.0.0.1,gateway.internal,callback-1.interna
 ```python
 # src/server/handlers/callback.py
 
-def handle_claude_continue(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
-    if not check_global_auth_token(headers, '/cb/claude/continue'):
+def handle_agent_continue(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    if not check_global_auth_token(headers, '/cb/agent/continue'):
         return 401, {'error': 'Unauthorized'}
 
     success, response = handle_continue_session(data)

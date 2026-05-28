@@ -191,7 +191,7 @@ color=$(_tool_config_get "_defaults.unknown_tool.color")
 
 ### 16. ~~[质量] `_run_in_background` 函数重复定义三次~~ ✅ 已修复
 
-完全相同的代码分别出现在 `handlers/feishu.py`、`handlers/register.py`、`handlers/claude.py`。
+完全相同的代码分别出现在 `handlers/feishu.py`、`handlers/register.py`、`handlers/agent.py`。
 
 **修复方案**: 提取到 `handlers/utils.py` 作为 `run_in_background()`，三个 handler 文件改为 `from .utils import run_in_background as _run_in_background`。
 

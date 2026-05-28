@@ -97,7 +97,7 @@ class SessionFacade:
 
         Returns:
             {'session_id': str, 'project_dir': str, 'new_session': bool}
-            找不到返回空 dict。claude_command 等 session 语义字段不在路由表里，
+            找不到返回空 dict。command 等 session 语义字段不在路由表里，
             需要时调用方走 fetch_session_info 单独回源 callback。
         """
         if not chat_id:
@@ -121,14 +121,14 @@ class SessionFacade:
     @classmethod
     def fetch_session_info(cls, binding: Dict[str, Any],
                            session_id: str) -> Dict[str, Any]:
-        """按 session_id 从 callback 权威源拿 session 字段（含 claude_command）
+        """按 session_id 从 callback 权威源拿 session 字段（含 command）
 
         本地路由 store（GroupSessionStore / MessageSessionStore）只存路由必需的
-        session_id + project_dir，不存 claude_command 等 session 语义属性。
+        session_id + project_dir，不存 command 等 session 语义属性。
         需要权威字段的低频场景（/new 继承等）调用此方法，走一次 callback RPC。
 
         Returns:
-            {'project_dir': str, 'claude_command': str, 'agent_type': str, 'chat_id': str, 'dissolved': bool}
+            {'project_dir': str, 'command': str, 'agent_type': str, 'chat_id': str, 'dissolved': bool}
             失败或 session 不存在返回空 dict（所有字段为空的等价）
         """
         if not session_id or cls._forward_fn is None:
@@ -143,7 +143,7 @@ class SessionFacade:
             return {}
         return {
             'project_dir': resp.get('project_dir', ''),
-            'claude_command': resp.get('claude_command', ''),
+            'command': resp.get('command', ''),
             'agent_type': resp.get('agent_type', ''),
             'chat_id': resp.get('chat_id', ''),
             'dissolved': resp.get('dissolved', False),
