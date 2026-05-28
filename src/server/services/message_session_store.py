@@ -78,7 +78,7 @@ class MessageSessionStore:
 
         Args:
             message_id: 飞书消息 ID
-            session_id: Claude 会话 ID
+            session_id: 会话 ID
             project_dir: 项目工作目录
 
         Returns:

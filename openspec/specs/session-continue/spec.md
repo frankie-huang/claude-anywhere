@@ -9,7 +9,7 @@ TBD - created by archiving change add-session-continue. Update Purpose after arc
 
 #### Scenario: Stop 事件发送消息时注册映射
 
-- **GIVEN** Claude stop 事件触发
+- **GIVEN** Agent stop 事件触发
 - **AND** Callback 后端调用飞书网关发送完成通知
 - **AND** 请求包含 `session_id`、`project_dir`、`callback_url`
 - **WHEN** 飞书网关通过 OpenAPI 发送消息成功
@@ -19,7 +19,7 @@ TBD - created by archiving change add-session-continue. Update Purpose after arc
 
 #### Scenario: 权限请求发送消息时注册映射
 
-- **GIVEN** Claude 权限请求事件触发
+- **GIVEN** Agent 权限请求事件触发
 - **AND** Callback 后端调用飞书网关发送权限请求通知
 - **AND** 请求包含 `session_id`、`project_dir`、`callback_url`
 - **WHEN** 飞书网关通过 OpenAPI 发送消息成功
@@ -52,7 +52,7 @@ TBD - created by archiving change add-session-continue. Update Purpose after arc
 
 ### Requirement: 飞书网关回复消息处理
 
-飞书网关 SHALL 能够识别用户回复消息，并将继续会话请求转发到对应的 Callback 后端。`claude_command` 的选择由 Callback 后端负责（从 SessionChatStore 查询）。
+飞书网关 SHALL 能够识别用户回复消息，并将继续会话请求转发到对应的 Callback 后端。`command` 的选择由 Callback 后端负责（从 SessionChatStore 查询）。
 
 #### Scenario: 识别回复消息
 
@@ -66,10 +66,10 @@ TBD - created by archiving change add-session-continue. Update Purpose after arc
 - **GIVEN** 查询到有效的映射
 - **AND** 提取到用户回复内容
 - **WHEN** 飞书网关处理回复消息
-- **THEN** POST 请求到 `{callback_url}/cb/claude/continue`
+- **THEN** POST 请求到 `{callback_url}/cb/agent/continue`
 - **AND** 请求 body 包含 `session_id`、`project_dir`、`prompt`
 - **AND** 可选包含 `chat_id`、`reply_message_id`
-- **AND** 如果用户通过 `/reply --cmd=` 指定了 command，携带 `claude_command` 参数
+- **AND** 如果用户通过 `/reply --cmd=` 指定了 command，携带 `command` 参数
 
 #### Scenario: 忽略未注册消息
 
@@ -91,78 +91,91 @@ TBD - created by archiving change add-session-continue. Update Purpose after arc
 
 ### Requirement: Callback 后端继续会话接口
 
-Callback 后端 SHALL 提供 `/cb/claude/continue` 端点，接收并处理继续会话请求，支持指定 Claude Command。
+Callback 后端 SHALL 提供 `/cb/agent/continue` 端点，接收并处理继续会话请求，支持 Claude 和 Codex 两种 agent 类型。
 
 #### Scenario: 接收继续会话请求
 
 - **GIVEN** Callback 后端正在运行
-- **WHEN** 收到 POST `/cb/claude/continue` 请求
+- **WHEN** 收到 POST `/cb/agent/continue` 请求
 - **AND** 请求包含 `session_id`、`project_dir`、`prompt`
-- **AND** 请求可选包含 `claude_command`
+- **AND** 请求可选包含 `command`
 - **THEN** 后端验证参数完整性
 - **AND** 验证 `project_dir` 目录存在
-- **AND** 如果 `claude_command` 非空，验证其在配置列表中
-- **AND** 如果 `claude_command` 为空，从 SessionChatStore 查询 session 记录的 command
-- **AND** 启动异步线程执行 Claude 命令
+- **AND** 如果 `command` 非空，验证其在当前 agent adapter 的命令列表中
+- **AND** 如果 `command` 为空，从 SessionChatStore 查询 session 记录的 command
+- **AND** 通过 `launch_agent(adapter, ...)` 启动 agent 进程
 - **AND** 立即返回 `{"status": "processing"}`
 
-#### Scenario: 执行 Claude 继续会话
+#### Scenario: 执行继续会话（Claude）
 
-- **GIVEN** 异步线程启动
-- **WHEN** 执行 Claude 命令
+- **GIVEN** session 记录的 `agent_type` 为 `claude`
+- **AND** 异步线程启动
+- **WHEN** 执行 agent 命令
 - **THEN** 切换到 `project_dir` 目录
-- **AND** 使用确定的 `claude_command`（按优先级：请求指定 > session 记录 > 默认）
+- **AND** 使用确定的 `command`（按优先级：请求指定 > session 记录 > 默认）
 - **AND** 通过登录 shell（`bash -lc`）执行，支持 shell 配置文件中的别名和环境变量
-- **AND** 拼接 `-p {prompt} --resume {session_id}` 参数
-- **AND** 设置 10 分钟超时
+- **AND** 拼接 `--print {prompt} --resume {session_id}` 参数
+- **AND** 捕获输出用于日志
+
+#### Scenario: 执行继续会话（Codex）
+
+- **GIVEN** session 记录的 `agent_type` 为 `codex`
+- **AND** 异步线程启动
+- **WHEN** 执行 agent 命令
+- **THEN** 切换到 `project_dir` 目录
+- **AND** 使用确定的 codex command
+- **AND** 通过登录 shell 执行
+- **AND** 拼接 `exec resume --json {session_id} {prompt}` 参数（不含 `--cd`，工作目录由原始会话决定）
 - **AND** 捕获输出用于日志
 
 #### Scenario: 参数验证失败
 
-- **GIVEN** 收到 `/cb/claude/continue` 请求
+- **GIVEN** 收到 `/cb/agent/continue` 请求
 - **WHEN** 缺少 `session_id`、`project_dir` 或 `prompt`
 - **THEN** 返回 `400` 状态码
 - **AND** 返回 `{"error": "missing required fields"}`
 
 #### Scenario: 项目目录不存在
 
-- **GIVEN** 收到 `/cb/claude/continue` 请求
+- **GIVEN** 收到 `/cb/agent/continue` 请求
 - **WHEN** `project_dir` 目录不存在
 - **THEN** 返回 `400` 状态码
 - **AND** 返回 `{"error": "project directory not found"}`
 
-#### Scenario: 自定义 Claude 命令
+#### Scenario: 自定义命令（Claude）
 
-- **GIVEN** 环境变量 `CLAUDE_COMMAND` 设置为 `claude-glm`
+- **GIVEN** session 记录的 `agent_type` 为 `claude`
+- **AND** 环境变量 `CLAUDE_COMMAND` 设置为 `claude-glm`
 - **WHEN** 执行继续会话
-- **THEN** 使用 `claude-glm -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用 `claude-glm --print {prompt} --resume {session_id}` 执行
+
+#### Scenario: 自定义命令（Codex）
+
+- **GIVEN** session 记录的 `agent_type` 为 `codex`
+- **AND** 环境变量 `CODEX_COMMAND` 设置为 `codex --model o3-pro`
+- **WHEN** 执行继续会话
+- **THEN** 使用 `codex --model o3-pro exec resume --json {session_id} {prompt}` 执行
 
 #### Scenario: 带参数的自定义命令
 
 - **GIVEN** 环境变量 `CLAUDE_COMMAND` 设置为 `claude --model opus`
 - **WHEN** 执行继续会话
-- **THEN** 使用 `claude --model opus -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用 `claude --model opus --print {prompt} --resume {session_id}` 执行
 
 #### Scenario: 向后兼容默认命令
 
-- **GIVEN** 环境变量 `CLAUDE_COMMAND` 未设置
+- **GIVEN** `DEFAULT_AGENT` 未设置（默认 claude）
+- **AND** 环境变量 `CLAUDE_COMMAND` 未设置
 - **WHEN** 执行继续会话
-- **THEN** 使用默认命令 `claude -p {prompt} --resume {session_id}` 执行
+- **THEN** 使用默认命令 `claude --print {prompt} --resume {session_id}` 执行
 
 #### Scenario: 指定的 Command 不在配置列表中
 
-- **GIVEN** 收到 `/cb/claude/continue` 请求
-- **AND** `claude_command` 值不在预配置列表中
-- **WHEN** Callback 验证命令
+- **GIVEN** 当前 agent adapter 的命令列表为 `['claude', 'claude --model opus']`
+- **AND** 请求中 `command` 为 `unknown-cmd`
+- **WHEN** 后端验证 command
 - **THEN** 返回 `400` 状态码
-- **AND** 返回 `{"error": "invalid claude_command"}`
-
-#### Scenario: 执行成功后保存 command 到 SessionChatStore
-
-- **GIVEN** Claude 命令执行进入 processing 状态
-- **WHEN** 后端保存 session 信息
-- **THEN** 将实际使用的 `claude_command` 一并保存到 SessionChatStore
-- **AND** 后续回复该 session 时可自动复用
+- **AND** 返回 `{"error": "invalid command"}`
 
 ### Requirement: 通知参数传递
 
@@ -170,7 +183,7 @@ stop.sh 和 permission.sh SHALL 在发送通知时传递 session 相关参数，
 
 #### Scenario: Stop 事件传递 session 参数
 
-- **GIVEN** Claude stop 事件触发
+- **GIVEN** Agent stop 事件触发
 - **WHEN** `send_stop_notification_async()` 执行
 - **THEN** 读取 `CALLBACK_SERVER_URL` 配置
 - **AND** 从 transcript 提取 `SESSION_ID`
@@ -179,7 +192,7 @@ stop.sh 和 permission.sh SHALL 在发送通知时传递 session 相关参数，
 
 #### Scenario: 权限请求传递 session 参数
 
-- **GIVEN** Claude 权限请求事件触发
+- **GIVEN** Agent 权限请求事件触发
 - **WHEN** 发送飞书权限请求卡片
 - **THEN** 读取 `CALLBACK_SERVER_URL` 配置
 - **AND** 从请求输入中提取 `SESSION_ID`
@@ -211,16 +224,16 @@ stop.sh 和 permission.sh SHALL 在发送通知时传递 session 相关参数，
 
 #### Scenario: 会话恢复失败
 
-- **GIVEN** Callback 后端执行 `claude --resume`
+- **GIVEN** Callback 后端执行 agent resume 命令
 - **AND** 会话已过期或不存在
-- **WHEN** Claude 命令执行失败
+- **WHEN** agent 命令执行失败
 - **THEN** 记录错误日志
 - **AND** 不抛出异常
 - **AND** 后续 hook 事件可正常发送错误通知
 
 #### Scenario: 命令执行超时
 
-- **GIVEN** Claude 命令执行超过 10 分钟
+- **GIVEN** agent 命令执行超过 10 分钟
 - **WHEN** 超时触发
 - **THEN** 终止子进程
 - **AND** 记录超时日志
@@ -255,62 +268,99 @@ MessageSessionStore SHALL 支持定期清理过期的映射数据，防止数据
 - **THEN** 返回清理的条目数量
 - **AND** 更新存储文件
 
-### Requirement: SessionChatStore 扩展存储 Claude Command
+### Requirement: SessionChatStore 扩展存储 Agent Command 和 Agent Type
 
-Callback 后端的 SessionChatStore SHALL 扩展支持存储每个 session 最近使用的 `claude_command`，用于后续回复时自动复用。
+Callback 后端的 SessionChatStore SHALL 扩展支持存储每个 session 最近使用的 agent command（字段名 `command`）和 agent 类型（`agent_type` 字段），用于后续回复时自动复用。
 
-#### Scenario: 保存 session 的 claude_command
+#### Scenario: 保存 session 的 agent command 和类型
 
-- **GIVEN** Callback 后端执行 Claude 命令（新建或继续会话）
-- **AND** 使用了 `claude --model opus` 命令
+- **GIVEN** Callback 后端执行 agent 命令（新建或继续会话）
+- **AND** 使用了某个命令（如 `claude --model opus` 或 `codex --model o3-pro`）
 - **WHEN** 执行成功（进入 processing 状态）
-- **THEN** 调用 `SessionChatStore.save()` 保存 `session_id → {chat_id, claude_command, updated_at}`
-- **AND** `claude_command` 为实际使用的命令字符串
+- **THEN** 调用 `SessionChatStore.save()` 保存 `session_id → {chat_id, agent_type, command, updated_at}`
+- **AND** `agent_type` 为当前 adapter 的类型标识（`'claude'` 或 `'codex'`）
+- **AND** `command` 为实际使用的命令字符串（不论 agent 类型）
 
-#### Scenario: 查询 session 的 claude_command
+#### Scenario: 查询 session 的 agent command
 
 - **GIVEN** Callback 后端收到继续会话请求
-- **AND** 请求未指定 `claude_command`
+- **AND** 请求未指定 `command`
 - **WHEN** 后端查询 `SessionChatStore`
-- **THEN** 获取该 session 上次使用的 `claude_command`
-- **AND** 使用该命令继续会话
+- **THEN** 获取该 session 上次使用的命令
+- **AND** 传给当前 agent adapter 的 `resolve_command()` 使用
 
-#### Scenario: 旧数据无 claude_command 字段向后兼容
+#### Scenario: 旧数据 claude_command 字段迁移
 
-- **GIVEN** SessionChatStore 中的旧记录不包含 `claude_command` 字段
-- **WHEN** 查询该 session 的 `claude_command`
+- **GIVEN** SessionChatStore 中的旧记录包含 `claude_command` 字段（旧版本遗留）
+- **WHEN** 服务启动
+- **THEN** `migrate_claude_command()` 自动将 `claude_command` 重命名为 `command`
+- **AND** 迁移后查询该 session 的 `command` 正常返回
 - **THEN** 返回 `None`
-- **AND** 系统使用默认 Claude Command（配置列表第一个）
+- **AND** 系统使用当前 agent adapter 的默认命令
 
-### Requirement: Claude Command 选择优先级
+#### Scenario: 旧数据无 agent_type 字段向后兼容
 
-Callback 后端 SHALL 按以下优先级确定使用哪个 Claude Command：请求指定 > SessionChatStore session 记录 > 配置列表默认值。
+- **GIVEN** SessionChatStore 中的旧记录不包含 `agent_type` 字段
+- **WHEN** 查询该 session 的 `agent_type`
+- **THEN** 默认视为 `'claude'`
+
+### Requirement: SessionChatStore Session ID 重命名
+
+SessionChatStore SHALL 支持将临时 session ID 替换为真实 ID，用于 Codex 路径中从输出捕获的 session ID 替换预生成的临时 UUID。
+
+#### Scenario: 重命名 session ID
+
+- **GIVEN** SessionChatStore 中存在 `old_id` 的记录
+- **AND** `new_id` 不存在
+- **WHEN** 调用 `rename_session(old_id, new_id)`
+- **THEN** 将 `old_id` 的记录迁移到 `new_id`
+- **AND** 删除 `old_id` 的记录
+- **AND** 返回 `True`
+
+#### Scenario: 新旧 ID 都存在时合并
+
+- **GIVEN** SessionChatStore 中同时存在 `old_id` 和 `new_id` 的记录
+- **WHEN** 调用 `rename_session(old_id, new_id)`
+- **THEN** 将 `old_id` 的字段合并到 `new_id`（仅补全 `new_id` 缺失的字段）
+- **AND** 删除 `old_id` 的记录
+- **AND** 返回 `True`
+
+#### Scenario: 旧 ID 不存在
+
+- **GIVEN** SessionChatStore 中不存在 `old_id`
+- **WHEN** 调用 `rename_session(old_id, new_id)`
+- **THEN** 返回 `False`
+- **AND** 记录警告日志
+
+### Requirement: Agent Command 选择优先级
+
+Callback 后端 SHALL 按以下优先级确定使用哪个 agent command：请求指定 > SessionChatStore session 记录 > 当前 agent adapter 默认值。
 
 #### Scenario: 请求指定的 command 最优先
 
-- **GIVEN** `/cb/claude/continue` 请求中包含 `claude_command` 参数
+- **GIVEN** `/cb/agent/continue` 请求中包含 `command` 参数
 - **AND** SessionChatStore 中该 session 记录的 command 为另一个值
 - **WHEN** Callback 后端确定使用哪个命令
-- **THEN** 使用请求中指定的 `claude_command`
+- **THEN** 使用请求中指定的 `command`
 - **AND** 将新的 command 更新到 SessionChatStore
 
 #### Scenario: SessionChatStore session 记录次优先
 
-- **GIVEN** `/cb/claude/continue` 请求中未指定 `claude_command`
-- **AND** SessionChatStore 中该 session 记录了 `claude_command` 为 `claude --model opus`
+- **GIVEN** 请求未指定 `command`
+- **AND** SessionChatStore 中该 session 记录的 command 为 `claude --model opus`
 - **WHEN** Callback 后端确定使用哪个命令
 - **THEN** 使用 SessionChatStore 中记录的 `claude --model opus`
 
-#### Scenario: 默认命令兜底
+#### Scenario: 默认值兜底
 
-- **GIVEN** `/cb/claude/continue` 请求中未指定 `claude_command`
-- **AND** SessionChatStore 中该 session 无 `claude_command` 记录
+- **GIVEN** 请求未指定 `command`
+- **AND** SessionChatStore 中该 session 无 command 记录
 - **WHEN** Callback 后端确定使用哪个命令
-- **THEN** 使用配置列表第一个命令（默认命令）
+- **THEN** 使用当前 agent adapter 的默认命令（Claude: `CLAUDE_COMMAND` 列表第一个，Codex: `CODEX_COMMAND` 列表第一个）
 
 ### Requirement: 会话消息话题流收敛（链式回复）
 
-系统 SHALL 将同一 Claude 会话的所有飞书消息收敛到一个话题流中，采用链式回复结构。系统维护每个会话的 `last_message_id`，每条新系统通知回复到最近一条消息。
+系统 SHALL 将同一 Agent 会话的所有飞书消息收敛到一个话题流中，采用链式回复结构。系统维护每个会话的 `last_message_id`，每条新系统通知回复到最近一条消息。
 
 #### Scenario: /new 完整指令场景的链式回复
 
@@ -557,4 +607,3 @@ Callback 后端 SHALL 提供 `POST /cb/session/set-last-message-id` 端点，供
 - **AND** 请求未携带或携带无效的 `X-Auth-Token` header
 - **WHEN** Callback 后端处理请求
 - **THEN** 返回 HTTP 401，body 为 `{"error": "Unauthorized"}`
-

@@ -24,7 +24,7 @@ Claude Code 支持 **11 种 hook 事件**：
 | **PermissionRequest** | 权限请求对话显示时 | ✓ | ✅ |
 | **PostToolUse** | 工具调用完成后 | ✓ | - |
 | **UserPromptSubmit** | 用户提交提示词时 | ✗ | ✅ |
-| **Notification** | Claude 发送通知时 | ✓ | ✅ |
+| **Notification** | Claude 发送通知时 | ✓ | - |
 | **Stop** | 主 Agent 完成响应时 | ✗ | ✅ |
 | **SubagentStop** | 子 Agent 完成响应时 | ✗ | - |
 | **PreCompact** | 上下文压缩前 | ✓ | - |
@@ -140,7 +140,7 @@ Claude Code 支持 **11 种 hook 事件**：
   - 显示确认对话（ask）
 - **输入 JSON 示例**:
 
-  > **注意**: PermissionRequest 的输入 JSON schema 尚未官方文档化（参见 [GitHub Issue #11891](https://github.com/anthropics/claude-code/issues/11891)）。在实际测试确认的字段中，目前不包含 `tool_use_id`（未来可能支持）。
+  > **注意**: PermissionRequest 的输入 JSON schema 尚未官方文档化（参见 [GitHub Issue #11891](https://github.com/anthropics/claude-code/issues/11891)）。本项目将 `tool_use_id` 作为可选字段处理：原生 Hook 路径可能没有，`--permission-prompt-tool` MCP 路径会透传该字段。
 
   ```json
   {
@@ -859,7 +859,7 @@ if assistant_messages:
       "hooks": [
         {
           "type": "command",
-          "command": "/path/to/claude-anywhere/src/hook-router.sh",
+          "command": "/path/to/code-anywhere/src/hook-router.sh",
           "timeout": 660
         }
       ]
@@ -879,7 +879,7 @@ if assistant_messages:
       "hooks": [
         {
           "type": "command",
-          "command": "/path/to/claude-anywhere/src/hook-router.sh"
+          "command": "/path/to/code-anywhere/src/hook-router.sh"
         }
       ]
     }

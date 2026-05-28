@@ -1,7 +1,7 @@
 """Session-Chat 映射存储
 
 归属端: Callback 后端
-使用方: callback.py, claude.py
+使用方: callback.py, agent.py
 对外接口:
     - /cb/session/get-chat-id / get-last-message-id / set-last-message-id
     - /cb/session/ensure-chat（group 模式懒创建群聊）
@@ -9,7 +9,7 @@
     - /cb/session/mute
     - /cb/session/invalidate-chats（gateway 解散群后调用，标记所有引用该 chat_id 的记录为 dissolved 状态）
 
-维护 session_id → session 语义数据（chat_id、claude_command、dissolved、muted_at、活跃时间等）。
+维护 session_id → session 语义数据（chat_id、command、dissolved、muted_at、活跃时间等）。
 群聊层数据（chat_id ↔ session_id 反向索引、owner、seq、生命周期）由飞书网关侧
 GroupChatStore + GroupSessionStore 独立承担；本 store 只负责 session 自身属性。
 
@@ -22,7 +22,7 @@ dissolved 标记：独立布尔字段，默认不存在。
     - 不刷新 updated_at（dissolve 不是活跃信号，保留原值让过期机制正常回收）
 
 过期策略：统一 SESSION_EXPIRE_DAYS（默认 30 天），不区分 group/非 group。
-gateway 转发 /cb/claude/continue 时 callback 校验 session 是否存在，
+gateway 转发 /cb/agent/continue 时 callback 校验 session 是否存在，
 已过期则返回错误，gateway 告知用户 /new。
 """
 
@@ -45,7 +45,8 @@ class SessionChatStore:
         {
             "session_id": {
                 "chat_id": "oc_xxx",               # 飞书群聊 ID；空表示需要 ensure-chat 重建
-                "claude_command": "claude",        # 使用的 Claude 命令（可选）
+                "agent_type": "claude",            # agent 类型: 'claude' / 'codex'（旧数据可能缺失，默认视为 claude）
+                "command": "claude",               # 使用的命令（可选）
                 "last_message_id": "om_xxx",       # 链式回复锚点（可选）
                 "skip_next_user_prompt": true,     # 跳过下一条 UserPromptSubmit（飞书发起时设置，可选）
                 "updated_at": 1706745600,          # 最近更新时间戳
@@ -83,19 +84,71 @@ class SessionChatStore:
     def get_instance(cls) -> Optional['SessionChatStore']:
         return cls._instance
 
+    def backfill_agent_type(self, default: str = 'claude') -> int:
+        """为缺少 agent_type 的旧 session 记录补写默认值
+
+        启动时调用一次，处理从旧版本升级的历史数据。
+
+        Returns:
+            补写的记录数
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                count = 0
+                for entry in data.values():
+                    if isinstance(entry, dict) and not entry.get('agent_type'):
+                        entry['agent_type'] = default
+                        count += 1
+                if count > 0:
+                    self._save(data)
+                    logger.info("[session-chat-store] Backfilled agent_type='%s' for %d sessions",
+                                default, count)
+                return count
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to backfill agent_type: %s", e)
+                return 0
+
+    def migrate_claude_command(self) -> int:
+        """将旧字段 claude_command 迁移为 command
+
+        启动时调用一次，处理从旧版本升级的历史数据。
+
+        Returns:
+            迁移的记录数
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                count = 0
+                for entry in data.values():
+                    if isinstance(entry, dict) and 'claude_command' in entry:
+                        entry['command'] = entry.pop('claude_command')
+                        count += 1
+                if count > 0:
+                    self._save(data)
+                    logger.info("[session-chat-store] Migrated claude_command -> command for %d sessions",
+                                count)
+                return count
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to migrate claude_command: %s", e)
+                return 0
+
     # =========================================================================
     # 写
     # =========================================================================
 
     def save(self, session_id: str, chat_id: str,
-             project_dir: str = '', claude_command: str = '') -> bool:
+             project_dir: str = '', agent_type: str = '',
+             command: str = '') -> bool:
         """保存 session 属性（merge 方式，不传的字段保留旧值）
 
         Args:
-            session_id: Claude 会话 ID
+            session_id: 会话 ID
             chat_id: 飞书群聊 ID；空串视为不覆盖旧值，非空时自动清除 dissolved 标记（复活）
             project_dir: 项目目录（空串视为不覆盖）
-            claude_command: Claude 命令（空串视为不覆盖）
+            agent_type: agent 类型标识（'claude'/'codex'，空串视为不覆盖）
+            command: 命令字符串（空串视为不覆盖）
 
         Returns:
             是否保存成功
@@ -112,8 +165,11 @@ class SessionChatStore:
                     # 传入非空 chat_id 等于"session 现在有可用群聊"，自动清除 dissolved
                     entry.pop('dissolved', None)
                 entry['updated_at'] = int(time.time())
-                if claude_command:
-                    entry['claude_command'] = claude_command
+                if command:
+                    entry['command'] = command
+                # agent_type：传了才写，空串不动（旧 session 缺失时在读取侧 fallback 到默认值）
+                if agent_type:
+                    entry['agent_type'] = agent_type
                 if project_dir:
                     entry['project_dir'] = project_dir
                 # chat_id 变更时清掉旧 last_message_id（旧消息链不再适用）
@@ -128,6 +184,47 @@ class SessionChatStore:
                 return result
             except Exception as e:
                 logger.error("[session-chat-store] Failed to save mapping: %s", e)
+                return False
+
+    def rename_session(self, old_id: str, new_id: str) -> bool:
+        """重命名 session ID（将 old_id 的数据迁移到 new_id）
+
+        用于 Codex 路径：临时 ID 替换为从输出捕获的真实 session ID。
+        如果 new_id 已存在，将 old_id 的数据合并到 new_id（old_id 字段补全 new_id 缺失值）。
+
+        Args:
+            old_id: 旧 session ID
+            new_id: 新 session ID
+
+        Returns:
+            是否重命名成功
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                if old_id not in data:
+                    logger.warning("[session-chat-store] rename: old_id %s not found", old_id)
+                    return False
+                if new_id in data:
+                    old_entry = data.pop(old_id)
+                    new_entry = dict(data[new_id])
+                    for key, value in old_entry.items():
+                        if key not in new_entry or new_entry.get(key) is None:
+                            new_entry[key] = value
+                    new_entry['updated_at'] = int(time.time())
+                    data[new_id] = new_entry
+                    result = self._save(data)
+                    if result:
+                        logger.info("[session-chat-store] Merged session rename: %s -> %s",
+                                    old_id, new_id)
+                    return result
+                data[new_id] = data.pop(old_id)
+                result = self._save(data)
+                if result:
+                    logger.info("[session-chat-store] Renamed session: %s -> %s", old_id, new_id)
+                return result
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to rename session: %s", e)
                 return False
 
     def set_last_message_id(self, session_id: str, message_id: str) -> bool:
@@ -263,7 +360,7 @@ class SessionChatStore:
         """彻底删除 session 记录
 
         Args:
-            session_id: Claude 会话 ID
+            session_id: 会话 ID
 
         Returns:
             是否实际删除（不存在返回 False）

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code Permission Callback Server
+Agent Permission Callback Server
 
 功能：
     HTTP 服务接收飞书卡片按钮的 URL 跳转请求，
@@ -10,7 +10,7 @@ Claude Code Permission Callback Server
     1. hooks/permission-notify.sh 发送飞书交互卡片（带按钮）
     2. 用户点击飞书按钮，浏览器访问回调服务器 HTTP 端点
     3. 回调服务器接收 HTTP 请求，通过 Unix Socket 返回决策
-    4. hooks/permission-notify.sh 接收决策并返回给 Claude Code
+    4. hooks/permission-notify.sh 接收决策并返回给触发 hook 的 Agent
 
 WebSocket 隧道模式：
     当 FEISHU_GATEWAY_URL 配置为 ws:// 或 wss:// 时启用。
@@ -443,7 +443,7 @@ def main():
         10. FeishuAPIService - 飞书 OpenAPI 服务（OpenAPI 模式）
         11. AutoRegister - 启动时自动向飞书网关注册（可选）
     """
-    logger.info("Starting Claude Code Permission Callback Server")
+    logger.info("Starting Agent Permission Callback Server")
     logger.info(f"HTTP Port: {HTTP_PORT}")
     logger.info(f"Socket Path: {SOCKET_PATH}")
     env_timeout = os.environ.get('PERMISSION_REQUEST_TIMEOUT', '')
@@ -499,8 +499,11 @@ def main():
 
     # 初始化 SessionChatStore（callback 后端存储 session_id -> chat_id 映射）
     from config import SESSION_EXPIRE_DAYS
-    SessionChatStore.initialize(runtime_dir, expire_seconds=SESSION_EXPIRE_DAYS * 86400)
+    session_store = SessionChatStore.initialize(runtime_dir, expire_seconds=SESSION_EXPIRE_DAYS * 86400)
     logger.info(f"SessionChatStore initialized with runtime_dir={runtime_dir}, expire={SESSION_EXPIRE_DAYS}d")
+    # 旧 session 都是 Claude 创建的（Codex 支持是新增的），固定补 'claude'
+    session_store.backfill_agent_type('claude')
+    session_store.migrate_claude_command()
 
     GroupChatStore.initialize(runtime_dir)
     logger.info(f"GroupChatStore initialized with runtime_dir={runtime_dir}")
@@ -562,14 +565,19 @@ def main():
             from services.ws_tunnel_client import start_ws_tunnel_client
             from config import (FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
                                 FEISHU_SESSION_MODE,
-                                DEFAULT_CHAT_FOLLOW_THREAD, get_claude_commands,
-                                FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS)
+                                DEFAULT_CHAT_FOLLOW_THREAD,
+                                FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS,
+                                get_default_agent)
+            from agents import get_all_agent_commands
+            all_cmds = get_all_agent_commands()
             start_ws_tunnel_client(
                 FEISHU_GATEWAY_URL, FEISHU_OWNER_ID,
                 reply_in_thread=FEISHU_REPLY_IN_THREAD,
                 at_bot_only=FEISHU_AT_BOT_ONLY,
                 session_mode=FEISHU_SESSION_MODE,
-                claude_commands=get_claude_commands(),
+                default_agent=get_default_agent(),
+                claude_commands=all_cmds.get('claude'),
+                codex_commands=all_cmds.get('codex'),
                 default_chat_dir=DEFAULT_CHAT_DIR,
                 default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
                 group_name_prefix=FEISHU_GROUP_NAME_PREFIX,

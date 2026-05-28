@@ -119,7 +119,7 @@ class RequestManager:
 
             if req['status'] == self.STATUS_DISCONNECTED:
                 logger.info(f"[resolve] Already disconnected")
-                return False, self.ERR_DISCONNECTED, "连接已断开，Claude 可能已继续执行其他操作"
+                return False, self.ERR_DISCONNECTED, "连接已断开，Agent 可能已继续执行其他操作"
 
             # 发送决策给等待的进程
             try:
@@ -161,7 +161,7 @@ class RequestManager:
                 logger.error(f"[resolve] {error_type} for {request_id}: {e}")
                 req['status'] = self.STATUS_DISCONNECTED
                 self._close_connection(req['conn'])
-                return False, self.ERR_DISCONNECTED, f"连接已断开（{error_type}），Claude 可能已超时或取消"
+                return False, self.ERR_DISCONNECTED, f"连接已断开（{error_type}），Agent 可能已超时或取消"
 
             except Exception as e:
                 logger.error(f"[resolve] Unexpected error: {type(e).__name__}: {e}")

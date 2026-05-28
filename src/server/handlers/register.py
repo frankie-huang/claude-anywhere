@@ -83,7 +83,9 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
             - at_bot_only: 群聊 @bot 过滤（可选）
             - session_mode: 会话模式，message/thread/group（可选，默认 message）
             - reply_in_thread: 已废弃，兼容旧客户端（True 映射为 session_mode='thread'）
+            - default_agent: 默认 agent 类型（可选）
             - claude_commands: 可用的 Claude 命令列表（可选）
+            - codex_commands: 可用的 Codex 命令列表（可选）
             - default_chat_dir: 默认聊天目录（可选）
             - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（可选）
             - group_name_prefix: 群聊名称前缀（可选）
@@ -96,7 +98,9 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
     callback_url = data.get('callback_url', '')
     owner_id = data.get('owner_id', '')
     at_bot_only = data.get('at_bot_only')
+    default_agent = data.get('default_agent', '')
     claude_commands = data.get('claude_commands', None)
+    codex_commands = data.get('codex_commands', None)
     default_chat_dir = data.get('default_chat_dir', '')
     default_chat_follow_thread = data.get('default_chat_follow_thread', True)
     group_name_prefix = data.get('group_name_prefix')
@@ -119,7 +123,7 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
     logger.info(f"[register] Registration request: owner_id={owner_id}, callback_url={callback_url}, ip={client_ip}, session_mode={session_mode}, claude_commands={claude_commands}, default_chat_dir={default_chat_dir}")
 
     # 在后台线程中处理注册逻辑（异步）
-    _run_in_background(_process_registration, (callback_url, owner_id, client_ip, at_bot_only, session_mode, claude_commands, default_chat_dir, default_chat_follow_thread, group_name_prefix, group_dissolve_days))
+    _run_in_background(_process_registration, (callback_url, owner_id, client_ip, at_bot_only, session_mode, default_agent, claude_commands, codex_commands, default_chat_dir, default_chat_follow_thread, group_name_prefix, group_dissolve_days))
 
     # 立即返回成功
     return True, {
@@ -239,7 +243,9 @@ def _process_registration(
     client_ip: str,
     at_bot_only: Optional[bool] = None,
     session_mode: str = 'message',
+    default_agent: str = '',
     claude_commands: Optional[List[str]] = None,
+    codex_commands: Optional[List[str]] = None,
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
@@ -260,7 +266,9 @@ def _process_registration(
         client_ip: 客户端 IP
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -294,9 +302,14 @@ def _process_registration(
             store.upsert(
                 owner_id, callback_url, auth_token, client_ip,
                 at_bot_only,
-                session_mode, claude_commands,
-                default_chat_dir, default_chat_follow_thread,
-                group_name_prefix, group_dissolve_days
+                session_mode,
+                default_agent=default_agent,
+                claude_commands=claude_commands,
+                codex_commands=codex_commands,
+                default_chat_dir=default_chat_dir,
+                default_chat_follow_thread=default_chat_follow_thread,
+                group_name_prefix=group_name_prefix,
+                group_dissolve_days=group_dissolve_days
             )
         else:
             # callback_url 不同：发送授权卡片让用户确认是否更换设备
@@ -310,7 +323,9 @@ def _process_registration(
                 old_callback_url=bound_callback_url,
                 at_bot_only=at_bot_only,
                 session_mode=session_mode,
+                default_agent=default_agent,
                 claude_commands=claude_commands,
+                codex_commands=codex_commands,
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
@@ -331,7 +346,9 @@ def _process_registration(
             callback_url, owner_id, client_ip,
             at_bot_only=at_bot_only,
             session_mode=session_mode,
+            default_agent=default_agent,
             claude_commands=claude_commands,
+            codex_commands=codex_commands,
             default_chat_dir=default_chat_dir,
             default_chat_follow_thread=default_chat_follow_thread,
             group_name_prefix=group_name_prefix,
@@ -555,7 +572,9 @@ def _send_authorization_card(
     old_callback_url: str = '',
     at_bot_only: Optional[bool] = None,
     session_mode: str = 'message',
+    default_agent: str = '',
     claude_commands: Optional[List[str]] = None,
+    codex_commands: Optional[List[str]] = None,
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
@@ -573,7 +592,9 @@ def _send_authorization_card(
         old_callback_url: 旧的 callback_url（如果有，表示更换设备场景）
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -619,7 +640,9 @@ def _send_authorization_card(
             "old_callback_url": old_callback_url,
             "at_bot_only": at_bot_only,
             "session_mode": session_mode,
+            "default_agent": default_agent,
             "claude_commands": claude_commands,
+            "codex_commands": codex_commands,
             "default_chat_dir": default_chat_dir,
             "default_chat_follow_thread": default_chat_follow_thread,
             "group_name_prefix": group_name_prefix,
@@ -735,7 +758,9 @@ def handle_authorization_decision(
     approved: bool,
     at_bot_only: Optional[bool] = None,
     session_mode: str = 'message',
+    default_agent: str = '',
     claude_commands: Optional[List[str]] = None,
+    codex_commands: Optional[List[str]] = None,
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
@@ -750,7 +775,9 @@ def handle_authorization_decision(
         approved: 用户是否批准
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -784,9 +811,14 @@ def handle_authorization_decision(
             store.upsert(
                 owner_id, callback_url, auth_token, client_ip,
                 at_bot_only,
-                session_mode, claude_commands,
-                default_chat_dir, default_chat_follow_thread,
-                group_name_prefix, group_dissolve_days
+                session_mode,
+                default_agent=default_agent,
+                claude_commands=claude_commands,
+                codex_commands=codex_commands,
+                default_chat_dir=default_chat_dir,
+                default_chat_follow_thread=default_chat_follow_thread,
+                group_name_prefix=group_name_prefix,
+                group_dissolve_days=group_dissolve_days
             )
 
         # 通知 Callback 后端
@@ -896,7 +928,9 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
                                 client_ip: str, title: str, content: str,
                                 at_bot_only: Optional[bool] = None,
                                 session_mode: str = 'message',
+                                default_agent: str = '',
                                 claude_commands: Optional[List[str]] = None,
+                                codex_commands: Optional[List[str]] = None,
                                 default_chat_dir: str = '',
                                 default_chat_follow_thread: bool = True,
                                 old_ip: str = '',
@@ -915,7 +949,9 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
         content: 卡片正文（lark_md 格式）
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         old_ip: 旧终端 IP（有值则表示换绑场景）
@@ -942,7 +978,9 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
             "request_ip": client_ip,
             "at_bot_only": at_bot_only,
             "session_mode": session_mode,
+            "default_agent": default_agent,
             "claude_commands": claude_commands,
+            "codex_commands": codex_commands,
             "default_chat_dir": default_chat_dir,
             "default_chat_follow_thread": default_chat_follow_thread,
             "group_name_prefix": group_name_prefix,
@@ -979,7 +1017,9 @@ def handle_ws_registration(owner_id: str, request_id: str,
                            client_ip: str,
                            at_bot_only: Optional[bool] = None,
                            session_mode: str = 'message',
+                           default_agent: str = '',
                            claude_commands: Optional[List[str]] = None,
+                           codex_commands: Optional[List[str]] = None,
                            default_chat_dir: str = '',
                            default_chat_follow_thread: bool = True,
                            group_name_prefix: Optional[str] = None,
@@ -995,7 +1035,9 @@ def handle_ws_registration(owner_id: str, request_id: str,
         client_ip: 客户端 IP
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -1015,7 +1057,9 @@ def handle_ws_registration(owner_id: str, request_id: str,
     return _send_ws_authorization_card(owner_id, request_id, client_ip, title, content,
                                        at_bot_only=at_bot_only,
                                        session_mode=session_mode,
+                                       default_agent=default_agent,
                                        claude_commands=claude_commands,
+                                       codex_commands=codex_commands,
                                        default_chat_dir=default_chat_dir,
                                        default_chat_follow_thread=default_chat_follow_thread,
                                        group_name_prefix=group_name_prefix,
@@ -1026,7 +1070,9 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
                                    client_ip: str, old_ip: str,
                                    at_bot_only: Optional[bool] = None,
                                    session_mode: str = 'message',
+                                   default_agent: str = '',
                                    claude_commands: Optional[List[str]] = None,
+                                   codex_commands: Optional[List[str]] = None,
                                    default_chat_dir: str = '',
                                    default_chat_follow_thread: bool = True,
                                    group_name_prefix: Optional[str] = None,
@@ -1044,7 +1090,9 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
         old_ip: 旧终端 IP
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -1065,7 +1113,9 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
     return _send_ws_authorization_card(owner_id, request_id, client_ip, title, content,
                                        at_bot_only=at_bot_only,
                                        session_mode=session_mode,
+                                       default_agent=default_agent,
                                        claude_commands=claude_commands,
+                                       codex_commands=codex_commands,
                                        default_chat_dir=default_chat_dir,
                                        default_chat_follow_thread=default_chat_follow_thread,
                                        old_ip=old_ip,
@@ -1094,7 +1144,9 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
                                      client_ip: str,
                                      at_bot_only: Optional[bool] = None,
                                      session_mode: str = 'message',
+                                     default_agent: str = '',
                                      claude_commands: Optional[List[str]] = None,
+                                     codex_commands: Optional[List[str]] = None,
                                      default_chat_dir: str = '',
                                      default_chat_follow_thread: bool = True,
                                      group_name_prefix: Optional[str] = None,
@@ -1109,7 +1161,9 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
         client_ip: 客户端 IP
         at_bot_only: 群聊 @bot 过滤
         session_mode: 会话模式，message/thread/group
+        default_agent: 默认 agent 标识
         claude_commands: 可用的 Claude 命令列表
+        codex_commands: 可用的 Codex 命令列表
         default_chat_dir: 默认聊天目录
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
@@ -1183,7 +1237,9 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
             'client_ip': client_ip,
             'at_bot_only': at_bot_only,
             'session_mode': session_mode,
+            'default_agent': default_agent,
             'claude_commands': claude_commands,
+            'codex_commands': codex_commands,
             'default_chat_dir': default_chat_dir,
             'default_chat_follow_thread': default_chat_follow_thread,
             'group_name_prefix': group_name_prefix,

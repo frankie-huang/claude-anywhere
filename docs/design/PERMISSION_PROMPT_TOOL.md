@@ -12,11 +12,11 @@
 
 ### 1.1 问题
 
-在 [交互式 Claude 会话调研](./INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) 中，我们确定了使用 `claude -p` (subprocess + headless) 作为后端会话方案。但该模式下遇到需要权限的工具调用会直接跳过，无法触发审批流程。
+在 [交互式 Claude 会话调研](./INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md) 中，我们确定了使用 `claude --print` (subprocess + headless) 作为后端会话方案。但该模式下遇到需要权限的工具调用会直接跳过，无法触发审批流程。
 
 ### 1.2 发现
 
-Claude CLI 原生提供 `--permission-prompt-tool` 参数，可在 `-p` 模式下将权限决策委托给指定的 MCP 工具。这是官方支持的机制，无需 PTY 代理或 ACP 协议适配。
+Claude CLI 原生提供 `--permission-prompt-tool` 参数，可在 `--print` 模式下将权限决策委托给指定的 MCP 工具。这是官方支持的机制，无需 PTY 代理或 ACP 协议适配。
 
 ### 1.3 方案对比
 
@@ -33,10 +33,9 @@ Claude CLI 原生提供 `--permission-prompt-tool` 参数，可在 `-p` 模式�
 ### 2.1 整体流程
 
 ```
-claude -p "prompt" \
+claude --print "prompt" \
   --permission-prompt-tool mcp__approver__permission_request \
-  --mcp-config approver.json \
-  --output-format stream-json
+  --mcp-config approver.json
 
     ↓ Claude 执行任务
     ↓ 遇到需要权限的工具调用
@@ -62,10 +61,10 @@ claude -p "prompt" \
 ### 2.2 组件关系
 
 ```
-┌─────────────┐     stdio      ┌──────────────────┐
-│ Claude CLI   │◄──────────────►│ approver MCP     │
-│ (claude -p)  │    JSON-RPC    │ (permission_mcp) │
-└─────────────┘                 └────────┬─────────┘
+┌────────────────────┐  stdio   ┌──────────────────┐
+│ Claude CLI          │◄────────►│ approver MCP     │
+│ (claude --print)    │ JSON-RPC │ (permission_mcp) │
+└────────────────────┘          └────────┬─────────┘
                                          │ subprocess (stdin/stdout)
                                          │ 从 settings.json 读取 hook 配置
                                          ▼
@@ -104,7 +103,7 @@ Claude CLI 调用 MCP 工具时传入：
 ```
 
 > **注意**：`--permission-prompt-tool` MCP 模式下 Claude CLI **会传递 `tool_use_id`**（实测确认）。
-> 这与 CLI 交互模式下的 PermissionRequest hook 不同——后者不包含 `tool_use_id`。
+> CLI 交互模式下的 PermissionRequest hook 可能不包含 `tool_use_id`；本项目的 `permission.sh` 兼容有/无该字段。
 > 两者是不同的机制，不能混淆。
 
 `tool_name` 可能的值：`Bash`, `Edit`, `Write`, `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `NotebookEdit`, `mcp__xxx__yyy` 等。
@@ -223,11 +222,11 @@ MCP server 通过 stdio 使用 JSON-RPC 2.0 与 Claude CLI 通信。完整生命
 
 ---
 
-## 4. stream-json 输出
+## 4. stream-json 输出（可选增强，当前未启用）
 
-### 4.1 是否需要
+### 4.1 当前状态
 
-**建议加上**。理由：
+当前 `src/server/agents/claude.py` 未启用 `--output-format stream-json`；以下内容是后续可选增强建议。理由：
 
 | 能力 | text 模式 | stream-json 模式 |
 |------|----------|-----------------|
@@ -262,13 +261,13 @@ MCP server 通过 stdio 使用 JSON-RPC 2.0 与 Claude CLI 通信。完整生命
 {"type": "result", "result": "完整输出文本", "session_id": "...", "cost_usd": 0.05, "usage": {"input_tokens": 1000, "output_tokens": 500}}
 ```
 
-### 4.3 在现有系统中的应用
+### 4.3 未来在现有系统中的应用
 
-可以在 `src/server/handlers/claude.py` 的 subprocess 处理中，逐行读取 stream-json 输出：
+后续可以在 agent 启动流程的 subprocess 处理中，逐行读取 stream-json 输出：
 
 ```python
 proc = subprocess.Popen(
-    [shell, '-lc', f'claude -p {prompt} --resume {session_id} '
+    [shell, '-lc', f'claude --print {prompt} --resume {session_id} '
                     f'--output-format stream-json '
                     f'--permission-prompt-tool mcp__approver__permission_request'],
     stdout=subprocess.PIPE,
@@ -366,19 +365,19 @@ def _get_mcp_args(project_dir: str, session_id: str) -> str:
 
 ```bash
 # 基本用法（内联 MCP 配置，由 claude.py 自动生成）
-claude -p "重构 auth 模块" \
+claude --print "重构 auth 模块" \
   --session-id <session_id> \
   --permission-prompt-tool mcp__approver__permission_request \
   --mcp-config '{"mcpServers":{"approver":{"command":"python3","args":["/path/to/permission_mcp.py","--cwd","/project/dir","--session-id","<session_id>"]}}}'
 
 # 恢复会话
-claude -p "继续补充测试" \
+claude --print "继续补充测试" \
   --resume <session_id> \
   --permission-prompt-tool mcp__approver__permission_request \
   --mcp-config '...'
 
 # 静态规则 + MCP 审批混合使用
-claude -p "修复 bug" \
+claude --print "修复 bug" \
   --allowedTools "Read,Grep,Glob" \
   --permission-prompt-tool mcp__approver__permission_request \
   --mcp-config '...'
@@ -404,7 +403,7 @@ MCP server 直接调用 `permission.sh`，完全复用现有流程：
 
 ### 7.1 自动检测
 
-网关服务（`src/server/handlers/claude.py`）的 `_get_mcp_args()` 会自动检测 MCP 脚本是否存在：
+Claude adapter（`src/server/agents/claude.py`）会自动检测 MCP 脚本是否存在：
 
 ```python
 # 检测同目录下的 permission_mcp.py
@@ -413,14 +412,14 @@ if os.path.exists(mcp_script):
     # 自动添加 --permission-prompt-tool 和 --mcp-config 参数
 ```
 
-**无需用户手动配置**，只要 `permission_mcp.py` 与 `claude.py` 同目录存在，网关服务调用 `claude -p` 时会自动添加 MCP 审批参数。
+**无需用户手动配置**，只要 `permission_mcp.py` 与 `claude.py` 同目录存在，网关服务调用 `claude --print` 时会自动添加 MCP 审批参数。
 
 ### 7.2 手动使用（可选）
 
 用户也可以手动使用 wrapper 脚本：
 
 ```bash
-~/.claude/hooks/bin/claude-approve -p "your prompt"
+~/.claude/hooks/bin/claude-approve --print "your prompt"
 ```
 
 ---
@@ -451,7 +450,7 @@ if os.path.exists(mcp_script):
 │  └─→ PermissionRequest Hook → hook-router.sh              │
 │      └─→ permission.sh → 飞书卡片 → socket 等待           │
 │                                                           │
-│  非交互模式（claude -p）                                   │
+│  非交互模式（claude --print）                              │
 │  └─→ --permission-prompt-tool → MCP server                │
 │      └─→ permission.sh → 飞书卡片 → socket 等待           │
 │                                                           │
@@ -497,8 +496,8 @@ if os.path.exists(mcp_script):
 - **缓解**：复用现有 rule_writer.py 逻辑
 
 ### 10.4 并发安全
-- 多个 `claude -p` 实例可能同时触发 MCP server
-- 每个 `claude -p` 会启动独立的 MCP server 子进程，天然隔离
+- 多个 `claude --print` 实例可能同时触发 MCP server
+- 每个 `claude --print` 会启动独立的 MCP server 子进程，天然隔离
 - callback server 端需处理并发请求（已有 request_manager 支持）
 
 ---

@@ -107,7 +107,7 @@
           "tag": "div",
           "text": {
             "tag": "lark_md",
-            "content": "恢复会话：`claude --resume {{resume_session_id}}`",
+            "content": "恢复会话：`{{resume_command}}`",
             "text_size": "notation",
             "text_align": "left",
             "text_color": "grey"

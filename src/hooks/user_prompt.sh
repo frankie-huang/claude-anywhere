@@ -99,10 +99,10 @@ send_user_prompt_async() {
     send_feishu_post "$message_text" "$options" >/dev/null 2>&1
 }
 
-# 启动后台发送（不等待，立即返回）
-# 注意: 不要在 settings.json 中给此 hook 加 async: true，
-# 而是通过 & 将发送函数放到后台，脚本立即 exit 0 返回，不阻塞 Claude Code
-send_user_prompt_async &
+# 后台发送；单独 & 不够——宿主以 pipe 关闭（非 PID 退出）判断 hook 结束，
+# 子进程继承 stdout/stderr 会导致 pipe 未关闭，需要 >/dev/null 2>&1 切断
+# 注意: UserPromptSubmit hook 配置不要加 async: true，而是通过 & 放后台，脚本立即 exit 0 返回
+send_user_prompt_async >/dev/null 2>&1 &
 
 # 立即返回，不阻塞 Claude Code
 exit 0

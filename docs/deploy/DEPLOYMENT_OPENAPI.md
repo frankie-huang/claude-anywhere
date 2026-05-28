@@ -194,7 +194,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
        ↓
 5. permission.sh 接收决策
        ↓
-6. Claude Code 继续或拒绝执行
+6. 触发 hook 的 Agent 继续或拒绝执行
        ↓
 7. 飞书显示操作结果 Toast
 ```
@@ -205,12 +205,12 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 
 | 组件 | 路径 | 说明 |
 |------|------|------|
-| Hook 路由 | `src/hook-router.sh` | Claude Code Hook 统一入口 |
+| Hook 路由 | `src/hook-router.sh` | Agent Hook 统一入口 |
 | 权限处理 | `src/hooks/permission.sh` | 构建并发送飞书卡片 |
 | 卡片模板 | `src/templates/feishu/buttons-openapi.json` | OpenAPI 模式卡片模板 |
 | 回调服务 | `src/server/main.py` | ThreadedHTTPServer，处理飞书事件回调 |
 | 飞书事件处理器 | `src/server/handlers/feishu.py` | 处理飞书事件（网关功能） |
-| 会话继续 | `src/server/handlers/claude.py` | 处理回复继续会话 |
+| 会话继续 | `src/server/handlers/agent.py` | 处理新建/回复继续会话 |
 | Message-Session Store | `src/server/services/message_session_store.py` | 消息 ID 与会话映射 |
 | Session-Chat Store | `src/server/services/session_chat_store.py` | 会话 ID 与群聊映射 |
 | Auth Token Store | `src/server/services/auth_token_store.py` | 网关注册令牌存储 |
@@ -478,7 +478,7 @@ claude
 
 ```bash
 # 在网关服务器上
-git clone ... && cd claude-anywhere
+git clone ... && cd code-anywhere
 ./install.sh
 
 # 配置
@@ -503,7 +503,7 @@ EOF
 
 ```bash
 # 在本地电脑上
-git clone ... && cd claude-anywhere
+git clone ... && cd code-anywhere
 ./install.sh
 
 # 配置
@@ -523,7 +523,7 @@ EOF
 
 ```bash
 # 在实例机器上
-git clone ... && cd claude-anywhere
+git clone ... && cd code-anywhere
 ./install.sh
 
 # 配置
@@ -779,17 +779,19 @@ HTTP 回调模式下检查以下几点：
 - **云服务器**：两种模式均可，WS 隧道模式连接更稳定
 - **需要低延迟**：WS 隧道模式，长连接无握手开销
 
-### Q: 如何配置多个 Claude 命令？
+### Q: 如何配置多个 Agent 命令？
 
 **A:** 在 `.env` 中配置：
 ```bash
 CLAUDE_COMMAND=[claude, claude --model opus]
+CODEX_COMMAND=[codex, codex --model gpt-5]
 ```
 
 然后在飞书中：
 - `/new --cmd=0 --dir=/path prompt` — 使用第一个命令 `claude`
 - `/new --cmd=1 --dir=/path prompt` — 使用第二个命令 `claude --model opus`
 - `/new --cmd=opus --dir=/path prompt` — 子串匹配，命中 `claude --model opus`
+- `/new --cmd=codex::codex --dir=/path prompt` — 指定 Codex agent 的命令
 
 > **说明**：`--cmd` 支持两种匹配方式：
 > - **索引**：从 0 开始，`--cmd=0` 表示第一个命令

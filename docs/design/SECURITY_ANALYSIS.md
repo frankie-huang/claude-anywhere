@@ -2,7 +2,7 @@
 
 本文档详细分析项目各通信模式的鉴权机制和潜在安全风险。
 
-> **更新**: 已实现飞书 Verification Token 验证，飞书事件回调安全性已提升。
+> **更新**: 已实现飞书 Verification Token 验证，飞书事件回调安全性已提升；当前 `/cb/*` 与 `/gw/feishu/send` 走 auth_token 鉴权，Unix Socket 权限已收紧为 `0o600`。
 
 ## 目录
 
@@ -26,9 +26,9 @@
 | `/deny` | GET | 拒绝权限请求 | 低 | 无 |
 | `/interrupt` | GET | 拒绝并中断 | 低 | 无 |
 | `/status` | GET | 查看服务状态 | 低 | ✅ X-Auth-Token |
-| `/cb/decision` | POST | 纯决策接口（网关调用） | **高** | 无 |
-| `/gw/feishu/send` | POST | 发送飞书消息 | **高** | 无 |
-| `/cb/claude/continue` | POST | 继续 Claude 会话 | **高** | 无 |
+| `/cb/decision` | POST | 纯决策接口（网关调用） | 中 | ✅ X-Auth-Token |
+| `/gw/feishu/send` | POST | 发送飞书消息 | 中 | ✅ owner_id + X-Auth-Token |
+| `/cb/agent/continue` | POST | 继续 Agent 会话 | 中 | ✅ X-Auth-Token |
 | `/` (POST) | POST | 飞书事件回调 | 中 | ✅ Verification Token |
 
 > ***风险等级说明**：`/allow` 和 `/always` 因 request_id 已优化为 32 位随机字符，从「严重」降为「中」。实际风险取决于部署场景：
@@ -39,7 +39,7 @@
 
 | 接口 | 用途 | 风险等级 | 鉴权状态 |
 |------|------|:--------:|:--------:|
-| `/tmp/claude-permission.sock` | Hook 与服务间通信 | 中 | 文件权限 (666) |
+| `/tmp/claude-permission.sock` | Hook 与服务间通信 | 低 | 文件权限 (600) |
 
 ### 外部接口
 
@@ -111,30 +111,28 @@ def handle_allow(request_id: str):
 
 **问题**: 所有 `/allow`、`/always`、`/deny`、`/interrupt` 接口完全无鉴权
 
-### 3. Unix Socket ⚠️ 权限过宽
+### 3. Unix Socket ✅ 权限已收紧
 
-**位置**: `src/server/socket_client.py`
+**位置**: `src/server/main.py`
 
 **当前实现**:
 ```python
-os.chmod(SOCKET_PATH, 0o666)  # 任意用户可读写
+os.chmod(SOCKET_PATH, 0o600)  # 仅所有者可读写
 ```
 
-**问题**: 权限过于宽松，任何本地用户可读写
+**状态**: 已收紧为仅所有者可读写。
 
-### 4. Callback URL 转发 ❌ 无白名单
+### 4. Callback URL 转发 ⚠️ 无域名白名单
 
 **位置**: `src/server/handlers/feishu.py`
 
 **当前实现**:
-```python
-def _forward_to_callback_service(callback_url: str, action_type: str, request_id: str):
-    # 直接信任 callback_url，无验证
-    api_url = f"{callback_url}/cb/decision"
-    requests.post(api_url, json={...})
-```
+- callback_url 来自 owner 的注册绑定记录
+- HTTP 转发会携带该绑定对应的 `X-Auth-Token`
+- WS 模式会通过已认证的 WebSocket 隧道转发
+- 目前仍未做 callback_url 域名白名单
 
-**问题**: 无 Callback URL 白名单验证
+**问题**: 如果绑定被错误授权或配置到不可信地址，仍可能把回调请求转发到不可信 callback。
 
 ---
 
@@ -250,19 +248,19 @@ POST http://attacker-server:9000/cb/decision
 
 ---
 
-### 风险 3：会话继续接口无验证 ❌
+### 风险 3：会话继续接口无验证 ✅ 已缓解
 
-**等级**: **高**
+**等级**: **中**（已从「高」降级）
 
-**描述**: `/cb/claude/continue` 接口无额外验证。
+**描述**: 历史版本中 `/cb/claude/continue` 接口无额外验证；当前实现已迁移为 `/cb/agent/continue`，并通过 `X-Auth-Token` 校验网关/Callback 之间的调用。
 
-**影响范围**: OpenAPI 模式
+**影响范围**: 历史版本；当前版本需保护好 auth_token。
 
-#### 攻击示例
+#### 历史攻击示例（缺少 token 校验时）
 
 ```bash
 # 场景 1: 在他人会话中执行恶意命令
-curl -X POST http://target-server:8080/cb/claude/continue \
+curl -X POST http://target-server:8080/cb/agent/continue \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -274,12 +272,12 @@ curl -X POST http://target-server:8080/cb/claude/continue \
 # session_id 是 UUID v4 格式，可以暴力枚举
 for i in {1..10000}; do
   uuid=$(cat /proc/sys/kernel/random/uuid)
-  curl -X POST http://target-server:8080/cb/claude/continue \
+  curl -X POST http://target-server:8080/cb/agent/continue \
     -d "{\"session_id\": \"$uuid\", \"prompt\": \"whoami\"}"
 done
 
 # 场景 3: 路径遍历
-curl -X POST http://target-server:8080/cb/claude/continue \
+curl -X POST http://target-server:8080/cb/agent/continue \
   -d '{
     "session_id": "xxx",
     "project_dir": "/etc",
@@ -292,17 +290,17 @@ curl -X POST http://target-server:8080/cb/claude/continue \
 - 敏感信息泄露
 - 代码注入
 
-**建议修复**: 添加来源验证和 session 绑定检查
+**当前状态**: ✅ 已添加 `X-Auth-Token` 来源验证；session 绑定关系仍由业务 store 校验和维护。
 
 ---
 
-### 风险 4：Unix Socket 权限过宽 ⚠️
+### 风险 4：Unix Socket 权限过宽 ✅ 已缓解
 
-**等级**: **中**
+**等级**: **低**（已从「中」降级）
 
-**描述**: Socket 文件权限为 `666`，任意本地用户可读写。
+**描述**: 历史版本中 Socket 文件权限为 `666`，当前实现已收紧为 `600`。
 
-**影响范围**: 所有部署模式
+**影响范围**: 历史版本；当前版本仅所有者可读写。
 
 #### 攻击示例
 
@@ -326,7 +324,7 @@ echo -n "$(printf '%08x' 45)$(echo '{"request_id":"xxx","decision":"allow"}' | b
 - 本地用户可窥探权限请求
 - 可发送虚假决策干扰流程
 
-**建议修复**: 收紧权限为 `600`
+**当前状态**: ✅ 已收紧权限为 `600`
 
 ---
 
@@ -359,13 +357,13 @@ echo -n "$(printf '%08x' 45)$(echo '{"request_id":"xxx","decision":"allow"}' | b
 
 ---
 
-### 风险 6：飞书发送接口无保护 ❌
+### 风险 6：飞书发送接口无保护 ✅ 已缓解
 
-**等级**: **高**
+**等级**: **中**（已从「高」降级）
 
-**描述**: `/gw/feishu/send` 接口无鉴权，任何人可以调用。
+**描述**: 历史版本中 `/gw/feishu/send` 接口无鉴权；当前实现要求请求携带 `owner_id`，并用绑定记录中的 auth_token 校验 `X-Auth-Token`。
 
-#### 攻击示例
+#### 历史攻击示例（缺少 token 校验时）
 
 ```bash
 # 场景 1: 滥用发送接口，消耗配额
@@ -401,7 +399,7 @@ curl -X POST http://target-server:8080/gw/feishu/send \
 - 钓鱼攻击
 - 伪造官方通知
 
-**建议修复**: 添加 API 密钥或来源 IP 限制
+**当前状态**: ✅ 已通过 `owner_id` + `X-Auth-Token` 保护；可额外增加来源 IP 限制作为部署侧加固。
 
 ---
 
@@ -449,7 +447,7 @@ def handle_allow(request_id: str, token: str):
 /allow?id={request_id}&token={request_token}
 ```
 
-#### 1.2 生成更安全的 Request ID
+#### 1.2 生成更安全的 Request ID（已完成）
 
 ```python
 # 使用完全随机的 ID
@@ -458,7 +456,7 @@ import secrets
 request_id = secrets.token_urlsafe(24)  # 32 字符，192 位熵
 ```
 
-### 优先级 2：尽快修复（高风险）
+### 优先级 2：进一步加固（部分已完成）
 
 #### 2.1 Callback URL 白名单
 
@@ -495,55 +493,48 @@ def _validate_callback_url(url: str) -> bool:
 ALLOWED_CALLBACK_DOMAINS=localhost,127.0.0.1,gateway.internal,callback-1.internal
 ```
 
-#### 2.2 会话继续接口验证
+#### 2.2 会话继续接口验证（已添加 X-Auth-Token，可继续加固业务校验）
+
+当前实现通过 `services.auth_token.check_global_auth_token()` 校验 `X-Auth-Token`：
 
 ```python
-# src/server/handlers/claude.py
+# src/server/handlers/callback.py
 
-def _validate_continue_request(data: dict) -> Tuple[bool, str]:
-    """验证继续会话请求"""
+def handle_agent_continue(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    if not check_global_auth_token(headers, '/cb/agent/continue'):
+        return 401, {'error': 'Unauthorized'}
 
-    # 检查来源是否为网关（通过请求头或共享密钥）
-    gateway_secret = get_config('GATEWAY_SHARED_SECRET', '')
-    if gateway_secret:
-        provided_secret = request.headers.get('X-Gateway-Secret', '')
-        if not secrets.compare_digest(provided_secret, gateway_secret):
-            return False, 'Unauthorized gateway'
-
-    # 检查 session_id 格式
-    session_id = data.get('session_id', '')
-    if not _is_valid_session_id(session_id):
-        return False, 'Invalid session_id'
-
-    # 检查 project_dir 是否合法
-    project_dir = data.get('project_dir', '')
-    if not os.path.exists(project_dir):
-        return False, 'Project directory not found'
-
-    return True, ''
+    success, response = handle_continue_session(data)
+    status = 200 if success else 400
+    return status, response
 ```
 
-#### 2.3 飞书发送接口保护
+可继续加固的方向是更细粒度校验 session 与 chat/owner 的绑定关系。
+
+#### 2.3 飞书发送接口保护（已添加 owner_id + X-Auth-Token，可继续加固）
+
+当前实现通过 `services.auth_token.verify_owner_based_auth_token()` 按 `owner_id` 查绑定记录，并校验 `X-Auth-Token`：
 
 ```python
-# src/server/handlers/feishu.py
+# src/server/handlers/http_handler.py
 
-API_SECRET = get_config('FEISHU_SEND_API_SECRET', '')
-
-def handle_send_message(data: dict, headers: dict):
-    # 验证 API 密钥
-    provided_secret = headers.get('X-API-Secret', '')
-    if API_SECRET and not secrets.compare_digest(provided_secret, API_SECRET):
-        return False, {'error': 'Unauthorized'}
-    # 处理请求...
+if path == '/gw/feishu/send':
+    binding = verify_owner_based_auth_token(self, data, '/gw/feishu/send')
+    if binding is None:
+        return
+    handled, response = handle_send_message(binding, data)
+    send_json(self, 200 if response.get('success') else 400, response)
+    return
 ```
+
+可继续加固的方向是来源 IP 限制、请求频率限制和更严格的 owner 可用范围校验。
 
 ### 优先级 3：建议修复（中低风险）
 
-#### 3.1 收紧 Socket 权限
+#### 3.1 收紧 Socket 权限（已完成）
 
 ```python
-# src/server/socket_client.py
+# src/server/main.py
 
 os.chmod(SOCKET_PATH, 0o600)  # 仅所有者可读写
 ```

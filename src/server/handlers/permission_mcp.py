@@ -8,7 +8,7 @@ Usage:
     python3 permission_mcp.py --cwd <project_dir> --session-id <session_id>
 
     # 完整调用示例
-    claude -p "your prompt" \
+    claude --print "your prompt" \
         --permission-prompt-tool mcp__approver__permission_request \
         --mcp-config '{"mcpServers":{"approver":{"command":"python3","args":["/path/to/permission_mcp.py","--cwd","/project/dir","--session-id","abc123"]}}}'
 

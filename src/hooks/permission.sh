@@ -551,26 +551,51 @@ output_decision() {
     local message="$2"
     local interrupt="$3"
 
-    log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt"
+    log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt, agent=${AGENT_TYPE:-claude}"
 
-    local decision_json
-
-    if [ "$behavior" = "allow" ]; then
-        decision_json='{"behavior": "allow"}'
-    elif [ "$interrupt" = "true" ]; then
-        decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
+    if [ "${AGENT_TYPE:-}" = "codex" ]; then
+        # Codex 格式：仅支持 behavior + message
+        # Codex 源码对 interrupt/updatedInput/updatedPermissions 均 fail closed，不能传
+        local codex_behavior="$behavior"
+        if [ "$codex_behavior" != "allow" ]; then
+            codex_behavior="deny"
+        fi
+        if [ "$JSON_HAS_JQ" = "true" ]; then
+            if [ "$codex_behavior" = "deny" ] && [ -n "$message" ]; then
+                jq -n --arg behavior "$codex_behavior" --arg message "$message" \
+                    '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: $behavior, message: $message}}}'
+            else
+                jq -n --arg behavior "$codex_behavior" \
+                    '{hookSpecificOutput: {hookEventName: "PermissionRequest", decision: {behavior: $behavior}}}'
+            fi
+        elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+            CODEX_BEHAVIOR="$codex_behavior" CODEX_MESSAGE="$message" "$PYTHON3" -c '
+import json
+import os
+decision = {"behavior": os.environ.get("CODEX_BEHAVIOR", "")}
+message = os.environ.get("CODEX_MESSAGE", "")
+if decision["behavior"] == "deny" and message:
+    decision["message"] = message
+data = {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+print(json.dumps(data, ensure_ascii=False))
+'
+        elif [ "$codex_behavior" = "deny" ] && [ -n "$message" ]; then
+            printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s","message":"%s"}}}\n' "$codex_behavior" "$(json_escape "$message")"
+        else
+            printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s"}}}\n' "$codex_behavior"
+        fi
     else
-        decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\"}"
+        # Claude 格式：支持 behavior + message + interrupt
+        local decision_json
+        if [ "$behavior" = "allow" ]; then
+            decision_json='{"behavior": "allow"}'
+        elif [ "$interrupt" = "true" ]; then
+            decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
+        else
+            decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\"}"
+        fi
+        printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":%s}}\n' "$decision_json"
     fi
-
-    cat << EOF
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": ${decision_json}
-  }
-}
-EOF
 
     log "Decision output complete"
 }
@@ -586,9 +611,15 @@ output_decision_with_updated_input() {
     local behavior="$1"
     local updated_input="$2"
 
-    log "Outputting decision with updatedInput: behavior=$behavior"
+    log "Outputting decision with updatedInput: behavior=$behavior, agent=${AGENT_TYPE:-claude}"
 
-    # updatedInput 必须在 decision 对象内部（Claude Code 文档要求）
+    # Codex 不支持 updatedInput，降级为普通 allow
+    if [ "${AGENT_TYPE:-}" = "codex" ]; then
+        output_decision "$behavior" "" ""
+        return
+    fi
+
+    # Claude: updatedInput 必须在 decision 对象内部（Claude Code 文档要求）
     # 使用 printf 避免 heredoc 对 updated_input 中 $ 反引号等字符的 shell 展开
     printf '{
   "hookSpecificOutput": {

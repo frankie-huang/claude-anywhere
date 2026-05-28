@@ -19,7 +19,7 @@
 ### 1.3 最终架构
 
 ```
-飞书消息 → Python 后端 → subprocess.Popen → claude -p --resume/--session-id
+飞书消息 → Python 后端 → subprocess.Popen → claude --print --resume/--session-id
                                       ↓
                           PermissionRequest Hook → 飞书审批通知
 ```
@@ -30,10 +30,10 @@
 
 | 方案 | 描述 | 交互性 | 复杂度 | 结论 |
 |------|------|--------|--------|------|
-| **subprocess + Headless** | `subprocess.Popen` + `claude -p` | ⭐⭐ | 低 | ✅ **最终选择** |
+| **subprocess + Headless** | `subprocess.Popen` + `claude --print` | ⭐⭐ | 低 | ✅ **最终选择** |
 | **Claude Agent SDK** | 官方 Python SDK | ⭐⭐⭐ | 中 | ❌ 已尝试并回退 |
-| **PTY + 交互模式** | pexpect + `claude` (无 -p) | ⭐⭐⭐⭐⭐ | 高 | ❌ TUI 输出解析复杂 |
-| **PTY + Headless 模式** | pexpect + `claude -p` | ⭐⭐ | 中 | ❌ 多个问题未解决 |
+| **PTY + 交互模式** | pexpect + `claude` (无 `--print`) | ⭐⭐⭐⭐⭐ | 高 | ❌ TUI 输出解析复杂 |
+| **PTY + Headless 模式** | pexpect + `claude --print` | ⭐⭐ | 中 | ❌ 多个问题未解决 |
 
 ---
 
@@ -43,14 +43,14 @@
 
 #### 3.1.1 方案概述
 
-通过 Python 标准库 `subprocess.Popen` 启动 `claude -p` 子进程，使用登录 shell 包装命令以加载用户环境配置：
+通过 Python 标准库 `subprocess.Popen` 启动 `claude --print` 子进程，使用登录 shell 包装命令以加载用户环境配置：
 
 ```python
 import subprocess
 import shlex
 
 # 构建命令
-cmd_str = f'claude -p {shlex.quote(prompt)} --resume {shlex.quote(session_id)}'
+cmd_str = f'claude --print {shlex.quote(prompt)} --resume {shlex.quote(session_id)}'
 
 # 通过登录 shell 执行（加载 ~/.bashrc 或 ~/.zshrc）
 shell = os.environ.get('SHELL', '/bin/bash')
@@ -84,27 +84,16 @@ proc = subprocess.Popen(cmd, cwd=project_dir, stdout=PIPE, stderr=PIPE)
 ```python
 # src/server/handlers/claude.py
 
-def _execute_and_check(session_id, project_dir, prompt, chat_id, session_mode, claude_command):
+def _launch_claude(session_id, project_dir, prompt, chat_id, message_id, session_mode, claude_command):
     shell = _get_shell()
-    shell_name = os.path.basename(shell)
-    safe_prompt = shlex.quote(prompt)
-    safe_session = shlex.quote(session_id)
-
-    if session_mode == 'new':
-        cmd_str = f'{claude_cmd} -p {safe_prompt} --session-id {safe_session}'
-    else:
-        cmd_str = f'{claude_cmd} -p {safe_prompt} --resume {safe_session}'
-
-    # 根据 shell 类型选择参数
-    if shell_name == 'zsh':
-        cmd = [shell, '-ic', cmd_str]
-    elif shell_name == 'fish':
-        cmd = [shell, '-c', cmd_str]
-    else:
-        cmd = [shell, '-lc', cmd_str]
-
+    claude_cmd = _get_claude_command(claude_command)
+    session_flag = '--session-id' if session_mode == 'new' else '--resume'
+    mcp_argv = _get_mcp_args(project_dir, session_id)
+    args_argv = ['--print', session_flag, session_id] + mcp_argv + ['--', prompt]
+    cmd_str = _expand_template(get_claude_args_template(), shlex.split(claude_cmd), args_argv)
+    cmd = build_shell_cmd(shell, cmd_str)
     proc = subprocess.Popen(cmd, cwd=project_dir, stdout=PIPE, stderr=PIPE)
-    # ... 等待完成逻辑
+    # ... 启动检查和后台监控逻辑
 ```
 
 ---

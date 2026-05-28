@@ -53,7 +53,23 @@ log_input "$INPUT"
 HOOK_EVENT=$(json_get "$INPUT" "hook_event_name")
 HOOK_EVENT="${HOOK_EVENT:-unknown}"
 
-log "Hook router received event: $HOOK_EVENT"
+# Hook 由 CLI 直接启动，进程环境中没有 AGENT_TYPE。
+# 从 transcript 路径推断 agent 类型；无法识别时回退到 DEFAULT_AGENT 配置。
+TRANSCRIPT_PATH_FOR_AGENT=$(json_get "$INPUT" "transcript_path")
+case "$TRANSCRIPT_PATH_FOR_AGENT" in
+    */.codex/sessions/*)
+        AGENT_TYPE="codex"
+        ;;
+    */.claude/*)
+        AGENT_TYPE="claude"
+        ;;
+    *)
+        AGENT_TYPE="$(get_config "DEFAULT_AGENT" "claude")"
+        ;;
+esac
+export AGENT_TYPE
+
+log "Hook router received event: $HOOK_EVENT, agent: $AGENT_TYPE"
 
 # =============================================================================
 # 路由分发

@@ -433,6 +433,23 @@ _build_at_user_tag() {
 # 卡片构建函数
 # =============================================================================
 
+_agent_display_name() {
+    case "${AGENT_TYPE:-claude}" in
+        claude) echo "Claude Code" ;;
+        codex) echo "Codex" ;;
+        *) echo "${AGENT_TYPE}" ;;
+    esac
+}
+
+_agent_resume_command() {
+    local session_id="$1"
+    case "${AGENT_TYPE:-claude}" in
+        claude) echo "claude --resume $session_id" ;;
+        codex) echo "codex resume $session_id" ;;
+        *) echo "${AGENT_TYPE} --resume $session_id" ;;
+    esac
+}
+
 # ----------------------------------------------------------------------------
 # build_permission_card - 构建权限请求卡片
 # ----------------------------------------------------------------------------
@@ -578,11 +595,14 @@ build_permission_card() {
     local final_footer_hint="$footer_hint"
     if [ -z "$final_footer_hint" ]; then
         if [ -n "$buttons_json" ]; then
-            final_footer_hint="请尽快操作以避免 Claude 超时等待"
+            final_footer_hint="请尽快操作以避免 $(_agent_display_name) 超时等待"
         else
             final_footer_hint="回调服务未运行，请返回终端操作"
         fi
     fi
+
+    local resume_command
+    resume_command=$(_agent_resume_command "$session_id")
 
     local card
     if [ -n "$buttons_json" ]; then
@@ -596,6 +616,7 @@ build_permission_card() {
             "buttons_json=$buttons_json" \
             "at_user=$at_user" \
             "footer_hint=$final_footer_hint" \
+            "resume_command=$resume_command" \
             "resume_session_id=$session_id")
     else
         card=$(render_card_template "$card_type" \
@@ -607,6 +628,7 @@ build_permission_card() {
             "detail_elements=$detail_elements" \
             "at_user=$at_user" \
             "footer_hint=$final_footer_hint" \
+            "resume_command=$resume_command" \
             "resume_session_id=$session_id")
     fi
 
@@ -749,6 +771,11 @@ build_stop_card() {
 
     # 截断 session_id 前 8 字符用于显示
     local session_id_short="${session_id:0:8}"
+    local resume_command
+    resume_command=$(_agent_resume_command "$session_id")
+
+    local agent_display_name
+    agent_display_name="$(_agent_display_name)"
 
     render_card_template "stop" \
         "response_elements=$response_elements" \
@@ -757,7 +784,9 @@ build_stop_card() {
         "session_id=$session_id_short" \
         "at_user=$at_user" \
         "thinking_element=$thinking_element" \
-        "resume_session_id=$session_id"
+        "resume_command=$resume_command" \
+        "resume_session_id=$session_id" \
+        "agent_display_name=$agent_display_name"
 }
 
 # =============================================================================
@@ -838,7 +867,7 @@ _get_bot_open_id() {
 # 功能: 调用 Callback 后端的 /cb/session/get-chat-id 接口查询 session_id 对应的 chat_id
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 输出:
 #   echos 返回: chat_id 字符串，查询失败返回空字符串
@@ -858,16 +887,18 @@ _get_chat_id() {
 
     # 调用 Callback 后端的 /cb/session/get-chat-id 接口查询
     # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
+    # 传入 agent_type 用于 auto-mute 创建占位 session 时写入正确的 agent 类型
     local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
     callback_url=$(echo "$callback_url" | sed 's:/*$::')
 
+    local agent_type="${AGENT_TYPE:-claude}"
     local request_body
     if [ -n "$project_dir" ]; then
         local escaped_dir
         escaped_dir=$(json_escape "$project_dir")
-        request_body="{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_dir\"}"
+        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_dir\"}"
     else
-        request_body="{\"session_id\":\"$session_id\"}"
+        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\"}"
     fi
 
     local response
@@ -911,7 +942,7 @@ _get_chat_id() {
 #       如果 session 已有 chat_id 则直接返回，否则在 group 模式下创建群聊
 #
 # 参数:
-#   $1 - session_id   Claude 会话 ID
+#   $1 - session_id   Agent 会话 ID
 #   $2 - project_dir  项目工作目录（用于群聊命名）
 #
 # 输出:
@@ -933,8 +964,9 @@ _ensure_chat() {
     escaped_project_dir=$(json_escape "$project_dir")
 
     local response
+    local agent_type="${AGENT_TYPE:-claude}"
     response=$(_do_curl_post "${callback_url}/cb/session/ensure-chat" \
-        "{\"session_id\":\"$session_id\",\"project_dir\":\"$escaped_project_dir\"}" \
+        "{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_project_dir\"}" \
         "cb/session/ensure-chat" \
         "$(_get_auth_token)")
 
@@ -967,7 +999,7 @@ _ensure_chat() {
 #       3. 使用配置的 FEISHU_CHAT_ID 兜底
 #
 # 参数:
-#   $1 - session_id   Claude 会话 ID（可选）
+#   $1 - session_id   Agent 会话 ID（可选）
 #   $2 - project_dir  项目工作目录（创建群聊时用于命名）
 #
 # 输出:
@@ -1023,7 +1055,7 @@ _resolve_chat_id() {
 # 功能: 调用 Callback 后端的 /cb/session/get-last-message-id 接口查询 session 的最近消息
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 输出:
 #   echos 返回: last_message_id 字符串，查询失败返回空字符串
@@ -1075,7 +1107,7 @@ _get_last_message_id() {
 # 功能: 查询 Callback 后端，判断本次 prompt 是否由飞书发起（需要跳过）
 #
 # 参数:
-#   $1 - session_id  Claude 会话 ID
+#   $1 - session_id  Agent 会话 ID
 #
 # 返回:
 #   0 + stdout "true"  - 应跳过
@@ -1735,7 +1767,7 @@ _send_feishu_card_webhook() {
 #                  - 分离部署: 传入 FEISHU_GATEWAY_URL
 #                  - 单机部署: 不传，默认使用 CALLBACK_SERVER_URL
 #   $3 - options     可选参数 JSON（可选），可包含：
-#                   - session_id   Claude 会话 ID（用于继续会话）
+#                   - session_id   Agent 会话 ID（用于继续会话）
 #                   - project_dir  项目工作目录（用于继续会话）
 #                   - callback_url Callback 后端 URL（用于继续会话）
 #
@@ -1908,7 +1940,7 @@ send_feishu_text() {
 #   $1 - message_text  文本消息内容
 #   $2 - options       可选参数 JSON，可包含：
 #                      - project_dir    项目工作目录
-#                      - session_id     Claude 会话 ID（用于链式回复）
+#                      - session_id     Agent 会话 ID（用于链式回复）
 #                      - callback_url   Callback 服务地址（可选，透传给网关）
 #
 # 返回:
@@ -2193,8 +2225,8 @@ PYTHON_SCRIPT
         "owner_id=$owner_id" \
         "ask_question_form_elements=$form_elements" \
         "at_user=$at_user" \
+        "resume_command=$(_agent_resume_command "$session_id")" \
         "resume_session_id=$session_id")
 
     echo "$card"
 }
-

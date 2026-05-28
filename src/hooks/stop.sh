@@ -11,7 +11,7 @@
 #
 # 适用场景:
 #   - 主 Agent 完成响应
-#   - 发送任务完成通知，包含 Claude 的最终响应内容
+#   - 发送任务完成通知，包含 Agent 的最终响应内容
 #
 # 设计原则:
 #   - 快速返回，不阻塞 Claude Code
@@ -27,31 +27,247 @@ if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
 fi
 
 # =============================================================================
-# 从单个 transcript 文件中提取响应内容（texts 数组 + thinking）
+# 从 Codex JSONL transcript 提取响应
+# 支持两类格式：
+#   1. codex exec --json stdout:
+#   {"type":"thread.started","thread_id":"xxx"}
+#   {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+#   2. ~/.codex/sessions/.../rollout-*.jsonl:
+#   {"type":"session_meta","payload":{"id":"xxx",...}}
+#   {"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"..."}}
+#   {"type":"event_msg","payload":{"type":"task_complete","turn_id":"...","last_agent_message":"..."}}
 # 参数:
 #   $1 - transcript 文件路径
-#   $2 - 最大重试次数 (可选，默认 5)
-# 返回:
-#   输出 JSON 字符串 {"texts":["...","..."],"thinking":"...","session_id":"..."}
-#   找不到有效内容则返回空
-# 说明:
-#   找到最近一条用户文本消息（排除仅含 tool_result 的 user 消息），
-#   收集其后所有 assistant 消息中的 text 和 thinking 内容。
-#   texts 按 assistant 消息分组，每条 assistant 的文本合并为一个元素。
+#   $2 - turn_id (可选，Codex 持久化格式下用于定位目标 turn)
+# 返回: {"texts":["..."],"thinking":"","session_id":"xxx"} 或空
 # =============================================================================
-extract_response_from_file() {
+extract_codex_response() {
     local transcript_file="$1"
-    local max_retries="${2:-5}"
-    local retry_count=0
+    local turn_id="$2"
     local result=""
 
     if [ ! -f "$transcript_file" ]; then
         return 1
     fi
 
-    while [ $retry_count -lt $max_retries ]; do
-        if [ "$JSON_HAS_JQ" = "true" ]; then
-            result=$(jq -s '
+    # 1. jq：仅处理 codex exec --json stdout 格式（持久化格式的 turn 分片和 reasoning 提取用 jq 难以维护）
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        result=$(jq -s '
+(
+    [.[] | select(.type == "thread.started") | .thread_id] |
+    if length > 0 then .[0] else "" end
+) as $sid |
+if $sid == "" then null
+else
+[
+    .[] | select(.type == "item.completed" and .item.type == "agent_message") |
+    .item.text | gsub("^\\n+|\\n+$"; "") | select(length > 0)
+] |
+if length == 0 then null
+else {texts: ., thinking: "", session_id: $sid}
+end
+end
+' "$transcript_file" 2>/dev/null)
+        if [ -n "$result" ] && [ "$result" != "null" ]; then
+            echo "$result"
+            return 0
+        fi
+    fi
+
+    # 2. Python：处理所有格式（codex exec --json stdout + 持久化会话），jq 未命中或不可用时走此路径
+    if [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        "$PYTHON3" -c "
+import sys, json
+
+path = sys.argv[1]
+target_turn_id = sys.argv[2] if len(sys.argv) > 2 else ''
+
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+
+records = []
+for line in lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        records.append(json.loads(line))
+    except Exception:
+        continue
+
+if not records:
+    sys.exit(0)
+
+def payload(record):
+    p = record.get('payload')
+    return p if isinstance(p, dict) else {}
+
+def append_unique(items, text):
+    text = (text or '').strip()
+    if text and (not items or items[-1] != text):
+        items.append(text)
+
+def collect_text_from_content(content):
+    parts = []
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') in ('text', 'output_text'):
+                parts.append(item.get('text') or '')
+            elif isinstance(item.get('content'), str):
+                parts.append(item.get('content'))
+    return ''.join(parts)
+
+# codex exec --json stdout format
+if any(r.get('type') == 'thread.started' for r in records):
+    session_id = ''
+    texts = []
+    for event in records:
+        etype = event.get('type', '')
+        if etype == 'thread.started':
+            session_id = event.get('thread_id', '') or session_id
+        elif etype == 'item.completed':
+            item = event.get('item', {})
+            if isinstance(item, dict) and item.get('type') == 'agent_message':
+                append_unique(texts, item.get('text', ''))
+    if texts:
+        print(json.dumps({'texts': texts, 'thinking': '', 'session_id': session_id}, ensure_ascii=False))
+    sys.exit(0)
+
+# Codex persistent session format
+session_id = ''
+for r in records:
+    if r.get('type') == 'session_meta':
+        session_id = payload(r).get('id', '') or session_id
+        break
+
+if not target_turn_id:
+    for r in reversed(records):
+        p = payload(r)
+        if p.get('type') == 'task_complete' and p.get('turn_id'):
+            target_turn_id = p.get('turn_id')
+            break
+
+subset = records
+if target_turn_id:
+    start_idx = None
+    end_idx = None
+    for i, r in enumerate(records):
+        p = payload(r)
+        if p.get('turn_id') != target_turn_id:
+            continue
+        if start_idx is None and (
+            (r.get('type') == 'event_msg' and p.get('type') == 'task_started') or
+            r.get('type') == 'turn_context'
+        ):
+            start_idx = i
+        if start_idx is not None and r.get('type') == 'event_msg' and p.get('type') in ('task_complete', 'turn_aborted'):
+            end_idx = i
+            break
+    if start_idx is not None:
+        subset = records[start_idx:(end_idx + 1 if end_idx is not None else len(records))]
+
+texts = []
+thinkings = []
+fallback_final = ''
+
+for r in subset:
+    rtype = r.get('type')
+    p = payload(r)
+
+    if rtype == 'event_msg':
+        ptype = p.get('type')
+        if ptype == 'agent_message':
+            msg = (p.get('message') or '').strip()
+            if msg:
+                append_unique(texts, msg)
+        elif ptype == 'task_complete':
+            fallback_final = p.get('last_agent_message') or fallback_final
+        continue
+
+    if rtype != 'response_item':
+        continue
+
+    ptype = p.get('type')
+    if ptype == 'reasoning':
+        summary = p.get('summary')
+        if isinstance(summary, list):
+            for item in summary:
+                if isinstance(item, str):
+                    append_unique(thinkings, item)
+                elif isinstance(item, dict):
+                    append_unique(thinkings, item.get('text') or item.get('summary') or item.get('content') or '')
+        elif isinstance(summary, str):
+            append_unique(thinkings, summary)
+        content = p.get('content')
+        if isinstance(content, str):
+            append_unique(thinkings, content)
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    append_unique(thinkings, item.get('text') or item.get('content') or '')
+        continue
+
+    # Older/different Codex builds may only write response_item.message.
+    if ptype == 'message' and p.get('role') in ('assistant', 'agent'):
+        msg = collect_text_from_content(p.get('content')).strip()
+        if msg:
+            append_unique(texts, msg)
+    elif ptype == 'agent_message':
+        append_unique(texts, p.get('text') or p.get('message') or '')
+
+append_unique(texts, fallback_final)
+
+if not texts:
+    sys.exit(0)
+
+print(json.dumps({
+    'texts': texts,
+    'thinking': '\n\n'.join(t for t in thinkings if t).strip(),
+    'session_id': session_id
+}, ensure_ascii=False))
+" "$transcript_file" "$turn_id" 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+# =============================================================================
+# 检测 transcript 是否为 Codex 格式
+# =============================================================================
+is_codex_transcript() {
+    local transcript_file="$1"
+    [ -f "$transcript_file" ] || return 1
+    local first_line
+    first_line=$(head -1 "$transcript_file" 2>/dev/null)
+    case "$first_line" in
+        *'"type"'*'"thread.started"'*) return 0 ;;
+        *'"type"'*'"session_meta"'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# =============================================================================
+# 从 Claude transcript 提取响应
+# 找到最近一条用户文本消息（排除仅含 tool_result 的 user 消息），
+# 收集其后所有 assistant 消息中的 text 和 thinking 内容。
+# texts 按 assistant 消息分组，每条 assistant 的文本合并为一个元素。
+# 参数:
+#   $1 - transcript 文件路径
+# 返回: {"texts":["..."],"thinking":"...","session_id":"xxx"} 或空
+# =============================================================================
+extract_claude_response() {
+    local transcript_file="$1"
+
+    if [ ! -f "$transcript_file" ]; then
+        return 1
+    fi
+
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        jq -s '
 # 找到最近一条含文本的 user 消息的索引
 (
     [to_entries[] | select(
@@ -74,10 +290,9 @@ else
     } |
     if (.texts | length) == 0 then null else . end
 end
-' "$transcript_file" 2>/dev/null)
-
-        elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-            result=$("$PYTHON3" -c "
+' "$transcript_file" 2>/dev/null
+    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        "$PYTHON3" -c "
 import sys, json
 
 with open(sys.argv[1], 'r') as f:
@@ -143,8 +358,45 @@ if not stage_texts:
     sys.exit(0)
 
 print(json.dumps({'texts': stage_texts, 'thinking': combined_thinking, 'session_id': session_id}))
-" "$transcript_file" 2>/dev/null)
-        fi
+" "$transcript_file" 2>/dev/null
+    fi
+}
+
+# =============================================================================
+# 从单个 transcript 文件中提取响应内容（分发 + 重试）
+# 自动检测 Codex/Claude 格式，委托给对应的提取函数。
+# 参数:
+#   $1 - transcript 文件路径
+#   $2 - turn_id (可选，Codex 持久化格式下用于定位目标 turn)
+#   $3 - 最大重试次数 (可选，默认 5)
+# 返回:
+#   输出 JSON 字符串 {"texts":["...","..."],"thinking":"...","session_id":"..."}
+#   找不到有效内容则返回空
+# =============================================================================
+extract_response_from_file() {
+    local transcript_file="$1"
+    local turn_id="$2"
+    local max_retries="${3:-5}"
+    local retry_count=0
+    local result=""
+    local extract_fn=""
+    local retry_interval=0.1
+
+    if [ ! -f "$transcript_file" ]; then
+        return 1
+    fi
+
+    # 按格式选择提取函数、重试间隔和次数
+    if is_codex_transcript "$transcript_file"; then
+        log "Detected Codex transcript format"
+        extract_fn="extract_codex_response"
+        retry_interval=1  # Codex 持久化文件写入延迟比 Claude 大
+    else
+        extract_fn="extract_claude_response"
+    fi
+
+    while [ $retry_count -lt $max_retries ]; do
+        result=$($extract_fn "$transcript_file" "$turn_id")
 
         if [ -n "$result" ] && [ "$result" != "null" ]; then
             echo "$result"
@@ -153,7 +405,8 @@ print(json.dumps({'texts': stage_texts, 'thinking': combined_thinking, 'session_
 
         retry_count=$((retry_count + 1))
         if [ $retry_count -lt $max_retries ]; then
-            sleep 0.1
+            log "Retry $retry_count/$max_retries (interval=${retry_interval}s)"
+            sleep $retry_interval
         fi
     done
 
@@ -164,6 +417,7 @@ print(json.dumps({'texts': stage_texts, 'thinking': combined_thinking, 'session_
 # 提取响应内容（带子代理回退）
 # 参数:
 #   $1 - 主 transcript 文件路径
+#   $2 - turn_id (可选，Codex 持久化格式下用于定位目标 turn)
 # 返回:
 #   输出 JSON 字符串 {"texts":[...],"thinking":"...","session_id":"..."}
 # 说明:
@@ -172,6 +426,7 @@ print(json.dumps({'texts': stage_texts, 'thinking': combined_thinking, 'session_
 # =============================================================================
 extract_response() {
     local transcript_path="$1"
+    local turn_id="$2"
 
     # 提前检查：路径为空直接返回
     if [ -z "$transcript_path" ]; then
@@ -184,7 +439,7 @@ extract_response() {
     # 1. 先在主 transcript 文件中查找
     if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
         log "Searching in main transcript: $transcript_path"
-        result=$(extract_response_from_file "$transcript_path" 5)
+        result=$(extract_response_from_file "$transcript_path" "$turn_id" 5)
         if [ -n "$result" ] && [ "$result" != "null" ]; then
             log "Found response in main transcript"
             echo "$result"
@@ -208,7 +463,7 @@ extract_response() {
         for subagent_file in "${subagent_files[@]}"; do
             if [ -f "$subagent_file" ]; then
                 log "Searching in subagent: $(basename "$subagent_file")"
-                result=$(extract_response_from_file "$subagent_file" 3)
+                result=$(extract_response_from_file "$subagent_file" "$turn_id" 3)
                 if [ -n "$result" ] && [ "$result" != "null" ]; then
                     log "Found response in subagent: $(basename "$subagent_file")"
                     echo "$result"
@@ -263,8 +518,8 @@ supplement_last_message() {
                     else $raw_parts end) as $parts |
                     ($parts[0] | fromjson) as $resp |
                     $parts[1] as $msg |
-                    $resp |
-                    if (.texts | length) == 0 or (.texts[-1] != $msg) then
+                    if ($msg == null) then $resp
+                    elif (.texts | length) == 0 or (.texts[-1] != $msg) then
                         .texts += [$msg]
                     else . end
                 ' 2>/dev/null)
@@ -395,6 +650,7 @@ send_stop_notification_async() {
     local STOP_THINKING_MAX_LENGTH=$(get_config "STOP_THINKING_MAX_LENGTH" "10000")
     local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
     local INPUT_SESSION_ID=$(json_get "$INPUT" "session_id")
+    local INPUT_TURN_ID=$(json_get "$INPUT" "turn_id")
     local TRANSCRIPT_PATH=$(json_get "$INPUT" "transcript_path")
     local LAST_ASSISTANT_MSG=$(json_get "$INPUT" "last_assistant_message")
     local PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(json_get "$INPUT" "cwd")}"
@@ -416,13 +672,13 @@ send_stop_notification_async() {
 
     log "Stop notification: extracting response from transcript"
 
-    # 提取 Claude 响应内容（texts 数组 + thinking）
-    local CLAUDE_THINKING=""
+    # 提取响应内容（texts 数组 + thinking）
+    local THINKING=""
     local RESPONSE_ELEMENTS=""
     local response_json=""
 
     # 使用 extract_response 函数（支持子代理回退）
-    response_json=$(extract_response "$TRANSCRIPT_PATH")
+    response_json=$(extract_response "$TRANSCRIPT_PATH" "$INPUT_TURN_ID")
 
     # 用 Stop 事件提供的 last_assistant_message 补全竞态缺失的最终答复
     response_json=$(supplement_last_message "$response_json" "$LAST_ASSISTANT_MSG" "$INPUT_SESSION_ID")
@@ -434,7 +690,7 @@ send_stop_notification_async() {
             SESSION_ID="unknown"
         fi
 
-        CLAUDE_THINKING=$(json_get "$response_json" "thinking")
+        THINKING=$(json_get "$response_json" "thinking")
 
         # 前置解析 chat_id 并检查 mute 状态，muted 时跳过后续所有处理
         local RESOLVED_CHAT_ID
@@ -447,7 +703,7 @@ send_stop_notification_async() {
         # 构建响应元素 JSON 片段（含截断和代码块格式化）
         # 注: Markdown 预处理已下沉到 feishu.sh 的 send_feishu_card() 中统一处理
         RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
-        log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#CLAUDE_THINKING} chars"
+        log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#THINKING} chars"
     fi
 
     # 无响应时使用默认消息
@@ -458,16 +714,16 @@ send_stop_notification_async() {
 
     # 处理 thinking：STOP_THINKING_MAX_LENGTH=0 时跳过
     if [ "$STOP_THINKING_MAX_LENGTH" = "0" ]; then
-        CLAUDE_THINKING=""
+        THINKING=""
         log "Thinking display disabled (STOP_THINKING_MAX_LENGTH=0)"
-    elif [ -n "$CLAUDE_THINKING" ] && [ ${#CLAUDE_THINKING} -gt "$STOP_THINKING_MAX_LENGTH" ]; then
-        CLAUDE_THINKING="${CLAUDE_THINKING:0:$STOP_THINKING_MAX_LENGTH}..."
-        log "Thinking truncated to ${#CLAUDE_THINKING} chars"
+    elif [ -n "$THINKING" ] && [ ${#THINKING} -gt "$STOP_THINKING_MAX_LENGTH" ]; then
+        THINKING="${THINKING:0:$STOP_THINKING_MAX_LENGTH}..."
+        log "Thinking truncated to ${#THINKING} chars"
     fi
 
     # 构建并发送卡片
     local CARD
-    CARD=$(build_stop_card "$RESPONSE_ELEMENTS" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$CLAUDE_THINKING" 2>/dev/null)
+    CARD=$(build_stop_card "$RESPONSE_ELEMENTS" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$THINKING" 2>/dev/null)
 
     if [ -n "$CARD" ]; then
         # 传递 session_id, project_dir, callback_url 支持回复继续会话
@@ -477,9 +733,10 @@ send_stop_notification_async() {
     fi
 }
 
-# 启动后台通知发送（不等待，立即返回）
+# 后台发送；单独 & 不够——宿主以 pipe 关闭（非 PID 退出）判断 hook 结束，
+# 子进程继承 stdout/stderr 会导致 pipe 未关闭，需要 >/dev/null 2>&1 切断
 # 注意: Stop hook 配置不要加 async: true，否则双层 async 可能导致此后台进程被提前终止
-send_stop_notification_async &
+send_stop_notification_async >/dev/null 2>&1 &
 
 # 立即返回，不阻塞 Claude Code
 exit 0

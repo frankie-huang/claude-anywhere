@@ -9,7 +9,7 @@
 
 import json
 import os
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 # =============================================================================
 # 默认配置值
@@ -97,6 +97,20 @@ def get_config(key: str, default: str = '') -> str:
     return default
 
 
+def reload_config():
+    """重新加载 .env 文件
+
+    当 .env 文件内容变化后调用此函数刷新缓存。
+    注意：此函数仅刷新内部缓存，不会更新模块级导出变量
+    （如 PERMISSION_REQUEST_TIMEOUT、FEISHU_APP_ID 等）。其他模块通过
+    from config import XXX 获取的值仍为模块首次加载时的旧值。
+    如需获取最新值，应直接调用 get_config()。
+    """
+    global _env_file_cache
+    _env_file_cache = None
+    _load_env_file()
+
+
 def get_config_positive_int(key: str, default: int) -> int:
     """获取正整数配置值
 
@@ -142,23 +156,62 @@ def get_close_page_timeout() -> int:
     return get_config_positive_int('CALLBACK_PAGE_CLOSE_DELAY', DEFAULT_CALLBACK_PAGE_CLOSE_DELAY)
 
 
-def get_claude_commands() -> List[str]:
-    """解析 CLAUDE_COMMAND 配置为命令列表
+# =============================================================================
+# Agent 配置
+# =============================================================================
+
+VALID_AGENTS = ('claude', 'codex')
+
+
+def get_enabled_agents() -> List[str]:
+    """获取启用的 agent 列表
+
+    读取 ENABLED_AGENTS 配置，逗号分隔。校验每个值在 VALID_AGENTS 中。
+
+    Returns:
+        启用的 agent 类型列表，至少包含一个元素，默认 ['claude']
+    """
+    raw = get_config('ENABLED_AGENTS', 'claude')
+    agents = [a.strip().lower() for a in raw.split(',') if a.strip()]
+    valid = [a for a in agents if a in VALID_AGENTS]
+    return valid if valid else ['claude']
+
+
+def get_default_agent() -> str:
+    """获取默认 agent 类型
+
+    读取 DEFAULT_AGENT 配置，校验在 VALID_AGENTS 且在 enabled 范围内。
+
+    Returns:
+        默认 agent 类型字符串
+    """
+    enabled = get_enabled_agents()
+    raw = get_config('DEFAULT_AGENT', '').strip().lower()
+    if raw in VALID_AGENTS and raw in enabled:
+        return raw
+    return enabled[0]
+
+
+def _parse_command_list(config_key: str, default: str) -> List[str]:
+    """解析命令列表配置
 
     支持格式:
     - 单命令字符串: "claude" 或 "claude --model opus"
     - 无引号列表: [claude, claude --model opus]
     - JSON 数组: ["claude", "claude --model opus"]
-    - 空值/缺失: 默认 ["claude"]
+    - 空值/缺失: 返回 [default]
+
+    Args:
+        config_key: 配置项名称
+        default: 默认命令名
 
     Returns:
         命令字符串列表，至少包含一个元素
     """
-    raw = get_config('CLAUDE_COMMAND', '')
-    raw = raw.strip()
+    raw = get_config(config_key, '').strip()
 
     if not raw:
-        return ['claude']
+        return [default]
 
     # 列表格式: 以 [ 开头且以 ] 结尾
     if raw.startswith('[') and raw.endswith(']'):
@@ -167,61 +220,56 @@ def get_claude_commands() -> List[str]:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
                 result = [str(item).strip() for item in parsed if str(item).strip()]
-                return result if result else ['claude']
+                return result if result else [default]
         except (ValueError, TypeError):
             pass
 
         # JSON 失败，按逗号分隔（无引号列表格式）
         inner = raw[1:-1]
         items = [item.strip() for item in inner.split(',') if item.strip()]
-        return items if items else ['claude']
+        return items if items else [default]
 
     # 单命令字符串
     return [raw]
 
 
-def get_claude_args_template() -> str:
-    """获取 CLAUDE_ARGS_TEMPLATE 配置
+def _parse_args_template(config_key: str) -> str:
+    """解析命令参数模板配置
 
-    占位符 {cmd} 和 {args} 的展开语义见 handlers.claude._expand_template。
+    占位符 {cmd} 和 {args} 的展开语义见 agents.expand_template。
+
+    Args:
+        config_key: 配置项名称
 
     Returns:
         模板字符串, 默认 '{cmd} {args}'
     """
-    raw = get_config('CLAUDE_ARGS_TEMPLATE', '').strip()
+    raw = get_config(config_key, '').strip()
     return raw if raw else '{cmd} {args}'
 
 
-def get_session_mode() -> str:
-    """获取会话模式
+# ── Claude ──
 
-    优先级：
-    1. FEISHU_SESSION_MODE 显式配置（message/thread/group）
-    2. 向后兼容：FEISHU_REPLY_IN_THREAD=true → 'thread'
-    3. 默认：'message'
-    """
-    mode = get_config('FEISHU_SESSION_MODE', '')
-    if mode in ('message', 'thread', 'group'):
-        return mode
-    # 向后兼容：读取已废弃的 FEISHU_REPLY_IN_THREAD
-    reply_in_thread = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
-    if reply_in_thread:
-        return 'thread'
-    return 'message'
+def get_claude_commands() -> List[str]:
+    """解析 CLAUDE_COMMAND 配置为命令列表"""
+    return _parse_command_list('CLAUDE_COMMAND', 'claude')
 
 
-def reload_config():
-    """重新加载 .env 文件
+def get_claude_args_template() -> str:
+    """获取 CLAUDE_ARGS_TEMPLATE 配置"""
+    return _parse_args_template('CLAUDE_ARGS_TEMPLATE')
 
-    当 .env 文件内容变化后调用此函数刷新缓存。
-    注意：此函数仅刷新内部缓存，不会更新模块级导出变量
-    （如 PERMISSION_REQUEST_TIMEOUT、FEISHU_APP_ID 等）。其他模块通过
-    from config import XXX 获取的值仍为模块首次加载时的旧值。
-    如需获取最新值，应直接调用 get_config()。
-    """
-    global _env_file_cache
-    _env_file_cache = None
-    _load_env_file()
+
+# ── Codex ──
+
+def get_codex_commands() -> List[str]:
+    """解析 CODEX_COMMAND 配置为命令列表"""
+    return _parse_command_list('CODEX_COMMAND', 'codex')
+
+
+def get_codex_args_template() -> str:
+    """获取 CODEX_ARGS_TEMPLATE 配置"""
+    return _parse_args_template('CODEX_ARGS_TEMPLATE')
 
 
 # =============================================================================
@@ -348,11 +396,29 @@ FEISHU_AT_BOT_ONLY = get_config('FEISHU_AT_BOT_ONLY', 'false').lower() in ('true
 # False (默认): 回复消息正常显示在群聊主界面
 FEISHU_REPLY_IN_THREAD = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
 
+def get_session_mode() -> str:
+    """获取会话模式
+
+    优先级：
+    1. FEISHU_SESSION_MODE 显式配置（message/thread/group）
+    2. 向后兼容：FEISHU_REPLY_IN_THREAD=true → 'thread'
+    3. 默认：'message'
+    """
+    mode = get_config('FEISHU_SESSION_MODE', '')
+    if mode in ('message', 'thread', 'group'):
+        return mode
+    # 向后兼容：读取已废弃的 FEISHU_REPLY_IN_THREAD
+    rit = get_config('FEISHU_REPLY_IN_THREAD', 'false').lower() in ('true', '1', 'yes')
+    if rit:
+        return 'thread'
+    return 'message'
+
+
 # 会话模式：message（普通消息）/ thread（话题回复）/ group（独立群聊）
 FEISHU_SESSION_MODE = get_session_mode()
 
 # 群聊模式配置
-FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Claude')
+FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Agent')
 FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
 
 # Session 过期天数（统一，不区分 group/非 group）

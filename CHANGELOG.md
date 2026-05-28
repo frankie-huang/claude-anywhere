@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-05-23
+
+#### 支持 OpenAI Codex CLI 作为第二 Agent
+
+- 新增 `agents/codex.py`，实现 `CodexAdapter`（`codex exec` 命令构建、session ID 捕获）
+- 新增 `AGENT_TYPE` 配置项，支持 `claude`（默认）和 `codex` 切换
+- 新增 `CODEX_COMMAND`、`CODEX_ARGS_TEMPLATE` 配置项
+- 新增 `get_agent_adapter()` 工厂函数，根据配置返回对应 adapter
+- Codex 新建会话自动从 `--json` 输出捕获 session ID（`thread.started` 事件）
+- `permission.sh` 兼容 Codex 权限决策输出格式（`allow`/`block`）
+- `stop.sh` 支持 Codex JSONL transcript 解析（`item.completed` + `agent_message`）
+- `setup_init.py` 新增 `CodexHookConfigurator`，为 Codex 生成 `config.toml` hook 配置
+- `session_chat_store.py` 新增 `rename_session()` 用于 Codex session ID 替换
+- `handlers/claude.py` 改用 `get_agent_adapter()` 工厂，不再硬编码 `ClaudeAdapter`
+
+### Changed - 2026-05-11
+
+#### 重构：抽取 Agent 适配层，为多 agent 支持做准备
+
+- 新增 `agents/` 模块，提供 `AgentAdapter` 基类和共享的进程启动/监控逻辑
+- 新增 `agents/claude.py`，实现 `ClaudeAdapter`（命令构建、MCP 配置、环境变量）
+- `handlers/claude.py` 瘦身为纯 HTTP 业务逻辑，通过 `launch_agent()` 统一调用 agent 层
+
 ### Fixed - 2026-05-11
 
 #### Stop hook 竞态修复：用 last_assistant_message 补全缺失的最终答复
