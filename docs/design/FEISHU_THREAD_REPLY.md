@@ -2,7 +2,7 @@
 
 ## 概述
 
-本设计实现同一 Claude 会话的所有飞书消息收敛到一个话题流中，采用链式回复结构。
+本设计实现同一 Agent 会话的所有飞书消息收敛到一个话题流中，采用链式回复结构。
 
 ### 核心概念
 
@@ -81,7 +81,7 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 请帮我重构这个模块
   │
-  ├─► 系统: 🆕 Claude 会话已创建                    [回复 /new 消息]
+  ├─► 系统: 🆕 Agent 会话已创建                    [回复 /new 消息]
   │         📁 项目: /path
   │         🔑 Session: `abc12345...`
   │         ↓ last_message_id = 系统消息1
@@ -93,7 +93,7 @@ _send_session_result_notification
   │
   ├─► (用户点击允许)
   │
-  └─► 系统: ✅ Claude 已完成: 重构完成...           [回复 last_message_id，链式]
+  └─► 系统: ✅ Agent 已完成: 重构完成...           [回复 last_message_id，链式]
           ↓ last_message_id = 完成消息
 ```
 
@@ -115,7 +115,7 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 列出当前目录
   │
-  ├─► 系统: ✅ Claude 已完成: src/, lib/, ...      [回复 /new 消息，文本通知]
+  ├─► 系统: ✅ Agent 已完成: src/, lib/, ...      [回复 /new 消息，文本通知]
   │         ↓ last_message_id = 文本通知
   │
   └─► 系统: ┌─────────────────────────────┐       [回复 last_message_id，卡片通知]
@@ -139,7 +139,7 @@ _send_session_result_notification
 
 ### 场景 3: 终端直接启动会话
 
-用户在终端直接运行 Claude Code（非通过飞书），后续有权限请求和完成通知。
+用户在终端直接运行 Agent CLI（非通过飞书），后续有权限请求和完成通知。
 
 ```
 终端: $ claude
@@ -149,7 +149,7 @@ _send_session_result_notification
   │         [允许] [拒绝]
   │         ↓ last_message_id = 权限消息（自动创建 session 记录）
   │
-  └─► 系统: ✅ Claude 已完成: ...                   [回复 last_message_id，链式]
+  └─► 系统: ✅ Agent 已完成: ...                   [回复 last_message_id，链式]
           ↓ last_message_id = 完成消息
 ```
 
@@ -170,18 +170,18 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 请帮我重构
   │
-  ├─► 系统: 🆕 Claude 会话已创建                    [回复 /new 消息]
+  ├─► 系统: 🆕 Agent 会话已创建                    [回复 /new 消息]
   │         ↓ last_message_id = 系统消息1
   │
-  └─► 系统: ✅ Claude 已完成: 重构完成              [回复 last_message_id，链式]
+  └─► 系统: ✅ Agent 已完成: 重构完成              [回复 last_message_id，链式]
           ↓ last_message_id = 完成消息
 
 用户: 帮我也重构一下测试文件                       [回复 完成消息]
   │
-  ├─► 系统: ⏳ Claude 正在处理您的问题...           [回复用户消息]
+  ├─► 系统: ⏳ Agent 正在处理您的问题...           [回复用户消息]
   │         ↓ last_message_id = 处理消息
   │
-  └─► 系统: ✅ Claude 已完成: 测试已重构            [回复 last_message_id，链式]
+  └─► 系统: ✅ Agent 已完成: 测试已重构            [回复 last_message_id，链式]
           ↓ last_message_id = 完成消息2
 ```
 
@@ -204,10 +204,10 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 请帮我重构
   │
-  ├─► 系统: 🆕 Claude 会话已创建                    [回复 /new 消息]
+  ├─► 系统: 🆕 Agent 会话已创建                    [回复 /new 消息]
   │         ↓ last_message_id = 系统消息1
   │
-  └─► 系统: ⚠️ Claude 执行异常: 命令超时             [回复用户消息]
+  └─► 系统: ⚠️ Agent 执行异常: 命令超时             [回复用户消息]
           ↓ 错误通知保存到 MessageSessionStore
           ↓ last_message_id 不更新（保持为系统消息1）
 ```
@@ -228,7 +228,7 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 请帮我部署
   │
-  ├─► 系统: 🆕 Claude 会话已创建                    [回复 /new 消息]
+  ├─► 系统: 🆕 Agent 会话已创建                    [回复 /new 消息]
   │         ↓ last_message_id = 系统消息1
   │
   ├─► 系统: 🔐 权限请求: Bash #1                    [回复 last_message_id]
@@ -237,7 +237,7 @@ _send_session_result_notification
   ├─► 系统: 🔐 权限请求: Bash #2                    [回复 last_message_id]
   │         ↓ last_message_id = 权限消息2
   │
-  └─► 系统: ✅ Claude 已完成: 部署完成              [回复 last_message_id]
+  └─► 系统: ✅ Agent 已完成: 部署完成              [回复 last_message_id]
           ↓ last_message_id = 完成消息
 ```
 
@@ -256,9 +256,9 @@ _send_session_result_notification
 ```
 用户: /new --dir=/path 请帮我重构
   │
-  ├─► 系统: 🆕 Claude 会话已创建                    [发送新消息，无回复]
+  ├─► 系统: 🆕 Agent 会话已创建                    [发送新消息，无回复]
   │
-  └─► 系统: ✅ Claude 已完成: 重构完成              [发送新消息，无回复]
+  └─► 系统: ✅ Agent 已完成: 重构完成              [发送新消息，无回复]
 ```
 
 **说明：** Webhook 模式不支持 reply API，所有消息作为新消息发送，不形成话题流。

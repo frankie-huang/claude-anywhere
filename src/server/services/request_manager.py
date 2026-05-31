@@ -169,7 +169,7 @@ class RequestManager:
                 return False, self.ERR_UNKNOWN, f"发送决策失败: {str(e)}"
 
     def get_request_data(self, request_id: str) -> Optional[dict]:
-        """获取请求数据（用于始终允许时写入规则）"""
+        """获取请求数据（用于处理始终允许等决策上下文）"""
         with self._lock:
             if request_id in self._requests:
                 return self._requests[request_id]['data']

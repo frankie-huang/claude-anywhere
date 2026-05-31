@@ -56,7 +56,8 @@ class WSTunnelClient:
                  default_chat_dir: str = '',
                  default_chat_follow_thread: bool = True,
                  group_name_prefix: Optional[str] = None,
-                 group_dissolve_days: Optional[int] = None) -> None:
+                 group_dissolve_days: Optional[int] = None,
+                 group_allow_cowork: Optional[bool] = None) -> None:
         """
         Args:
             gateway_url: 网关 HTTP base URL（如 http://gateway:8080）
@@ -71,6 +72,7 @@ class WSTunnelClient:
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
             group_name_prefix: 群聊名称前缀（传递给 gateway BindingStore）
             group_dissolve_days: 群聊自动解散天数（传递给 gateway BindingStore）
+            group_allow_cowork: 群聊协作者模式（传递给 gateway BindingStore）
         """
         self.gateway_url = gateway_url
         self.owner_id = owner_id
@@ -84,6 +86,7 @@ class WSTunnelClient:
         self.default_chat_follow_thread = default_chat_follow_thread
         self.group_name_prefix = group_name_prefix
         self.group_dissolve_days = group_dissolve_days
+        self.group_allow_cowork = group_allow_cowork
         self.sock: Optional[socket.socket] = None
         self.running = False
         self.authenticated = False
@@ -210,6 +213,7 @@ class WSTunnelClient:
         register_data['default_chat_follow_thread'] = self.default_chat_follow_thread
         register_data['group_name_prefix'] = self.group_name_prefix
         register_data['group_dissolve_days'] = self.group_dissolve_days
+        register_data['group_allow_cowork'] = self.group_allow_cowork
 
         # 携带已持久化的 auth_token，用于网关判断续期/换绑
         token_store = AuthTokenStore.get_instance()
@@ -475,7 +479,8 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
                            default_chat_dir: str = '',
                            default_chat_follow_thread: bool = True,
                            group_name_prefix: Optional[str] = None,
-                           group_dissolve_days: Optional[int] = None) -> WSTunnelClient:
+                           group_dissolve_days: Optional[int] = None,
+                           group_allow_cowork: Optional[bool] = None) -> WSTunnelClient:
     """启动 WebSocket 隧道客户端
 
     Args:
@@ -491,6 +496,7 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀（传递给 gateway BindingStore）
         group_dissolve_days: 群聊自动解散天数（传递给 gateway BindingStore）
+        group_allow_cowork: 群聊协作者模式（传递给 gateway BindingStore）
 
     Returns:
         客户端实例
@@ -512,7 +518,8 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
         default_chat_dir=default_chat_dir,
         default_chat_follow_thread=default_chat_follow_thread,
         group_name_prefix=group_name_prefix,
-        group_dissolve_days=group_dissolve_days
+        group_dissolve_days=group_dissolve_days,
+        group_allow_cowork=group_allow_cowork
     )
     _client_instance.start()
     return _client_instance

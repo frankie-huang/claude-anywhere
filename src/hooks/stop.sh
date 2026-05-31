@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# src/hooks/stop.sh - Claude Code Stop 事件处理脚本
+# src/hooks/stop.sh - Agent Stop 事件处理脚本
 #
 # 此脚本由 hook-router.sh 通过 source 调用，不直接执行
 #
@@ -14,7 +14,7 @@
 #   - 发送任务完成通知，包含 Agent 的最终响应内容
 #
 # 设计原则:
-#   - 快速返回，不阻塞 Claude Code
+#   - 快速返回，不阻塞 Agent
 #   - 通知发送在后台异步执行
 #   - 任何错误不影响 Claude 正常退出
 # =============================================================================
@@ -738,5 +738,5 @@ send_stop_notification_async() {
 # 注意: Stop hook 配置不要加 async: true，否则双层 async 可能导致此后台进程被提前终止
 send_stop_notification_async >/dev/null 2>&1 &
 
-# 立即返回，不阻塞 Claude Code
+# 立即返回，不阻塞 Agent
 exit 0

@@ -20,7 +20,7 @@ yum install python3 curl socat jq
 export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 ```
 
-3. 配置 Claude Code Hook（测试项目）：
+3. 配置 Agent Hook（测试项目，以 Claude 为例）：
 ```json
 {
   "hooks": {
@@ -75,7 +75,7 @@ lsof -i :8080
 - ✅ 发送**不带交互按钮**的飞书通知卡片
 - ✅ 卡片底部显示提示："回调服务未运行，请返回终端操作"
 - ✅ 脚本返回退出码 `1` (EXIT_FALLBACK)
-- ✅ Claude Code 回退到终端交互模式
+- ✅ Agent CLI 回退到终端交互模式
 - ✅ 用户在终端看到权限请求提示
 
 #### 验证方法
@@ -122,8 +122,8 @@ curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.loa
 - ✅ 发送**带 4 个按钮**的飞书交互卡片
 - ✅ 脚本通过 Socket 注册请求并等待
 - ✅ 用户点击按钮后，浏览器显示"已批准运行"页面
-- ✅ 脚本接收到决策并输出 JSON 给 Claude Code
-- ✅ Claude Code 继续执行操作
+- ✅ 脚本接收到决策并输出 JSON 给 Agent CLI
+- ✅ Agent CLI 继续执行操作
 
 #### 预期输出格式
 
@@ -173,7 +173,7 @@ export PERMISSION_REQUEST_TIMEOUT=300
 
 - ✅ 用户操作正常完成
 - ✅ 脚本输出 allow/deny 决策
-- ✅ Claude Code 继续或停止执行
+- ✅ Agent CLI 继续或停止执行
 
 #### 验证方法
 
@@ -213,10 +213,10 @@ export PERMISSION_REQUEST_TIMEOUT=60
 **脚本行为**：
 - ✅ 接收到 `fallback_to_terminal: true` 的响应
 - ✅ 返回退出码 `1` (EXIT_FALLBACK)
-- ✅ Claude Code 回退到终端交互模式
+- ✅ Agent CLI 回退到终端交互模式
 
 **飞书按钮行为**：
-- ✅ 用户点击按钮后显示："处理失败：连接已断开，Claude 可能已超时或取消"
+- ✅ 用户点击按钮后显示："处理失败：连接已断开，Agent 可能已超时或取消"
 
 #### 验证方法
 
@@ -232,11 +232,11 @@ tail -50 log/callback/$(date +%Y-%m-%d).log | grep -A 5 "fallback"
 
 ---
 
-### 场景 5: Claude hook 超时 > 服务端超时（正常配置）
+### 场景 5: Agent hook 超时 > 服务端超时（正常配置）
 
 #### 背景
 
-正常配置下，install.sh 会设置 hook 超时 = 服务端超时 + 60s，确保服务端先超时并发送"回退终端"响应，而不是被 Claude 直接杀进程。
+正常配置下，install.sh 会设置 hook 超时 = 服务端超时 + 60s，确保服务端先超时并发送"回退终端"响应，而不是被 Agent CLI 直接杀进程。
 
 #### 测试步骤
 
@@ -255,15 +255,15 @@ grep PERMISSION_REQUEST_TIMEOUT .env
 
 - ✅ 服务端超时后发送"回退终端"响应
 - ✅ 脚本返回 EXIT_FALLBACK
-- ✅ Claude 回退到终端交互模式
+- ✅ Agent CLI 回退到终端交互模式
 
 ---
 
-### 场景 6: Claude hook 超时 < 服务端超时（配置不当）
+### 场景 6: Agent hook 超时 < 服务端超时（配置不当）
 
 #### 背景
 
-如果未通过 install.sh 配置 hook 超时（或手动设置了过短的 hook 超时），Claude 会在服务端超时前杀死 hook 进程，导致服务端检测到连接断开而非正常超时。
+如果未通过 install.sh 配置 hook 超时（或手动设置了过短的 hook 超时），Agent CLI 会在服务端超时前杀死 hook 进程，导致服务端检测到连接断开而非正常超时。
 
 #### 测试步骤
 
@@ -276,21 +276,21 @@ export PERMISSION_REQUEST_TIMEOUT=300
 
 2. 触发一个权限请求
 
-3. **不点击任何按钮**，等待 Claude hook 超时
+3. **不点击任何按钮**，等待 Agent hook 超时
 
 #### 预期行为
 
-**Claude Code 层面**：
-- ✅ Claude 在 hook 超时后取消 hook 进程
+**Agent CLI 层面**：
+- ✅ Agent CLI 在 hook 超时后取消 hook 进程
 - ✅ 显示错误信息或重试提示
 
 **服务端层面**：
-- ✅ 清理线程检测到 Socket 连接已断开（Claude 进程被杀死）
+- ✅ 清理线程检测到 Socket 连接已断开（Agent 进程被杀死）
 - ✅ 请求状态标记为 `disconnected`
 - ✅ Socket 连接被清理
 
 **脚本行为**：
-- ✅ 进程被 Claude 终止（可能未正常退出）
+- ✅ 进程被 Agent CLI 终止（可能未正常退出）
 
 #### 验证方法
 
@@ -333,7 +333,7 @@ grep "Cleaned up dead connection" log/callback/$(date +%Y-%m-%d).log
 }
 ```
 
-- ✅ Claude 收到 deny，可能尝试其他方式继续工作
+- ✅ Agent 收到 deny，可能尝试其他方式继续工作
 
 ---
 
@@ -367,7 +367,7 @@ grep "Cleaned up dead connection" log/callback/$(date +%Y-%m-%d).log
 }
 ```
 
-- ✅ Claude 停止当前任务
+- ✅ Agent 停止当前任务
 
 ---
 
@@ -501,7 +501,7 @@ grep "Failed to send Feishu card" log/hook/$(date +%Y-%m-%d).log
 
 1. 启动回调服务
 
-2. 同时触发多个权限请求（如多个 Claude 实例或快速连续操作）
+2. 同时触发多个权限请求（如多个 Agent 实例或快速连续操作）
 
 3. 分别处理各个请求
 
@@ -551,7 +551,7 @@ export CALLBACK_SERVER_URL="http://wrong-server:9999"
 
 - ✅ 飞书卡片按钮链接指向错误地址
 - ✅ 点击按钮后浏览器显示"无法连接"或 DNS 错误
-- ✅ Claude 端等待超时后回退到终端交互
+- ✅ Agent 端等待超时后回退到终端交互
 
 #### 解决方法
 
@@ -721,7 +721,7 @@ touch "/tmp/test file with spaces.txt"
 ### 超时处理
 
 - [ ] 服务端超时后正确回退到终端
-- [ ] Claude 超时后连接正确清理
+- [ ] Agent 超时后连接正确清理
 - [ ] 无效超时值（0/负数）正确回退默认值
 
 ### 异常处理

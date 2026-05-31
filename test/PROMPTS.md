@@ -1,6 +1,6 @@
 # 权限请求测试指令集
 
-本文档包含一系列用于测试 Claude Code 权限请求功能的指令。
+本文档包含一系列用于测试 Agent 权限请求功能的指令。
 
 ## 使用方法
 
@@ -31,16 +31,16 @@ cp ~/.claude/settings.json ~/.claude/settings.json.bak
   }
 }
 
-# 3. 重启 Claude Code 使配置生效
+# 3. 重启 Agent CLI 使配置生效
 ```
 
 > **为什么需要配置 `ask` 列表？**
 >
-> 某些工具（如 Grep、Glob、WebSearch、WebFetch）被 Claude Code 视为"只读安全工具"，默认不会触发权限请求。必须将它们加入 `ask` 列表才能测试这些工具的通知功能。
+> 某些工具（如 Grep、Glob、WebSearch、WebFetch）被 Agent CLI 视为"只读安全工具"，默认不会触发权限请求。必须将它们加入 `ask` 列表才能测试这些工具的通知功能。
 
 ### 步骤 2：启动测试对话
 
-根据需要选择以下提示词发送给 Claude：
+根据需要选择以下提示词发送给 Agent：
 
 #### 提示词 1：完整组合测试（推荐）
 
@@ -91,7 +91,7 @@ cp ~/.claude/settings.json ~/.claude/settings.json.bak
 # 恢复备份的配置
 cp ~/.claude/settings.json.bak ~/.claude/settings.json
 
-# 重启 Claude Code
+# 重启 Agent CLI
 ```
 
 ---
@@ -129,7 +129,7 @@ cp ~/.claude/settings.json.bak ~/.claude/settings.json
 
 | 类型 | 指令 |
 |------|------|
-| WebSearch | `搜索 Claude Code 文档` |
+| WebSearch | `搜索 Agent 文档` |
 | WebFetch | `获取指定 URL 内容` |
 | Task | `探索项目代码结构` |
 

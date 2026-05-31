@@ -1,11 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# src/hook-router.sh - Claude Code Hook 统一路由入口
+# src/hook-router.sh - Agent Hook 统一路由入口
 #
-# 这是所有 Claude Code Hook 的唯一入口脚本
+# 这是所有 Agent Hook 的唯一入口脚本
 # 根据事件类型（UserPromptSubmit, PermissionRequest, Stop）分发到对应处理脚本
 #
-# 用法: 配置到 Claude Code settings.json 的 hooks 中
+# 用法: 配置到 Agent CLI 的 hooks 中
 #
 # 工作流程:
 #   1. 初始化核心库（路径、环境、日志）

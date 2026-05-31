@@ -73,7 +73,7 @@ CALLBACK_SERVER_URL=http://localhost:8080
 ### 降级模式
 - **条件**: 回调服务未运行
 - **行为**: 发送普通飞书通知卡片
-- **结果**: 返回 `EXIT_FALLBACK (1)`，Claude Code 回退到终端交互
+- **结果**: 返回 `EXIT_FALLBACK (1)`，Agent CLI 回退到终端交互
 
 ## 退出码说明
 

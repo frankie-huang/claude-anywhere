@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# setup.sh - Claude Code 飞书通知一键安装脚本
+# setup.sh - code-anywhere 飞书通知一键安装脚本
 #
 # 功能：
 #   1. 自动下载源码（如不在源码目录）
@@ -118,7 +118,7 @@ SCRIPT_NAME="setup.sh"
 if [ "$SHOW_HELP" = true ] || [ $# -eq 0 ]; then
     echo "用法: ./$SCRIPT_NAME <部署模式参数> [选项]"
     echo ""
-    echo "一键安装 Claude Code 飞书通知（OpenAPI 模式）"
+    echo "一键安装 code-anywhere 飞书通知（OpenAPI 模式）"
     echo ""
     echo "单机模式（本机配置飞书应用凭证）:"
     echo "  --app-id=ID                 飞书应用 App ID（必填）"
@@ -351,8 +351,8 @@ if is_valid_source_dir "$SETUP_DIR"; then
     SOURCE_DIR="$SETUP_DIR"
 else
     # 需要下载源码
-    REPO_URL="https://github.com/frankie-huang/claude-anywhere.git"
-    TARGET_DIR="${SETUP_DIR}/claude-anywhere"
+    REPO_URL="https://github.com/frankie-huang/code-anywhere.git"
+    TARGET_DIR="${SETUP_DIR}/code-anywhere"
 
     # 检查目标目录是否已存在
     if [ -d "$TARGET_DIR" ]; then
@@ -377,23 +377,23 @@ else
                 exit 1
             fi
         elif command -v curl &>/dev/null; then
-            TARBALL_URL="https://github.com/frankie-huang/claude-anywhere/archive/refs/heads/main.tar.gz"
+            TARBALL_URL="https://github.com/frankie-huang/code-anywhere/archive/refs/heads/main.tar.gz"
             # 检测 tarball 解压的中间目录是否残留
-            if [ -d "${SETUP_DIR}/claude-anywhere-main" ]; then
-                echo "错误: 检测到上次下载残留目录 ${SETUP_DIR}/claude-anywhere-main"
-                echo "请先删除后重试：rm -rf ${SETUP_DIR}/claude-anywhere-main"
+            if [ -d "${SETUP_DIR}/code-anywhere-main" ]; then
+                echo "错误: 检测到上次下载残留目录 ${SETUP_DIR}/code-anywhere-main"
+                echo "请先删除后重试：rm -rf ${SETUP_DIR}/code-anywhere-main"
                 exit 1
             fi
             # 下载并解压（使用管道避免二进制数据存储在变量中）
             if ! curl -fsSL --connect-timeout 30 "$TARBALL_URL" | tar xz -C "$SETUP_DIR" 2>&1; then
                 echo "下载或解压源码失败"
                 # 清理可能残留的不完整目录
-                rm -rf "${SETUP_DIR}/claude-anywhere-main" 2>/dev/null
+                rm -rf "${SETUP_DIR}/code-anywhere-main" 2>/dev/null
                 exit 1
             fi
-            # tar 解压后目录名为 claude-anywhere-main
-            if [ -d "${SETUP_DIR}/claude-anywhere-main" ]; then
-                mv "${SETUP_DIR}/claude-anywhere-main" "$TARGET_DIR"
+            # tar 解压后目录名为 code-anywhere-main
+            if [ -d "${SETUP_DIR}/code-anywhere-main" ]; then
+                mv "${SETUP_DIR}/code-anywhere-main" "$TARGET_DIR"
             fi
         else
             echo "错误: 需要 git 或 curl 来下载源码"
@@ -489,7 +489,7 @@ require_verification_token() {
 print_header() {
     echo -e "${BLUE}"
     echo "╔═══════════════════════════════════════════════════════════════╗"
-    echo "║       Claude Code 飞书通知 - 一键安装脚本                     ║"
+    echo "║       code-anywhere 飞书通知 - 一键安装脚本                    ║"
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -962,4 +962,4 @@ if [ "$DEPLOY_MODE" = "standalone" ]; then
     STEP=$((STEP + 1))
 fi
 
-echo "  ${STEP}. 使用 Claude Code，通知将发送到飞书"
+echo "  ${STEP}. 使用已配置的 Agent，通知将发送到飞书"

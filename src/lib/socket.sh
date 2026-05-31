@@ -148,11 +148,13 @@ socket_send_request() {
 # 参数：
 #   response_json - 响应 JSON 字符串
 # 输出：设置全局变量：
-#         RESPONSE_SUCCESS        - 请求是否成功（true/false）
-#         RESPONSE_BEHAVIOR       - 决策行为（allow/deny）
-#         RESPONSE_MESSAGE        - 决策消息
-#         RESPONSE_INTERRUPT      - 是否中断（true/false）
-#         RESPONSE_FALLBACK       - 是否回退到终端（true/false）
+#         RESPONSE_SUCCESS             - 请求是否成功（true/false）
+#         RESPONSE_BEHAVIOR            - 决策行为（allow/deny）
+#         RESPONSE_MESSAGE             - 决策消息
+#         RESPONSE_INTERRUPT           - 是否中断（true/false）
+#         RESPONSE_FALLBACK            - 是否回退到终端（true/false）
+#         RESPONSE_UPDATED_INPUT       - 决策附带的 updatedInput JSON（如有）
+#         RESPONSE_UPDATED_PERMISSIONS - 决策附带的 updatedPermissions JSON（如有）
 #
 # 响应格式：
 #   {
@@ -180,6 +182,7 @@ parse_socket_response() {
     RESPONSE_INTERRUPT="false"
     RESPONSE_FALLBACK="false"
     RESPONSE_UPDATED_INPUT=""
+    RESPONSE_UPDATED_PERMISSIONS=""
 
     # 一次调用获取所有标量字段，减少进程开销
     local -a values=()
@@ -197,6 +200,11 @@ parse_socket_response() {
     local updated_input
     if [[ "$response_json" == *'"updated_input":'* ]]; then
         updated_input=$(json_get_object "$response_json" "decision.updated_input")
+    fi
+
+    local updated_permissions
+    if [[ "$response_json" == *'"updated_permissions":'* ]]; then
+        updated_permissions=$(json_get_array "$response_json" "decision.updated_permissions")
     fi
 
     if [ "$success" = "true" ] || [ "$success" = "True" ]; then
@@ -222,7 +230,12 @@ parse_socket_response() {
         RESPONSE_UPDATED_INPUT="$updated_input"
     fi
 
-    export RESPONSE_SUCCESS RESPONSE_BEHAVIOR RESPONSE_MESSAGE RESPONSE_INTERRUPT RESPONSE_FALLBACK RESPONSE_UPDATED_INPUT
+    # updated_permissions 是一个 JSON 数组，空数组 [] 视为无值
+    if [ -n "$updated_permissions" ] && [ "$updated_permissions" != "[]" ]; then
+        RESPONSE_UPDATED_PERMISSIONS="$updated_permissions"
+    fi
+
+    export RESPONSE_SUCCESS RESPONSE_BEHAVIOR RESPONSE_MESSAGE RESPONSE_INTERRUPT RESPONSE_FALLBACK RESPONSE_UPDATED_INPUT RESPONSE_UPDATED_PERMISSIONS
 }
 
 # =============================================================================

@@ -1,6 +1,6 @@
 # 部署模式选择指南
 
-本文档对比 Claude Code 飞书通知项目支持的两种部署模式，帮助您选择合适的部署方式。
+本文档对比 code-anywhere 项目支持的两种部署模式，帮助您选择合适的部署方式。
 
 ## 目录
 
@@ -18,11 +18,11 @@
 
 ```bash
 # 单机模式
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 分离模式（连接远程网关）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 

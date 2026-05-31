@@ -18,11 +18,11 @@
 
 ```bash
 # 单机模式
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 分离模式（连接远程网关）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -39,7 +39,7 @@ curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/
 ### 前提条件
 
 - **Python 3.6+** 和 **curl** 已安装
-- **Claude Code** 已安装并可正常使用
+- **Claude Code** 或 **Codex** 已安装并可正常使用
 - 一个**飞书自定义机器人 Webhook URL**
 
 > 如果还没有 Webhook URL，请在飞书群聊中添加自定义机器人，复制 Webhook 地址即可。
@@ -62,10 +62,10 @@ cd hooks
 
 安装脚本会自动完成：
 - 检测环境依赖（不会自动安装，缺失时提示命令）
-- 将 Hook 注册到 `~/.claude/settings.json`
+- 将 Hook 注册到 Agent CLI 配置文件（Claude: `~/.claude/settings.json`，Codex: `~/.codex/config.toml`）
 - 生成 `.env` 配置文件（从 .env.example 复制）
 
-> 如果安装时选择跳过 hooks 配置，可手动将以下内容合并到 `~/.claude/settings.json`：
+> 如果安装时选择跳过 hooks 配置，可手动配置。Claude Code 合并到 `~/.claude/settings.json`：
 >
 > ```json
 > {
@@ -89,6 +89,8 @@ cd hooks
 >   }
 > }
 > ```
+>
+> Codex 配置到 `~/.codex/config.toml`，格式参考 [README Hook 配置](README.md#3-配置-agent-hooks)。
 >
 > 将 `/path/to/hooks` 替换为实际安装路径。
 
@@ -126,20 +128,21 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook地
 
 **5. 开始使用**
 
-打开新终端运行 `claude`，当需要执行敏感操作时，飞书会收到交互卡片：
+打开新终端运行已配置的 Agent CLI（如 `claude` 或 `codex`），当需要执行敏感操作时，飞书会收到交互卡片：
 
 | 按钮 | 效果 |
 |------|------|
 | **批准运行** | 允许本次操作 |
 | **始终允许** | 允许并记住规则，下次自动放行 |
-| **拒绝运行** | 拒绝本次操作，Claude 可重试 |
+| **拒绝运行** | 拒绝本次操作，Agent 可重试 |
 | **拒绝并中断** | 拒绝并终止当前任务 |
 
 ### 验证安装
 
 ```bash
 ./install.sh --check                                              # 检查环境
-cat ~/.claude/settings.json | python3 -m json.tool | grep hook-router  # 确认 Hook 注册
+cat ~/.claude/settings.json | python3 -m json.tool | grep hook-router  # 确认 Claude Hook 注册
+grep hook-router ~/.codex/config.toml 2>/dev/null                          # 确认 Codex Hook 注册（如已启用）
 curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool  # 确认服务运行
 ```
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# src/hooks/permission.sh - Claude Code 权限请求处理脚本
+# src/hooks/permission.sh - Agent 权限请求处理脚本
 #
 # 此脚本由 hook-router.sh 通过 source 调用，不直接执行
 #
@@ -23,7 +23,7 @@ source "$LIB_DIR/socket.sh"
 source "$LIB_DIR/vscode-proxy.sh"
 
 # =============================================================================
-# Claude Code Hook Exit Codes
+# Agent Hook Exit Codes
 # 参考: https://docs.anthropic.com/en/docs/claude-code/hooks
 #
 # EXIT_HOOK_SUCCESS (0)  - Hook 成功执行，使用输出的决策 JSON
@@ -415,7 +415,7 @@ run_interactive_mode() {
         encoded_input=$(printf '%s' "$INPUT" | base64 | tr -d '\n')
         encoded_questions=$(printf '%s' "$questions_json" | base64 | tr -d '\n')
 
-        request_json=$(json_build_object "request_id" "$REQUEST_ID" "project_dir" "$PROJECT_DIR" "raw_input_encoded" "$encoded_input" "questions_encoded" "$encoded_questions" "hook_pid" "$$")
+        request_json=$(json_build_object "request_id" "$REQUEST_ID" "project_dir" "$PROJECT_DIR" "raw_input_encoded" "$encoded_input" "questions_encoded" "$encoded_questions" "hook_pid" "$$" "agent_type" "$AGENT_TYPE")
 
         # 通过 Socket 发送请求并等待响应
         local response
@@ -443,7 +443,7 @@ run_interactive_mode() {
             if [ -n "$RESPONSE_UPDATED_INPUT" ]; then
                 output_decision_with_updated_input "$RESPONSE_BEHAVIOR" "$RESPONSE_UPDATED_INPUT"
             else
-                output_decision "$RESPONSE_BEHAVIOR" "$RESPONSE_MESSAGE" "$RESPONSE_INTERRUPT"
+                output_decision "$RESPONSE_BEHAVIOR" "$RESPONSE_MESSAGE" "$RESPONSE_INTERRUPT" "$RESPONSE_UPDATED_PERMISSIONS"
             fi
             vscode_proxy_activate "$PROJECT_DIR"
             exit $EXIT_HOOK_SUCCESS
@@ -473,11 +473,12 @@ run_interactive_mode() {
             --arg pdir "$PROJECT_DIR" \
             --arg enc "$encoded_input" \
             --arg hpid "$$" \
-            '{request_id: $rid, project_dir: $pdir, raw_input_encoded: $enc, hook_pid: $hpid}')
+            --arg agent_type "$AGENT_TYPE" \
+            '{request_id: $rid, project_dir: $pdir, raw_input_encoded: $enc, hook_pid: $hpid, agent_type: $agent_type}')
     else
         local escaped_project
         escaped_project=$(echo "$PROJECT_DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')
-        request_json=$(json_build_object "request_id" "$REQUEST_ID" "project_dir" "$escaped_project" "raw_input_encoded" "$encoded_input" "hook_pid" "$$")
+        request_json=$(json_build_object "request_id" "$REQUEST_ID" "project_dir" "$escaped_project" "raw_input_encoded" "$encoded_input" "hook_pid" "$$" "agent_type" "$AGENT_TYPE")
     fi
 
     log "Sending request to callback server"
@@ -502,7 +503,7 @@ run_interactive_mode() {
     fi
 
     if [ "$RESPONSE_SUCCESS" = "true" ]; then
-        output_decision "$RESPONSE_BEHAVIOR" "$RESPONSE_MESSAGE" "$RESPONSE_INTERRUPT"
+        output_decision "$RESPONSE_BEHAVIOR" "$RESPONSE_MESSAGE" "$RESPONSE_INTERRUPT" "$RESPONSE_UPDATED_PERMISSIONS"
         vscode_proxy_activate "$PROJECT_DIR"
     else
         log "Callback service returned error, falling back to terminal (card already sent)"
@@ -544,12 +545,13 @@ run_fallback_mode() {
 }
 
 # =============================================================================
-# 输出决策给 Claude Code
+# 输出决策给 Agent CLI
 # =============================================================================
 output_decision() {
     local behavior="$1"
     local message="$2"
     local interrupt="$3"
+    local updated_permissions="${4:-}"
 
     log "Outputting decision: behavior=$behavior, message=$message, interrupt=$interrupt, agent=${AGENT_TYPE:-claude}"
 
@@ -585,9 +587,12 @@ print(json.dumps(data, ensure_ascii=False))
             printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s"}}}\n' "$codex_behavior"
         fi
     else
-        # Claude 格式：支持 behavior + message + interrupt
+        # Claude 格式：支持 behavior + message + interrupt + updatedPermissions
         local decision_json
-        if [ "$behavior" = "allow" ]; then
+        if [ "$behavior" = "allow" ] && [ -n "$updated_permissions" ]; then
+            # 始终允许：将权限规则建议返回给 Claude CLI，由其自行持久化
+            decision_json="{\"behavior\": \"allow\", \"updatedPermissions\": ${updated_permissions}}"
+        elif [ "$behavior" = "allow" ]; then
             decision_json='{"behavior": "allow"}'
         elif [ "$interrupt" = "true" ]; then
             decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
@@ -601,7 +606,7 @@ print(json.dumps(data, ensure_ascii=False))
 }
 
 # =============================================================================
-# 输出带 updatedInput 的决策给 Claude Code（用于 AskUserQuestion）
+# 输出带 updatedInput 的决策给 Agent CLI（用于 AskUserQuestion）
 # =============================================================================
 # 参数:
 #   $1 - behavior         决策行为（allow/deny）

@@ -1413,7 +1413,7 @@ class SetupInit:
         self.service_running = bool(state.get('pid'))
 
         # 标题横幅（特殊格式，不走 print_section）
-        TerminalUI.print_banner("Claude Code 飞书通知 - 初始化配置")
+        TerminalUI.print_banner("code-anywhere - 初始化配置")
 
         # 1-6: 配置 .env
         self._configure_feishu_connection()
@@ -1731,6 +1731,13 @@ class SetupInit:
             ], hint="自动创建的群聊的命名和生命周期管理")
             self.env.set('FEISHU_GROUP_NAME_PREFIX', results['FEISHU_GROUP_NAME_PREFIX'])
             self.env.set('FEISHU_GROUP_DISSOLVE_DAYS', results['FEISHU_GROUP_DISSOLVE_DAYS'] or '0')
+
+            existing_cowork = (self.env.get('FEISHU_GROUP_ALLOW_COWORK') or '').lower() in ('true', '1', 'yes')
+            cowork_idx = TerminalUI.select_option("是否开启群聊协作模式？", [
+                ("关闭", "仅会话创建者可在群内对话（默认）"),
+                ("开启", "群内所有成员均可参与对话，消耗创建者额度"),
+            ], default=1 if existing_cowork else 0)
+            self.env.set('FEISHU_GROUP_ALLOW_COWORK', 'true' if cowork_idx == 1 else 'false')
 
     def _configure_agent_commands(self):
         TerminalUI.print_section("Agent 命令")

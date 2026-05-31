@@ -63,7 +63,7 @@ OpenAPI 模式使用飞书开放平台 API 发送消息，支持飞书内直接�
 
 ```
 ┌─────────────────┐         ┌──────────────────┐         ┌─────────────────┐
-│  Claude Code    │────────▶│ src/hook-router  │────────▶│  飞书 OpenAPI   │
+│  Agent CLI      │────────▶│ src/hook-router  │────────▶│  飞书 OpenAPI   │
 │                 │  Hook   │  → permission.sh │  Card   │  (access_token) │
 └─────────────────┘         └────────┬─────────┘         └─────────────────┘
                                      │
@@ -86,7 +86,7 @@ OpenAPI 模式使用飞书开放平台 API 发送消息，支持飞书内直接�
                                                                  │ Decision JSON
                                                                  ▼
                                                             ┌─────────────────┐
-                                                            │  Claude Code    │
+                                                            │  Agent CLI      │
                                                             │  (继续/拒绝)     │
                                                             └─────────────────┘
 ```
@@ -115,7 +115,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
                               │  WS 长连接      │   WS 长连接  │   WS 长连接   │
                               ▼                 ▼              ▼              ▼
 ┌──────────────┐      ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│ Claude Code  │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
+│ Agent CLI    │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
 │  本地 MacBook│      │ (本地电脑)   │   │ (本地电脑)   │   │ (云服务器)   │
 └──────────────┘      └─────────────┘   └─────────────┘   └─────────────┘
        │                     │                 │              │
@@ -148,7 +148,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
                               │                 │              │              │
                               ▼                 ▼              ▼              ▼
 ┌──────────────┐      ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-│ Claude Code  │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
+│ Agent CLI    │─────▶│ Callback A  │   │ Callback B  │   │ Callback C  │
 │   实例 A     │      │ :8081       │   │ :8082       │   │ :8083       │
 └──────────────┘      └─────────────┘   └─────────────┘   └─────────────┘
        │                     │                 │              │
@@ -164,7 +164,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 #### 发送消息流程
 
 ```
-1. Claude Code 触发权限请求
+1. Agent 触发权限请求
        ↓
 2. hook-router.sh 接收 Hook 事件
        ↓
@@ -375,18 +375,18 @@ FEISHU_OWNER_ID=ou_user_a  # 此实例的消息接收者（user_id 格式）
 
 ```bash
 # 已有 lark-oapi（长连接模式，推荐）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 未安装 lark-oapi（HTTP 回调模式）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --verification-token=xxx --owner-id=<用户ID>
 ```
 
 **分离模式**（Callback 服务）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -468,8 +468,8 @@ CALLBACK_SERVER_URL=http://your-server:8080
 # 5. 启动服务
 ./src/start-server.sh
 
-# 6. 启动 Claude Code
-claude
+# 6. 启动已配置的 Agent
+claude    # 或 codex（取决于 ENABLED_AGENTS 配置）
 ```
 
 ### 分离部署（手动）
@@ -497,7 +497,7 @@ EOF
 
 #### Callback 服务部署
 
-在每个需要运行 Claude Code 的机器上：
+在每个需要运行 Agent（Claude Code / Codex）的机器上：
 
 **WS 隧道模式（推荐，本地开发）**：
 

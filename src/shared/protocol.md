@@ -42,6 +42,7 @@ Client (permission-notify.sh)           Server (callback server)
 | request_id | string | 是 | 唯一请求标识 (32 位随机字符) |
 | project_dir | string | 是 | 项目目录路径 |
 | raw_input_encoded | string | 是 | Base64 编码的原始 PermissionRequest 输入（包含 session_id、tool_name、tool_input） |
+| agent_type | string | 否 | Agent 类型，`claude` 或 `codex`，用于 always 规则持久化分流 |
 
 **raw_input_encoded 解码后的字段**:
 
@@ -50,13 +51,15 @@ Client (permission-notify.sh)           Server (callback server)
 | session_id | string | 否 | Claude Code 会话 ID，用于追踪请求来源 |
 | tool_name | string | 是 | 工具名称（如 Bash、Write 等） |
 | tool_input | object | 是 | 工具输入参数 |
+| permission_suggestions | array | 否 | Claude 提供的权限规则建议；Claude always 决策会作为 `updatedPermissions` 返回 |
 
 **示例**:
 ```json
 {
   "request_id": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
   "project_dir": "/home/user/myproject",
-  "raw_input_encoded": "eyJzZXNzaW9uX2lkIjoic2Vzc18xMjMiLCJ0b29sX25hbWUiOiJCYXNoIiwidG9vbF9pbnB1dCI6eyJjb21tYW5kIjoiZWNobyBoZWxsbyJ9fQ=="
+  "raw_input_encoded": "eyJzZXNzaW9uX2lkIjoic2Vzc18xMjMiLCJ0b29sX25hbWUiOiJCYXNoIiwidG9vbF9pbnB1dCI6eyJjb21tYW5kIjoiZWNobyBoZWxsbyJ9fQ==",
+  "agent_type": "claude"
 }
 ```
 

@@ -15,7 +15,7 @@
 #   - 飞书发起的 prompt 自动跳过（通过 skip 标志去重）
 #
 # 设计原则:
-#   - 快速返回，不阻塞 Claude Code
+#   - 快速返回，不阻塞 Agent
 #   - 消息发送在后台异步执行
 #   - 飞书发起的 prompt 通过 skip 标志跳过，避免重复
 # =============================================================================
@@ -104,5 +104,5 @@ send_user_prompt_async() {
 # 注意: UserPromptSubmit hook 配置不要加 async: true，而是通过 & 放后台，脚本立即 exit 0 返回
 send_user_prompt_async >/dev/null 2>&1 &
 
-# 立即返回，不阻塞 Claude Code
+# 立即返回，不阻塞 Agent
 exit 0

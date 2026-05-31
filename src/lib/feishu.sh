@@ -710,7 +710,7 @@ build_permission_buttons() {
 #   1 - 构建失败
 #
 # 示例:
-#   card=$(build_notification_card "Claude Code 通知" \
+#   card=$(build_notification_card "Agent 通知" \
 #       "**任务暂停，需要人工介入**" "myproject" "2024-01-01 12:00:00")
 # ----------------------------------------------------------------------------
 build_notification_card() {
@@ -1710,7 +1710,7 @@ send_feishu_card() {
 
     # 失败时发送降级文本消息（send_feishu_text 会根据模式选择发送方式）
     if [ $result -ne 0 ]; then
-        local fallback_title="Claude Code"
+        local fallback_title="Agent"
         local extracted_title
         extracted_title=$(json_get "$card_json" "card.header.title.content")
         if [ -n "$extracted_title" ] && [ "$extracted_title" != "null" ]; then

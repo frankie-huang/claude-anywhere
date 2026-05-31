@@ -21,6 +21,7 @@ MCP 输入（Claude CLI → 本脚本，通过 tools/call）:
 
 MCP 输出（本脚本 → Claude CLI）:
     允许: {"behavior": "allow", "updatedInput": {<原始 input>}}
+    始终允许: {"behavior": "allow", "updatedPermissions": [<权限规则>]}
     拒绝: {"behavior": "deny", "message": "原因"}
     拒绝并中断: {"behavior": "deny", "message": "原因", "interrupt": true}
 

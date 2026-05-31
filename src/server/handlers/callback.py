@@ -396,7 +396,6 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
         data: 请求数据
             - action: 动作类型 (allow/always/deny/interrupt/answer)
             - request_id: 请求 ID
-            - project_dir: 项目目录（可选，用于 always 写入规则）
             - form_value: 飞书卡片 card.action 回调里的 form_value 原值，其具体
               schema 由 action 决定（action=answer 时的格式见下方分支注释）
         headers: 请求头字典
@@ -411,7 +410,6 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
 
     action = data.get('action', '')
     request_id = data.get('request_id', '')
-    project_dir = data.get('project_dir', '')
     form_value = data.get('form_value')
 
     logger.info("[cb/decision] action=%s, request_id=%s", action, request_id)
@@ -488,8 +486,8 @@ def handle_callback_decision(data: Dict[str, Any], headers: Dict[str, str]) -> T
             answers=answers, questions=questions
         )
     else:
-        # 其它 action（allow/always/deny/interrupt）：只需 project_dir，无需 answers/questions
-        success, decision, message = handle_decision(request_id, action, project_dir)
+        # 其它 action（allow/always/deny/interrupt）
+        success, decision, message = handle_decision(request_id, action)
 
     logger.info(
         "[cb/decision] result: request_id=%s, success=%s, decision=%s, message=%s",

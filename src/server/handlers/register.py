@@ -105,6 +105,7 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
     default_chat_follow_thread = data.get('default_chat_follow_thread', True)
     group_name_prefix = data.get('group_name_prefix')
     group_dissolve_days = data.get('group_dissolve_days')
+    group_allow_cowork = data.get('group_allow_cowork')
 
     # 入口转换：优先使用 session_mode，旧客户端用 reply_in_thread 映射
     session_mode = data.get('session_mode', '')
@@ -123,7 +124,7 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
     logger.info(f"[register] Registration request: owner_id={owner_id}, callback_url={callback_url}, ip={client_ip}, session_mode={session_mode}, claude_commands={claude_commands}, default_chat_dir={default_chat_dir}")
 
     # 在后台线程中处理注册逻辑（异步）
-    _run_in_background(_process_registration, (callback_url, owner_id, client_ip, at_bot_only, session_mode, default_agent, claude_commands, codex_commands, default_chat_dir, default_chat_follow_thread, group_name_prefix, group_dissolve_days))
+    _run_in_background(_process_registration, (callback_url, owner_id, client_ip, at_bot_only, session_mode, default_agent, claude_commands, codex_commands, default_chat_dir, default_chat_follow_thread, group_name_prefix, group_dissolve_days, group_allow_cowork))
 
     # 立即返回成功
     return True, {
@@ -249,7 +250,8 @@ def _process_registration(
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
-    group_dissolve_days: Optional[int] = None
+    group_dissolve_days: Optional[int] = None,
+    group_allow_cowork: Optional[bool] = None
 ):
     """处理注册逻辑（后台线程）
 
@@ -273,6 +275,7 @@ def _process_registration(
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
     """
     from services.binding_store import BindingStore
     from services.auth_token import generate_auth_token
@@ -309,7 +312,8 @@ def _process_registration(
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
-                group_dissolve_days=group_dissolve_days
+                group_dissolve_days=group_dissolve_days,
+                group_allow_cowork=group_allow_cowork
             )
         else:
             # callback_url 不同：发送授权卡片让用户确认是否更换设备
@@ -329,7 +333,8 @@ def _process_registration(
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
-                group_dissolve_days=group_dissolve_days
+                group_dissolve_days=group_dissolve_days,
+                group_allow_cowork=group_allow_cowork
             )
     else:
         # 未绑定：先验证 callback_url 是否属于该 owner_id
@@ -352,7 +357,8 @@ def _process_registration(
             default_chat_dir=default_chat_dir,
             default_chat_follow_thread=default_chat_follow_thread,
             group_name_prefix=group_name_prefix,
-            group_dissolve_days=group_dissolve_days
+            group_dissolve_days=group_dissolve_days,
+            group_allow_cowork=group_allow_cowork
         )
 
 
@@ -578,7 +584,8 @@ def _send_authorization_card(
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
-    group_dissolve_days: Optional[int] = None
+    group_dissolve_days: Optional[int] = None,
+    group_allow_cowork: Optional[bool] = None
 ):
     """发送飞书授权卡片（HTTP 注册模式）
 
@@ -599,6 +606,7 @@ def _send_authorization_card(
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
     """
     from services.feishu_api import FeishuAPIService
 
@@ -646,7 +654,8 @@ def _send_authorization_card(
             "default_chat_dir": default_chat_dir,
             "default_chat_follow_thread": default_chat_follow_thread,
             "group_name_prefix": group_name_prefix,
-            "group_dissolve_days": group_dissolve_days
+            "group_dissolve_days": group_dissolve_days,
+            "group_allow_cowork": group_allow_cowork
         },
         deny_value={
             "action": "deny_register",
@@ -764,7 +773,8 @@ def handle_authorization_decision(
     default_chat_dir: str = '',
     default_chat_follow_thread: bool = True,
     group_name_prefix: Optional[str] = None,
-    group_dissolve_days: Optional[int] = None
+    group_dissolve_days: Optional[int] = None,
+    group_allow_cowork: Optional[bool] = None
 ) -> Dict[str, Any]:
     """处理用户授权决策
 
@@ -782,6 +792,7 @@ def handle_authorization_decision(
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
 
     Returns:
         飞书响应（包含 toast 和更新的卡片）
@@ -818,7 +829,8 @@ def handle_authorization_decision(
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
-                group_dissolve_days=group_dissolve_days
+                group_dissolve_days=group_dissolve_days,
+                group_allow_cowork=group_allow_cowork
             )
 
         # 通知 Callback 后端
@@ -935,7 +947,8 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
                                 default_chat_follow_thread: bool = True,
                                 old_ip: str = '',
                                 group_name_prefix: Optional[str] = None,
-                                group_dissolve_days: Optional[int] = None) -> bool:
+                                group_dissolve_days: Optional[int] = None,
+                                group_allow_cowork: Optional[bool] = None) -> bool:
     """发送 WS 模式授权卡片（注册/换绑共用）
 
     每个终端独立发送自己的卡片，包含允许/拒绝按钮。
@@ -957,6 +970,7 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
         old_ip: 旧终端 IP（有值则表示换绑场景）
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
 
     Returns:
         True 表示卡片发送成功
@@ -984,7 +998,8 @@ def _send_ws_authorization_card(owner_id: str, request_id: str,
             "default_chat_dir": default_chat_dir,
             "default_chat_follow_thread": default_chat_follow_thread,
             "group_name_prefix": group_name_prefix,
-            "group_dissolve_days": group_dissolve_days
+            "group_dissolve_days": group_dissolve_days,
+            "group_allow_cowork": group_allow_cowork
         },
         deny_value={
             "action": "deny_register",
@@ -1023,7 +1038,8 @@ def handle_ws_registration(owner_id: str, request_id: str,
                            default_chat_dir: str = '',
                            default_chat_follow_thread: bool = True,
                            group_name_prefix: Optional[str] = None,
-                           group_dissolve_days: Optional[int] = None) -> bool:
+                           group_dissolve_days: Optional[int] = None,
+                           group_allow_cowork: Optional[bool] = None) -> bool:
     """处理 WebSocket 隧道的注册请求
 
     发送飞书授权卡片，用户授权后通过 WS 通道下发 auth_token。
@@ -1042,6 +1058,7 @@ def handle_ws_registration(owner_id: str, request_id: str,
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
 
     Returns:
         True 表示卡片发送成功
@@ -1063,7 +1080,8 @@ def handle_ws_registration(owner_id: str, request_id: str,
                                        default_chat_dir=default_chat_dir,
                                        default_chat_follow_thread=default_chat_follow_thread,
                                        group_name_prefix=group_name_prefix,
-                                       group_dissolve_days=group_dissolve_days)
+                                       group_dissolve_days=group_dissolve_days,
+                                       group_allow_cowork=group_allow_cowork)
 
 
 def handle_ws_rebind_registration(owner_id: str, request_id: str,
@@ -1076,7 +1094,8 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
                                    default_chat_dir: str = '',
                                    default_chat_follow_thread: bool = True,
                                    group_name_prefix: Optional[str] = None,
-                                   group_dissolve_days: Optional[int] = None) -> bool:
+                                   group_dissolve_days: Optional[int] = None,
+                                   group_allow_cowork: Optional[bool] = None) -> bool:
     """处理 WS 模式的换绑注册请求（新终端替换旧终端）
 
     发送飞书授权卡片，展示旧终端 IP 和新终端 IP，用户授权后走现有
@@ -1097,6 +1116,7 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
 
     Returns:
         True 表示卡片发送成功
@@ -1120,7 +1140,8 @@ def handle_ws_rebind_registration(owner_id: str, request_id: str,
                                        default_chat_follow_thread=default_chat_follow_thread,
                                        old_ip=old_ip,
                                        group_name_prefix=group_name_prefix,
-                                       group_dissolve_days=group_dissolve_days)
+                                       group_dissolve_days=group_dissolve_days,
+                                       group_allow_cowork=group_allow_cowork)
 
 
 def ws_send_auth_ok(sock: 'socket.socket', auth_token: str) -> None:
@@ -1150,7 +1171,8 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
                                      default_chat_dir: str = '',
                                      default_chat_follow_thread: bool = True,
                                      group_name_prefix: Optional[str] = None,
-                                     group_dissolve_days: Optional[int] = None) -> Dict[str, Any]:
+                                     group_dissolve_days: Optional[int] = None,
+                                     group_allow_cowork: Optional[bool] = None) -> Dict[str, Any]:
     """处理 WS 模式授权通过
 
     生成 auth_token，存入 BindingStore，通过 WS 下发给客户端。
@@ -1168,6 +1190,7 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
         default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
         group_name_prefix: 群聊名称前缀
         group_dissolve_days: 群聊自动解散天数
+        group_allow_cowork: 群聊协作者模式
 
     Returns:
         飞书响应（包含 toast 和更新的卡片）
@@ -1243,7 +1266,8 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
             'default_chat_dir': default_chat_dir,
             'default_chat_follow_thread': default_chat_follow_thread,
             'group_name_prefix': group_name_prefix,
-            'group_dissolve_days': group_dissolve_days
+            'group_dissolve_days': group_dissolve_days,
+            'group_allow_cowork': group_allow_cowork
         }):
             logger.warning("[ws_register] prepare_authorization failed: connection gone for %s, request_id=%s", owner_id, request_id)
             return {

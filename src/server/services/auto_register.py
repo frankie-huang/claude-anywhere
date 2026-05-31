@@ -102,7 +102,7 @@ class AutoRegister:
             FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
             FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
             DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
-            FEISHU_GROUP_DISSOLVE_DAYS
+            FEISHU_GROUP_DISSOLVE_DAYS, FEISHU_GROUP_ALLOW_COWORK
         )
         from agents import get_all_agent_commands
         from config import get_default_agent
@@ -127,7 +127,8 @@ class AutoRegister:
             default_chat_dir=DEFAULT_CHAT_DIR,
             default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
             group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
-            group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS
+            group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS,
+            group_allow_cowork=FEISHU_GROUP_ALLOW_COWORK
         )
 
         if success:
@@ -149,7 +150,8 @@ class AutoRegister:
         default_chat_dir: str = '',
         default_chat_follow_thread: bool = True,
         group_name_prefix: Optional[str] = None,
-        group_dissolve_days: Optional[int] = None
+        group_dissolve_days: Optional[int] = None,
+        group_allow_cowork: Optional[bool] = None
     ) -> Tuple[bool, str]:
         """向飞书网关注册
 
@@ -166,6 +168,7 @@ class AutoRegister:
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
             group_name_prefix: 群聊名称前缀
             group_dissolve_days: 群聊自动解散天数
+            group_allow_cowork: 群聊协作者模式
 
         Returns:
             (success, message): success 表示是否成功，message 是响应消息或错误信息
@@ -195,6 +198,7 @@ class AutoRegister:
         request_data['default_chat_follow_thread'] = default_chat_follow_thread
         request_data['group_name_prefix'] = group_name_prefix
         request_data['group_dissolve_days'] = group_dissolve_days
+        request_data['group_allow_cowork'] = group_allow_cowork
 
         logger.info(f"[auto-register] Registering to gateway: {api_url}")
 

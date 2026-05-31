@@ -1,306 +1,209 @@
-# Claude Code Hooks 项目 — 代码审查报告
+# code-anywhere 项目 — 代码审查报告
 
-**审查日期**: 2025-02-15
-**审查范围**: 全部源码（13 个 Bash 脚本、25 个 Python 文件、项目结构/配置/文档）
-
----
-
-## 一、高优先级问题
-
-### 1. ~~[安全] Bash 脚本中 Python 内联代码命令注入风险~~ ✅ 已修复
-
-多处将 Bash 变量直接拼接到 `python3 -c` 的代码字符串中，若变量包含单引号即可注入任意 Python 代码。
-
-| 文件 | 行号 | 拼接变量 |
-|------|------|---------|
-| `src/lib/vscode-proxy.sh` | 94 | `$project_path` |
-| `src/lib/socket.sh` | 239-252 | `$socket_path` |
-| `src/lib/json.sh` | 100, 183-186 等 | `$field_path`, `$fields_str` |
-| `src/lib/core.sh` | 210-212 | `$config_file` |
-| `src/hooks/stop.sh` | 83 | `$transcript_file` |
-
-**修复方案**:
-- 有 stdin 可用时：通过 `sys.argv` 传递参数（如 `json.sh` 中的 `"$field_path"`）
-- 无 stdin 时：通过前置环境变量传递（如 `_HOOK_PATH="$path" python3 -c "..."`）
+**审查日期**: 2026-05-30
+**审查范围**: 全部源码（12 个 Bash 脚本、49 个 Python 文件、5 个 Dashboard Python 文件、项目结构/配置/文档）
+**代码规模**: ~15,000 行（Bash ~5,500 行, Python ~9,500 行）
 
 ---
 
-### 2. ~~[安全] HTML 注入 / XSS 漏洞~~ ✅ 已修复
+## 一、上次审查（2025-02-15）问题追踪
 
-**文件**: `src/server/handlers/callback.py:64-265`
+### 已修复 ✅（13 项）
 
-`send_html_response` 中 `title`、`message`、`vscode_uri` 直接插入 HTML/JavaScript，无任何转义。
+| 原编号 | 问题 | 状态 |
+|--------|------|------|
+| #1 | Bash 脚本 Python 内联代码命令注入 | ✅ 已通过 `sys.argv` / 环境变量传参修复 |
+| #2 | HTML 注入 / XSS 漏洞 | ✅ 已使用 `html.escape()` + `json.dumps()` 修复 |
+| #3 | 路径遍历风险（browse-dirs） | ✅ 已使用 `os.path.realpath()` 修复 |
+| #4 | HTTP Content-Length 未校验 | ✅ 已添加 `MAX_REQUEST_SIZE` 校验 |
+| #6 | Token 验证缺少恒定时间比较 | ✅ 已改用 `hmac.compare_digest()` |
+| #7 | `dataclass` 不兼容 Python 3.6 | ✅ 已改为手动 `__init__` |
+| #8 | JSON Store 文件写入非原子操作 | ✅ 已改为"临时文件 + `os.replace()`"原子写入 |
+| #12 | 全局单例懒加载无线程保护 | ✅ 已添加双重检查锁定 |
+| #13 | `tool-config.sh` `_tool_config_get` 传参错误 | ✅ 已修正为两参数形式 |
+| #14 | Bash 4+ 特性在 macOS 下不可用 | ✅ `mapfile` → `while read`、`declare -A` → `case` 函数、`base64 -w 0` → `tr -d '\n'` |
+| #16 | `_run_in_background` 函数重复定义三次 | ✅ 已提取到 `handlers/utils.py` |
+| #19 | `.env.example` 被 `.gitignore` 忽略 | ✅ 已从 `.gitignore` 移除 |
+| #23 | Unix Socket 文件删除 TOCTOU 竞态 | ✅ 已改为 `try: os.unlink() except FileNotFoundError: pass` |
 
-**修复方案**: HTML 内容使用 `html.escape()`，JavaScript 字符串使用 `json.dumps()` 输出。
+### 无需修复 / 接受风险（3 项）
 
----
+| 原编号 | 问题 | 说明 |
+|--------|------|------|
+| #5 | `permission.sh` JSON 手工拼接 | ⚠️ 接受风险：`message` 来自服务端硬编码字符串，非用户输入 |
+| #15 | `reload_config()` 不更新已导出变量 | 无调用者，无实际风险 |
+| #25 | Python 2 兼容导入 | ✅ 已移除（`feishu_api.py` 不再有 `from urllib2` fallback） |
 
-### 3. ~~[安全] 路径遍历风险（browse-dirs 端点）~~ ✅ 已修复
+### 改善但仍有残留（2 项）
 
-**文件**: `src/server/handlers/callback.py:529-599`
-
-`browse-dirs` 接口只检查 `startswith('/')`，未规范化路径。`/etc/../root/.ssh` 这类路径可通过检查，泄露任意目录列表。
-
-**修复方案**: 使用 `os.path.realpath()` 规范化路径，消除 `..`、符号链接等。
-
----
-
-### 4. ~~[安全] HTTP Content-Length 未校验~~ ✅ 已修复
-
-**文件**: `src/server/handlers/callback.py:383`
-
-Content-Length 未校验范围，负值或超大值可能导致异常或内存耗尽。
-
-**修复方案**: 添加 `MAX_REQUEST_SIZE = 10MB` 常量，校验 Content-Length 范围。
-
-> **注**: Socket 服务端和客户端的大小限制风险较低（本地访问 + 超时机制），接受风险不修复。
-
----
-
-### 5. [安全] permission.sh 中 JSON 手工拼接 — ⚠️ 接受风险
-
-**文件**: `src/hooks/permission.sh:256`
-
-```bash
-decision_json="{\"behavior\": \"deny\", \"message\": \"${message}\", \"interrupt\": true}"
-```
-
-`$message` 未经 JSON 转义，含双引号/反斜杠时生成无效 JSON。
-
-**风险分析**: `message` 来自服务端 `decision_handler.py` 的硬编码字符串（如"请求不存在或已过期"），非用户输入，实际注入风险为零。
-
-**决定**: 接受风险，不修复。
+| 原编号 | 问题 | 当前状态 |
+|--------|------|----------|
+| #21 | `feishu.sh` JSON 手工拼接 | 部分改用 `json_build_object`，但仍有手工拼接残留 |
+| #27 | `logging_config.py` 未被使用 | ✅ 现已被 `main.py`、`socket_client.py`、`feishu.py`、`permission_mcp.py` 引用 |
 
 ---
 
-### 6. ~~[安全] Token 验证缺少恒定时间比较~~ ✅ 已修复
+## 二、高优先级问题
 
-**文件**: `src/server/handlers/feishu.py:165`
+### 1. [安全] HTTP 服务监听 0.0.0.0 — 待修复（原 #10）
+
+**文件**: `src/server/main.py:555`
 
 ```python
-if token != FEISHU_VERIFICATION_TOKEN:  # 时序攻击风险
+server = ThreadedHTTPServer(('0.0.0.0', HTTP_PORT), HttpRequestHandler)
 ```
 
-项目中 `auth_token.py` 已正确使用 `hmac.compare_digest()`，此处应保持一致。
+服务器监听所有接口。如无防火墙保护，权限决策接口（`/allow?id=xxx`）、注册接口等可被外部访问。
 
-**修复方案**: 添加 `import hmac`，改用 `hmac.compare_digest()` 进行恒定时间比较。
-
----
-
-### 7. ~~[兼容性] `dataclass` 不兼容 Python 3.6~~ ✅ 已修复
-
-**文件**: `src/server/models/tool_config.py:11`
-
-`dataclasses` 是 Python 3.7+ 才有的模块，在 3.6 上直接 `ImportError`。
-
-**修复方案**: 移除 `@dataclass` 装饰器，改为手动实现 `__init__` 方法。
+**建议**: 默认绑定 `127.0.0.1`，通过 `CALLBACK_SERVER_BIND` 配置项允许修改。
 
 ---
 
-### 8. ~~[数据安全] JSON Store 文件写入非原子操作~~ ✅ 已修复
-
-影响所有 Store 类（`binding_store.py`、`message_session_store.py`、`session_chat_store.py`、`auth_token_store.py`、`dir_history_store.py`）。进程崩溃时文件可能只写入一半，导致全部数据丢失。
-
-**修复方案**: 使用"写临时文件 + `os.replace()`"的原子写入模式，所有 5 个 Store 类的 `_save()` 方法均已更新。
-
----
-
-### 9. [文档] README 数据模型列表与实际代码严重脱节
-
-README 列出的 `request.py`、`session.py`、`binding.py` **均不存在**，而实际有的 `tool_config.py`、`auth_token_store.py`、`session_chat_store.py`、`dir_history_store.py` 等未在文档中出现。
-
----
-
-## 二、中优先级问题
-
-### 10. [安全] HTTP 服务监听 0.0.0.0
-
-**文件**: `src/server/main.py:363`
-
-服务器监听所有接口，如无防火墙保护，权限决策接口（`/allow?id=xxx`）可被外部访问。
-
-**建议**: 默认绑定 `127.0.0.1`，通过配置项允许修改。
-
----
-
-### 11. [安全] auth_token 明文存储在 JSON 文件中
+### 2. [安全] auth_token 明文存储 — 待修复（原 #11）
 
 **文件**: `src/server/services/auth_token_store.py`、`src/server/services/binding_store.py`
 
-auth_token 以明文方式存储在 `runtime/auth_token.json`。
+auth_token 以明文方式存储在 `runtime/auth_token.json`、`runtime/bindings.json`。
 
-**建议**: 设置文件权限为 `0o600`（仅所有者可读写）。
-
----
-
-### 12. ~~[并发] 多处全局单例懒加载无线程保护~~ ✅ 已修复
-
-| 文件 | 位置 |
-|------|------|
-| `handlers/feishu.py:70-95` | `_feishu_message_logger` |
-| `models/tool_config.py:244-249` | `_tool_config_manager` |
-| `services/auth_token_store.py:77,94` | `_token` 类变量读写不一致 |
-
-**修复方案**:
-- `_feishu_message_logger` 和 `_tool_config_manager`：添加专用锁 + 双重检查锁定
-- `AuthTokenStore._token`：`get()` 方法也使用 `_file_lock` 保护
-
----
-
-### 13. ~~[逻辑] tool-config.sh 中 `_tool_config_get` 传参错误~~ ✅ 已修复
-
-**文件**: `src/lib/tool-config.sh:100, 137, 157`
-
-```bash
-color=$(_tool_config_get "_defaults.unknown_tool.color")
-# 函数签名是 _tool_config_get "tool_name" "field_path"，这里只传了一个参数
+**建议**: 设置文件权限为 `0o600`（仅所有者可读写），在所有 Store 的 `_save()` 方法中添加：
+```python
+os.chmod(tmp_file.name, 0o600)
 ```
 
-导致构建的查询路径与预期不符。
+---
 
-**修复方案**: 修正为两参数形式，如 `_tool_config_get "_defaults.unknown_tool" "color"`。
+### 3. [安全] 日志中记录完整原始数据 — 待修复（原 #20）
+
+**文件**: `src/server/handlers/feishu.py:388`
+
+```python
+'raw_data': data  # 记录完整的原始数据
+```
+
+飞书事件的 `raw_data` 完整写入日志，可能包含 token、用户消息等敏感信息。
+
+**建议**: 只记录必要字段（event_type、event_id、sender），不记录完整 raw_data。
 
 ---
 
-### 14. ~~[可移植性] 多个 Bash 特性在 macOS 默认环境下不可用~~ ✅ 已修复
+## 三、中优先级问题
 
-| 特性 | 位置 | 要求 |
-|------|------|------|
-| `readlink -f` | `hook-router.sh:26`, `core.sh:57` | macOS 12.3+ 已原生支持，无兼容性问题 |
-| `declare -A` | `tool.sh:39,53` | Bash 4+ |
-| `mapfile` | `socket.sh:185`, `feishu.sh:1006,1113` | Bash 4+ |
-| `base64 -w 0` | `permission.sh:156` | GNU base64 |
+### 4. [质量] feishu.py 文件过大（4565 行） — 新发现
 
-**修复方案**:
-- `declare -A` 关联数组改为 `case` 函数（`_builtin_tool_color`、`_builtin_tool_field`）
-- `mapfile -t` 改为 `while IFS= read -r` 循环
-- `base64 -w 0` 改为 `base64 | tr -d '\n'`
-- `readlink -f` 在 macOS 12.3+ 已原生支持，无需修改
+**文件**: `src/server/handlers/feishu.py` (4565 行)
+
+单文件 4500+ 行，包含消息处理、卡片构建、Markdown 格式化、会话管理、群聊逻辑等多个职责，维护难度高。
+
+**建议**: 按职责拆分为子模块：
+- `feishu_message.py` — 消息接收与分发
+- `feishu_card.py` — 卡片构建与回调处理
+- `feishu_session.py` — 会话管理逻辑
 
 ---
 
-### 15. ~~[配置] `reload_config()` 不更新已导出的模块级变量~~ 无需修复
+### 5. [质量] Store 类模板代码重复（7 个 Store） — 待修复（原 #17，问题加剧）
 
-**文件**: `src/server/config.py:224-278`
+现有 7 个 Store 类，`_load()`、`_save()`、`initialize()`、`get_instance()` 几乎完全相同：
 
-`PERMISSION_REQUEST_TIMEOUT`、`FEISHU_APP_ID` 等在模块加载时已固化，调用 `reload_config()` 后其他模块通过 `from config import PERMISSION_REQUEST_TIMEOUT` 获取的仍是旧值。
+| Store | 文件 |
+|-------|------|
+| BindingStore | `services/binding_store.py` |
+| MessageSessionStore | `services/message_session_store.py` |
+| SessionChatStore | `services/session_chat_store.py` |
+| AuthTokenStore | `services/auth_token_store.py` |
+| DirectoryStore | `services/directory_store.py` |
+| GroupChatStore | `services/group_chat_store.py` |
+| GroupSessionStore | `services/group_session_store.py` |
 
-**说明**: `reload_config()` 当前无调用者，不存在实际风险。已在函数注释中说明此限制。
-
----
-
-### 16. ~~[质量] `_run_in_background` 函数重复定义三次~~ ✅ 已修复
-
-完全相同的代码分别出现在 `handlers/feishu.py`、`handlers/register.py`、`handlers/agent.py`。
-
-**修复方案**: 提取到 `handlers/utils.py` 作为 `run_in_background()`，三个 handler 文件改为 `from .utils import run_in_background as _run_in_background`。
-
----
-
-### 17. [质量] Store 类大量模板代码重复
-
-5 个 Store 类的 `_load()`、`_save()`、`initialize()`、`get_instance()` 几乎完全相同。
-
-**建议**: 抽取 `BaseJsonStore` 基类。
+**建议**: 抽取 `BaseJsonStore` 基类，将 `_load()`、`_save()`、`get_instance()` 等公共逻辑统一管理。
 
 ---
 
-### 18. [质量] permission.sh 中两种模式函数代码大量重复
+### 6. [质量] permission.sh 两种模式代码重复 — 待修复（原 #18，已改善）
 
 **文件**: `src/hooks/permission.sh`
 
-`run_interactive_mode`（114-139 行）与 `run_fallback_mode`（204-228 行）有大量重复逻辑。
+`run_interactive_mode`（362 行）与 `run_fallback_mode`（517 行）仍有重复逻辑。已通过 `prepare_common_vars`（324 行）抽取部分公共变量准备，但发送流程仍有大量重复。
 
-**建议**: 抽取公共函数处理共同的准备和发送逻辑。
-
----
-
-### 19. [配置] `.env.example` 被 `.gitignore` 忽略
-
-**文件**: `.gitignore:90`
-
-`.env.example` 是配置模板，应纳入版本控制。当前新用户无法按 README 指引 `cp .env.example .env`，因为该文件根本不存在于仓库中。
+**建议**: 进一步抽取公共的通知发送函数。
 
 ---
 
-### 20. [安全] 日志中记录完整原始数据
+### 7. [质量] feishu.sh JSON 手工拼接残留 — 待修复（原 #21，部分改善）
 
-**文件**: `src/server/handlers/feishu.py:232-243`
+**文件**: `src/lib/feishu.sh`
 
-飞书事件的 `raw_data` 完整写入日志，可能包含 token 等敏感信息。
+部分场景已改用 `json_build_object`（如 1423、1700 行），但仍有其他位置直接拼接 JSON 字符串。
 
-**建议**: 只记录必要的字段，避免记录完整的 raw_data。
-
----
-
-### 21. [安全] feishu.sh 中多处 JSON 手工拼接
-
-**文件**: `src/lib/feishu.sh:751`
-
-`$session_id`、`$WEBHOOK_URL` 等变量未经 JSON 转义直接拼接到 JSON 字符串中。
-
-**建议**: 使用 `json_build_object` 构建请求体。
+**建议**: 统一使用 `json_build_object` 或 `json_escape` 构建请求体。
 
 ---
 
-### 22. [质量] feishu.sh 中 sed 转义链重复
+### 8. [质量] WebSocket 隧道客户端关闭不完整 — 新发现
 
-**文件**: `src/lib/feishu.sh:154-180`
+**文件**: `src/server/services/ws_tunnel_client.py:128`
 
-三处几乎完全相同的 `sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | ...` 转义链。
+`_request_executor` (ThreadPoolExecutor) 在 `stop()` 中使用 `wait=False` 关闭，放弃了正在处理的请求。如果 `stop()` 未被调用（如异常中断），线程池线程将永不释放。
 
-**建议**: 抽取为 `_json_escape_sed()` 函数。
+**建议**: 使用 `shutdown(wait=True)` 并设置合理超时，或添加 `__del__` 安全网。
 
 ---
 
-### 23. ~~[安全] Unix Socket 文件删除存在 TOCTOU 竞态~~ ✅ 已修复
+### 9. [质量] WebSocket Registry `get_status()` 快照不一致 — 新发现
 
-**文件**: `src/server/main.py:204-209`
+**文件**: `src/server/services/ws_registry.py`
 
+`get_status()` 分别读取 `_connections` 和 `_pending` 字典，两次读取之间状态可能变化，导致返回的 `authenticated_count` 与 `pending_count` 不一致。
+
+**建议**: 获取两个字典的快照时使用一致的锁顺序：
 ```python
-if os.path.exists(SOCKET_PATH):
-    os.unlink(SOCKET_PATH)
+with self._connections_lock:
+    auth_snapshot = dict(self._connections)
+with self._pending_lock:
+    pending_snapshot = dict(self._pending)
 ```
 
-**修复方案**: 直接 `try: os.unlink() except FileNotFoundError: pass`，消除检查与删除之间的时间窗口。
+> 注：虽然两次加锁之间仍有间隙，但对于状态展示用途，这种程度的一致性已经足够。
 
 ---
 
-## 三、低优先级问题
+## 四、低优先级问题
 
-### 24. [规范] 环境变量读取方式不符规范
+### 10. [规范] 裸 `except:` 吞掉所有异常 — 待修复（原 #31，新增位置）
 
-**文件**: `src/lib/core.sh:294`
+3 处嵌入式 Python 代码使用裸 `except:`：
 
-使用 `${DEBUG:-0}` 读取配置，应改用 `get_config "DEBUG" "0"`。
+| 文件 | 行号 | 上下文 |
+|------|------|--------|
+| `src/hooks/stop.sh` | 308 | `json.loads(line)` 解析 |
+| `src/lib/feishu.sh` | 2137 | `json.loads()` 解析 questions |
+| `src/lib/tool.sh` | 128 | 工具描述格式化 |
 
----
-
-### 25. [兼容] Python 2 兼容导入不必要
-
-**文件**: `src/server/services/feishu_api.py:18-22`
-
-`try: from urllib.request ... except: from urllib2 ...` 的 fallback 在 Python 3.6+ 环境下永远不会执行。
+**建议**: 改为 `except Exception:` 或更具体的 `except (json.JSONDecodeError, ValueError):`。
 
 ---
 
-### 26. [质量] `json_build_object` 不做 JSON 转义
+### 11. [规范] 环境变量读取不符规范 — 待修复（原 #24）
 
-**文件**: `src/lib/json.sh:306-326`
+**文件**: `src/lib/core.sh:442`
 
-值中含双引号或反斜杠时生成无效 JSON。至少应对 `\` 和 `"` 做基本转义。
+```bash
+if [ "${DEBUG:-0}" != "1" ]; then
+```
 
----
-
-### 27. [质量] `logging_config.py` 未被使用
-
-**文件**: `src/shared/logging_config.py`
-
-提供了统一日志配置，但 `main.py` 和 `socket_client.py` 各自硬编码配置，未引用此模块。
+应改用 `get_config "DEBUG" "0"`，以支持从 `.env` 文件读取。
 
 ---
 
-### 28. [质量] HTTP 响应发送代码重复
+### 12. [质量] `json_build_object` 不做 JSON 转义 — 待修复（原 #26）
+
+**文件**: `src/lib/json.sh`
+
+值中含双引号或反斜杠时生成无效 JSON。建议至少对 `\` 和 `"` 做基本转义。
+
+---
+
+### 13. [质量] HTTP 响应发送代码重复 — 待修复（原 #28）
 
 **文件**: `src/server/handlers/callback.py`
 
@@ -310,88 +213,88 @@ if os.path.exists(SOCKET_PATH):
 
 ---
 
-### 29. [风格] 变量命名和 SCRIPT_DIR 获取方式不统一
+### 14. [风格] 变量命名和路径解析方式不统一 — 待修复（原 #29）
 
 - 全局变量命名：`TOOLS_CONFIG_CACHE` vs `_ENV_FILE_CACHE`，风格不一致
-- 路径解析：`hook-router.sh` 用 `readlink -f`，`start-server.sh` 用 `cd && pwd`（`readlink -f` 在 macOS 12.3+ 已原生支持，两种写法均可，但建议统一）
+- 函数命名：内部辅助函数有的使用 `_` 前缀（如 `_tool_config_get`），有的没有（如 `prepare_common_vars`）
 
 ---
 
-### 30. [类型] 多处类型注解不够精确
+### 15. [类型] 多处类型注解不够精确 — 待修复（原 #30）
 
-| 文件 | 问题 |
-|------|------|
-| `config.py:26` | `Optional[dict]` → 应为 `Optional[Dict[str, str]]` |
-| `decision_handler.py:26` | 返回值类型应为 `Tuple[bool, Optional[str], Optional[str]]` |
-| `callback.py:59` | `request_manager: RequestManager = None` → 应为 `Optional[RequestManager]` |
+新增文件（`ws_registry.py`、`ws_protocol.py`、`session_facade.py` 等）的类型注解总体较好，但部分旧文件仍有 `Optional[dict]`（应为 `Optional[Dict[str, Any]]`）等不精确注解。
 
 ---
 
-### 31. [质量] 裸 `except:` 吞掉所有异常
+### 16. [测试] 测试覆盖严重不足 — 待修复（原 #32）
 
-**文件**: `src/server/handlers/feishu.py:457`
+仍仅有 2 个手动测试脚本（`test/test-permission.sh`、`test/test-permission-quick.sh`），均针对 PermissionRequest。新增的 WebSocket 注册、多 Agent 支持、群聊会话、遥测等模块均无测试。
 
-```python
-except:
-    return ''
-```
-
-**建议**: 改为 `except Exception:`，避免捕获 `SystemExit`、`KeyboardInterrupt`。
-
----
-
-### 32. [测试] 测试覆盖严重不足
-
-仅有 2 个手动交互式测试脚本（均针对 PermissionRequest），缺少：
-
-- Stop 事件测试
-- Notification 事件测试
-- Python 服务端单元测试
-- Socket 通信测试
-- JSON 解析降级测试
-
-无自动化测试框架，无法集成 CI/CD。
+缺少：
+- WebSocket 协议测试
+- Store 类单元测试
+- Agent 分发逻辑测试
+- 飞书消息处理测试
+- 自动化测试框架 / CI 集成
 
 ---
 
-### 33. [文档] README 多处与实际代码不一致
+### 17. [配置] `.gitignore` 规则冗余 — 待修复（原 #34）
 
-| 问题 | 说明 |
-|------|------|
-| 目录结构图遗漏文件 | `auth_token_store.py`、`session_chat_store.py`、`dir_history_store.py`、`tool_config.py`、`logging_config.py` 未列出 |
-| `shared/logging.json` 描述错误 | 实际文件是 `logging_config.py`（Python 文件），非 JSON |
-| 日志文件模式不完整 | 缺少 `log/feishu_message/`、`log/command/` 目录说明 |
+`*.sock` 在第 50 行和第 56 行重复出现。
 
 ---
 
-### 34. [配置] `.gitignore` 规则冗余
+### 18. [质量] BindingStore 配置值静默降级 — 新发现
 
-- `*.sock` 在第 49 行和第 55 行重复
-- `/tmp/claude-permission.sock` 已被 `*.sock` 覆盖
+**文件**: `src/server/services/binding_store.py`
 
----
+`group_dissolve_days` 等数值配置在转换失败时静默降为 `0`，不产生日志告警。用户可能误输入 `"abc"` 而不自知。
 
-### 35. [运维] 根目录文件管理不规范
-
-- `autossh-tunnel.sh`、`autossh-tunnel.conf` 未提交也未忽略
-- `TODO.md`、`docs/QUICKSTART.md` 处于游离状态
-- `nohup.out` 残留表明服务启动方式不够规范
+**建议**: 转换失败时记录 `logger.warning()`，帮助用户排查配置错误。
 
 ---
 
-## 统计汇总
+## 五、统计汇总
 
-| 严重程度 | 数量 | 已修复 | 接受风险/无需修复 | 待修复 | 主要类别 |
-|---------|------|--------|------------------|--------|---------|
-| **高** | 9 | 7 | 1 | 1 | 命令注入、XSS、路径遍历、数据安全、兼容性 |
-| **中** | 14 | 5 | 1 | 8 | 监听配置、并发安全、逻辑错误、代码重复、文档脱节、TOCTOU |
-| **低** | 12 | 0 | 0 | 12 | 规范合规、类型注解、测试覆盖、代码风格 |
+### 本次审查总览
 
-> 注：高优先级 #5 (JSON手工拼接) 经评估后接受风险不修复；中优先级 #15 (`reload_config`) 经评估无需修复。
+| 严重程度 | 总数 | 新发现 | 旧项延续 | 主要类别 |
+|---------|------|--------|---------|---------|
+| **高** | 3 | 0 | 3 | 网络监听、敏感数据存储/日志 |
+| **中** | 6 | 3 | 3 | 代码规模、模板重复、WebSocket 资源管理 |
+| **低** | 9 | 1 | 8 | 规范合规、类型注解、测试覆盖、代码风格 |
 
-## 建议修复优先级
+### 与上次审查对比
 
-1. **立即修复**: 安全类问题（#2-#6, #10-#11, #20-#21）
-2. **尽快修复**: 数据安全 (#8 原子写入)、兼容性 (#7 dataclass)、逻辑错误 (#13)
-3. **计划修复**: 文档同步 (#9, #19, #33)、代码去重 (#16-#18, #22)、并发保护 (#12)
-4. **持续改进**: 测试覆盖 (#32)、类型注解 (#30)、代码规范 (#24-#29, #31, #34-#35)
+| 指标 | 2025-02-15 | 2026-05-30 | 变化 |
+|------|-----------|-----------|------|
+| 总问题数 | 35 | 18 | -17 |
+| 高优先级 | 9 | 3 | -6（修复 7，接受 1，降级 1） |
+| 中优先级 | 14 | 6 | -8（修复 5，无需修复 1，新增 3） |
+| 低优先级 | 12 | 9 | -3（修复 2，新增 1） |
+| Python 文件数 | ~25 | 49 (+5 dashboard) | +29 |
+| Bash 脚本数 | 13 | 12 | -1 |
+| 安全漏洞 | 7 (5已修复) | 0 新增 | 显著改善 |
+
+### 代码健康趋势
+
+**改善方面**：
+- 所有已知安全漏洞已修复（命令注入、XSS、路径遍历、TOCTOU）
+- 原子文件写入已全面应用于所有 Store
+- 线程安全防护已加强（双重检查锁定、`hmac.compare_digest`）
+- 日志配置已统一使用 `logging_config.py`
+- macOS/Linux 兼容性问题已基本解决
+
+**需关注方面**：
+- 代码规模增长迅速（Python 文件数翻倍），部分文件过大（feishu.py 4565 行）
+- Store 类增至 7 个，模板代码重复问题加剧
+- 测试覆盖仍严重不足，新模块均无自动化测试
+- 3 个高优先级旧项长期未修复（0.0.0.0 监听、auth_token 明文、raw_data 日志）
+
+## 六、建议修复优先级
+
+1. **尽快修复**: 安全类（#1 监听地址、#2 文件权限、#3 日志脱敏）
+2. **计划修复**: 代码质量（#4 拆分 feishu.py、#5 BaseJsonStore 基类）
+3. **持续改进**: 测试覆盖（#16）、规范统一（#10-#14）
+4. **长期优化**: 代码重复消除（#6, #7, #13）、WebSocket 资源管理（#8, #9）

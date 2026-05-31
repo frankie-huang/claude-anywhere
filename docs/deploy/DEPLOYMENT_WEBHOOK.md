@@ -47,7 +47,7 @@ Webhook 模式使用飞书群机器人的 Webhook URL 发送消息，是最简�
 
 ```
 ┌─────────────────┐         ┌──────────────────┐         ┌─────────────────┐
-│  Claude Code    │────────▶│ src/hook-router  │────────▶│  飞书 Webhook   │
+│  Agent CLI      │────────▶│ src/hook-router  │────────▶│  飞书 Webhook   │
 │                 │  Hook   │  → permission.sh │  Card   │     URL         │
 └─────────────────┘         └────────┬─────────┘         └─────────────────┘
                                      │
@@ -186,7 +186,7 @@ PERMISSION_SOCKET_PATH=/tmp/claude-permission.sock
 
 安装脚本会：
 - 检测环境依赖（python3, curl 等）
-- 配置 Claude Code hook
+- 配置 Agent hook
 - 生成环境变量配置模板
 
 ### 3. 配置环境变量
@@ -213,7 +213,7 @@ CALLBACK_SERVER_URL=http://your-server:8080  # 内网穿透时填公网地址
 ./src/start-server.sh
 ```
 
-### 5. 启动 Claude Code
+### 5. 启动 Agent
 
 ```bash
 claude
@@ -221,7 +221,7 @@ claude
 
 ### 验证部署
 
-1. 在 Claude Code 中执行一个需要权限的操作
+1. 在 Agent CLI 中执行一个需要权限的操作
 2. 检查飞书群聊是否收到通知卡片
 3. 点击卡片按钮，确认能正常响应
 

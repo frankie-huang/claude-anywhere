@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-06-01
+
+#### 群聊协作模式（group_allow_cowork）
+
+- 新增 `FEISHU_GROUP_ALLOW_COWORK` per-user 配置项（默认 false，仅 group 模式可用）
+- 开启后群内所有成员（含未注册用户）均可参与对话，消耗 owner 的额度
+- 协作者消息自动添加 `[来自群成员 xxx]` 前缀，区分发送者身份
+- 协作者可执行 `/clear` 重置会话上下文，其他管理命令仅会话创建者可执行
+- GroupSessionStore 新增 `_chat_to_owner` 反向索引，支持 O(1) 协作者路由查找
+- 协作者身份在消息入口处统一前置判定，命令和消息路径共用
+
+### Changed - 2026-05-30
+
+#### 多 Agent 权限持久化：按 Agent 类型分流"始终允许"
+
+- **Claude**：改用官方 `updatedPermissions` 机制，权限规则由 Claude CLI 自行应用，不再由服务端写入 `.claude/settings.local.json`
+- **Codex**：新增 `codex_rule_writer.py`，将命令解析为 `prefix_rule(...)` 追加到 `$CODEX_HOME/rules/default.rules`
+- 删除旧的 `rule_writer.py`（仅适用于 Claude 的服务端写入方案）
+- Socket 请求新增 `agent_type` 字段，服务端根据 Agent 类型选择对应的持久化策略
+- `permission.sh` 的 `output_decision` 支持 `updatedPermissions` 可选参数，合并原独立函数
+
+#### 文档全面更新：统一多 Agent 表述
+
+- 项目文档中通用场景的 "Claude Code" 统一改为 "Agent CLI" / "Agent"
+- README 新增 Codex TOML hook 配置示例、补全目录树、新增环境变量分组
+- `CODE_REVIEW.md` 全量更新（2026-05-30 审查，追踪上次 13 项已修复问题）
+- 部署文档、设计文档、测试文档同步更新
+
+### Changed - 2026-05-29
+
+#### 多 Agent 并行支持：同一服务同时启用 Claude 和 Codex
+
+- 将单 Agent 架构（`AGENT_TYPE` 二选一）改为多 Agent 并行（`ENABLED_AGENTS` 同时启用）
+- 新增 `ENABLED_AGENTS`（逗号分隔）、`DEFAULT_AGENT` 配置项，替代原 `AGENT_TYPE`
+- `/new` 卡片下拉菜单合并展示所有已启用 Agent 的命令，用户可自由选择
+- 注册链路全链路透传 `default_agent` + 各 agent 命令列表（config → auto_register/ws_tunnel_client → gateway）
+- `session_chat_store` 按 session 记录 `agent_type`，启动时 backfill 旧 session 默认值
+- `handlers/claude.py` 重命名为 `handlers/agent.py`，per-session 从 store 读取 agent_type
+- `setup_init.py` 支持多 Agent 选择 + 逐个命令配置
+- 通用接口和用户可见文案去除 Claude 硬编码，`claude_command` 字段重命名为 `command`
+
 ### Added - 2026-05-23
 
 #### 支持 OpenAI Codex CLI 作为第二 Agent

@@ -120,7 +120,8 @@ class BindingStore:
         default_chat_dir: str = '',
         default_chat_follow_thread: bool = True,
         group_name_prefix: Optional[str] = None,
-        group_dissolve_days: Optional[int] = None
+        group_dissolve_days: Optional[int] = None,
+        group_allow_cowork: Optional[bool] = None
     ) -> bool:
         """创建或更新绑定
 
@@ -138,6 +139,7 @@ class BindingStore:
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
             group_name_prefix: 群聊名称前缀（None = 未传，保留旧值；显式值含 '' 原样写入）
             group_dissolve_days: 群聊自动解散天数（None = 未传，保留旧值；显式值含 0 原样写入）
+            group_allow_cowork: 群聊协作者模式（None = 未传，保留旧值；True/False 显式写入）
 
         Returns:
             是否保存成功
@@ -202,6 +204,11 @@ class BindingStore:
                     binding_data['group_dissolve_days'] = group_dissolve_days
                 elif existing and 'group_dissolve_days' in existing:
                     binding_data['group_dissolve_days'] = existing['group_dissolve_days']
+                # group_allow_cowork：同 at_bot_only 逻辑
+                if group_allow_cowork is not None:
+                    binding_data['group_allow_cowork'] = bool(group_allow_cowork)
+                elif existing and 'group_allow_cowork' in existing:
+                    binding_data['group_allow_cowork'] = existing['group_allow_cowork']
                 # 处理 default_chat_dir 及关联的 default_chat_session_id：
                 # - 传入非空值且与旧值相同：保留两者
                 # - 传入非空值且与旧值不同：更新目录，清除旧 session_id（已失效）

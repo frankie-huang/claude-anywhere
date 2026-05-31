@@ -83,6 +83,10 @@ class GroupSessionStore:
 
         # 反向索引：(owner_id, session_id) → chat_id（启动时重建，写路径同步更新）
         self._owner_session_to_chat: Dict[Tuple[str, str], str] = {}
+        # 反向索引：chat_id → owner_id（协作者模式用，启动时重建，写路径同步更新）
+        # 同一 chat_id 多 owner 时只存一个：save() 取最后写入，rebuild 取最近活跃。
+        # touch() 不同步此索引，运行期与重启后的 owner 选择可能不一致，可接受。
+        self._chat_to_owner: Dict[str, str] = {}
         self._rebuild_index()
 
         logger.info("[group-session-store] Initialized with data_dir=%s", data_dir)
@@ -148,6 +152,22 @@ class GroupSessionStore:
             return None
         return self._owner_session_to_chat.get((owner_id, session_id))
 
+    def find_owner_by_chat(self, chat_id: str) -> Optional[str]:
+        """反查 chat_id 归属的 owner_id（O(1) 内存索引，零 I/O）
+
+        协作者模式用：当非 owner 成员在群内发消息时，通过 chat_id 反查到
+        owner，进而借用 owner 的 binding 转发消息。
+
+        同一 chat_id 可能被多个 owner /attach（共享群场景），反向索引只存
+        最近写入的 owner——协作者进入的是当前活跃的那个 owner 的 session。
+
+        Returns:
+            owner_id 或 None
+        """
+        if not chat_id:
+            return None
+        return self._chat_to_owner.get(chat_id)
+
     # =========================================================================
     # 写
     # =========================================================================
@@ -183,6 +203,8 @@ class GroupSessionStore:
                     stale_entry = owner_bucket.get(stale_chat_id)
                     if stale_entry and stale_entry.get('session_id') == session_id:
                         del owner_bucket[stale_chat_id]
+                        if self._chat_to_owner.get(stale_chat_id) == owner_id:
+                            self._chat_to_owner.pop(stale_chat_id, None)
                         logger.info("[group-session-store] Reclaimed stale chat row: "
                                     "owner=%s session=%s old_chat=%s -> new_chat=%s",
                                     owner_id, session_id, stale_chat_id, chat_id)
@@ -203,6 +225,7 @@ class GroupSessionStore:
                     if self._owner_session_to_chat.get(prev_key) == chat_id:
                         self._owner_session_to_chat.pop(prev_key, None)
                 self._owner_session_to_chat[(owner_id, session_id)] = chat_id
+                self._chat_to_owner[chat_id] = owner_id
                 logger.info("[group-session-store] Saved: owner=%s chat=%s -> session=%s",
                             owner_id, chat_id, session_id)
                 return True
@@ -259,6 +282,8 @@ class GroupSessionStore:
                     key = (owner_id, removed_session_id)
                     if self._owner_session_to_chat.get(key) == chat_id:
                         self._owner_session_to_chat.pop(key, None)
+                if self._chat_to_owner.get(chat_id) == owner_id:
+                    self._chat_to_owner.pop(chat_id, None)
                 logger.info("[group-session-store] Removed: owner=%s chat=%s",
                             owner_id, chat_id)
                 return True
@@ -279,11 +304,19 @@ class GroupSessionStore:
             try:
                 data = self._load()
                 self._owner_session_to_chat = {}
+                self._chat_to_owner = {}
                 for owner_id, owner_bucket in data.items():
                     for chat_id, item in owner_bucket.items():
                         sid = item.get('session_id', '')
                         if sid:
                             self._owner_session_to_chat[(owner_id, sid)] = chat_id
+                        # 同一 chat_id 多 owner 时，取最近活跃的
+                        prev_owner = self._chat_to_owner.get(chat_id)
+                        if prev_owner:
+                            prev_item = data.get(prev_owner, {}).get(chat_id, {})
+                            if item.get('last_active_at', 0) <= prev_item.get('last_active_at', 0):
+                                continue
+                        self._chat_to_owner[chat_id] = owner_id
                 if self._owner_session_to_chat:
                     logger.info("[group-session-store] Rebuilt index: %d sessions",
                                 len(self._owner_session_to_chat))

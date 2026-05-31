@@ -421,5 +421,10 @@ FEISHU_SESSION_MODE = get_session_mode()
 FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Agent')
 FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
 
+# 群聊协作模式：允许非 owner 的群成员在群内对话
+# False (默认): 仅 owner 可在群内对话
+# True: 群内所有成员（包括未注册用户）均可对话，消耗 owner 的额度
+FEISHU_GROUP_ALLOW_COWORK = get_config('FEISHU_GROUP_ALLOW_COWORK', 'false').lower() in ('true', '1', 'yes')
+
 # Session 过期天数（统一，不区分 group/非 group）
 SESSION_EXPIRE_DAYS = get_config_positive_int('SESSION_EXPIRE_DAYS', 30)

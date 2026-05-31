@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# src/start-server.sh - 启动/停止 Claude Code 权限回调服务
+# src/start-server.sh - 启动/停止 code-anywhere 权限回调服务
 #
 # 用法:
 #   ./src/start-server.sh [start|stop|restart|status|state]
@@ -163,7 +163,7 @@ start_service() {
         return 0
     fi
 
-    echo "Starting Claude Code Permission Callback Server..."
+    echo "Starting code-anywhere Permission Callback Server..."
 
     # 验证 .env 中的 PYTHON_PATH（如果存在）
     validate_env_python_path

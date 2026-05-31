@@ -12,8 +12,8 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from models.decision import Decision
+from services.codex_rule_writer import write_codex_always_allow_rule
 from services.request_manager import RequestManager
-from services.rule_writer import write_always_allow_rule
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 def handle_decision(
     request_id: str,
     action: str,
-    project_dir: Optional[str] = None,
     answers: Optional[Dict[str, str]] = None,
     questions: Optional[List[Dict[str, Any]]] = None
 ) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -33,7 +32,6 @@ def handle_decision(
     Args:
         request_id: 请求 ID
         action: 动作类型 (allow/always/deny/interrupt/answer)
-        project_dir: 项目目录（可选，用于 always 时写入规则）
         answers: AskUserQuestion 的答案字典（仅 action=answer 时使用）
         questions: AskUserQuestion 的原始问题数组（仅 action=answer 时使用）
 
@@ -67,9 +65,10 @@ def handle_decision(
 
     # 提前保存 extra_data（resolve 后可能被清理）
     extra_data = {
-        'project_dir': project_dir or req_data.get('project_dir'),
         'tool_name': req_data.get('tool_name'),
-        'tool_input': req_data.get('tool_input', {})
+        'tool_input': req_data.get('tool_input', {}),
+        'agent_type': (req_data.get('agent_type') or 'claude').lower(),
+        'permission_suggestions': req_data.get('permission_suggestions') or []
     }
 
     # 检查 hook 进程是否存活
@@ -115,8 +114,26 @@ def handle_decision(
         }
         decision = Decision.allow_with_updated_input(updated_input)
         decision_type = 'allow'
-    elif action in ('allow', 'always'):
+    elif action == 'allow':
         decision = Decision.allow()
+        decision_type = 'allow'
+    elif action == 'always':
+        agent_type = extra_data.get('agent_type')
+        if agent_type == 'codex':
+            rule_success = write_codex_always_allow_rule(
+                extra_data.get('tool_name') or '',
+                extra_data.get('tool_input') or {}
+            )
+            if not rule_success:
+                logger.error(f"[decision] Failed to write Codex always-allow rule for request {request_id}")
+                return False, None, '写入 Codex 规则失败，无法始终允许'
+            decision = Decision.allow()
+        else:
+            permission_suggestions = extra_data.get('permission_suggestions')
+            if not permission_suggestions:
+                logger.error(f"[decision] Missing permission_suggestions for always request {request_id}")
+                return False, None, '当前 Claude 版本未提供权限规则建议，无法始终允许'
+            decision = Decision.allow_with_updated_permissions(permission_suggestions)
         decision_type = 'allow'
     elif action == 'deny':
         decision = Decision.deny('用户拒绝')
@@ -128,18 +145,6 @@ def handle_decision(
     # 记录日志
     session_id = req_data.get('session_id', 'unknown')
     logger.info(f"[decision] Request {request_id} (Session: {session_id}), action: {action}")
-
-    # 对于 always 操作，先写入规则（在提交决策之前）
-    # 这样如果写规则失败，用户可以重试
-    if action == 'always':
-        rule_success = write_always_allow_rule(
-            extra_data.get('project_dir'),
-            extra_data.get('tool_name'),
-            extra_data.get('tool_input', {})
-        )
-        if not rule_success:
-            logger.error(f"[decision] Failed to write always-allow rule for request {request_id}")
-            return False, None, '写入规则失败，请检查项目目录权限后重试'
 
     # 执行决策
     resolve_success, error_code, error_msg = request_manager.resolve(request_id, decision)

@@ -1,5 +1,5 @@
 """
-Decision Model - Claude Code Hook 决策常量和工厂方法
+Decision Model - Agent Hook 决策常量和工厂方法
 
 参考: https://docs.anthropic.com/en/docs/claude-code/hooks
 """
@@ -18,6 +18,7 @@ class Decision:
     FIELD_MESSAGE = 'message'
     FIELD_INTERRUPT = 'interrupt'
     FIELD_UPDATED_INPUT = 'updated_input'
+    FIELD_UPDATED_PERMISSIONS = 'updated_permissions'
 
     @classmethod
     def allow(cls) -> dict:
@@ -37,6 +38,14 @@ class Decision:
         return {
             cls.FIELD_BEHAVIOR: cls.ALLOW,
             cls.FIELD_UPDATED_INPUT: updated_input
+        }
+
+    @classmethod
+    def allow_with_updated_permissions(cls, updated_permissions: list) -> dict:
+        """返回带 updatedPermissions 的允许决策（用于始终允许）"""
+        return {
+            cls.FIELD_BEHAVIOR: cls.ALLOW,
+            cls.FIELD_UPDATED_PERMISSIONS: updated_permissions
         }
 
     @classmethod

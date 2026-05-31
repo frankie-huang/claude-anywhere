@@ -158,8 +158,7 @@ def handle_socket_client(conn: socket.socket, addr):
         # 保存 hook_pid 到 request 中，供后续使用
         request['hook_pid'] = hook_pid
 
-        # 解码 raw_input_encoded 提取 session_id、tool_name 和 tool_input
-        # 这些字段用于日志记录和 /always 端点生成正确的权限规则
+        # 解码 raw_input_encoded 提取 session_id、tool_name、tool_input 等上下文
         raw_input_encoded = request.get('raw_input_encoded')
         if raw_input_encoded:
             try:
@@ -167,6 +166,7 @@ def handle_socket_client(conn: socket.socket, addr):
                 request['session_id'] = raw_input.get('session_id', 'unknown')
                 request['tool_name'] = raw_input.get('tool_name')
                 request['tool_input'] = raw_input.get('tool_input', {})
+                request['permission_suggestions'] = raw_input.get('permission_suggestions', [])
                 logger.debug(f"[socket] Decoded session_id: {request['session_id']}, tool_name: {request['tool_name']}")
             except Exception as e:
                 logger.warning(f"[socket] Failed to decode raw_input_encoded: {e}")
@@ -174,6 +174,8 @@ def handle_socket_client(conn: socket.socket, addr):
         else:
             # 兜底：无 raw_input_encoded 的请求（理论上不应到达这里）
             request['session_id'] = 'unknown'
+
+        request['agent_type'] = request.get('agent_type') or 'claude'
 
         session_id = request['session_id']
         logger.info(f"[socket] Request ID: {request_id}, Session: {session_id}, Hook PID: {hook_pid}")
@@ -567,6 +569,7 @@ def main():
                                 FEISHU_SESSION_MODE,
                                 DEFAULT_CHAT_FOLLOW_THREAD,
                                 FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS,
+                                FEISHU_GROUP_ALLOW_COWORK,
                                 get_default_agent)
             from agents import get_all_agent_commands
             all_cmds = get_all_agent_commands()
@@ -581,7 +584,8 @@ def main():
                 default_chat_dir=DEFAULT_CHAT_DIR,
                 default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
                 group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
-                group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS
+                group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS,
+                group_allow_cowork=FEISHU_GROUP_ALLOW_COWORK
             )
             logger.info("WebSocket tunnel client started, gateway: %s", FEISHU_GATEWAY_URL)
         elif CALLBACK_SERVER_URL:

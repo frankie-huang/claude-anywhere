@@ -1,10 +1,10 @@
 #!/bin/bash
 # =============================================================================
-# install.sh - Claude Code 飞书通知安装脚本
+# install.sh - code-anywhere 飞书通知安装脚本
 #
 # 功能：
 #   1. 检测环境依赖（python3, curl 等）
-#   2. 配置 Claude Code hook
+#   2. 配置 Agent hook
 #   3. 生成环境变量配置模板
 #
 # 用法：
@@ -183,9 +183,9 @@ print_header() {
     echo -e "${BLUE}"
     echo "╔═══════════════════════════════════════════════════════════════╗"
     if [ "${1:-}" = "uninstall" ]; then
-        echo "║       Claude Code 飞书通知 - 卸载脚本                         ║"
+        echo "║       code-anywhere 飞书通知 - 卸载脚本                       ║"
     else
-        echo "║       Claude Code 飞书通知 - 安装脚本                         ║"
+        echo "║       code-anywhere 飞书通知 - 安装脚本                       ║"
     fi
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -414,7 +414,7 @@ PYTHON_SCRIPT
             print_warning "Hook 超时 (${hook_timeout}s) < 服务端超时 (${server_timeout}s)"
         fi
         echo ""
-        print_info "Hook 可能被 Claude Code 强制终止，导致服务端超时响应无法发送"
+        print_info "Hook 可能被 Agent CLI 强制终止，导致服务端超时响应无法发送"
         print_info "建议修改 settings.json 中的 PermissionRequest timeout 为 $((server_timeout + 60))s 或更大"
         return 0
     fi
@@ -428,7 +428,7 @@ PYTHON_SCRIPT
 # =============================================================================
 
 configure_hook() {
-    print_section "配置 Claude Code Hook"
+    print_section "配置 Agent Hook"
 
     # 检查 hook 脚本是否存在
     if [ ! -f "$HOOK_PATH" ]; then
@@ -808,7 +808,7 @@ main() {
                 echo "  2. 启动回调服务："
                 echo -e "     ${YELLOW}./src/start-server.sh${NC}"
                 echo ""
-                echo "  3. 使用 Claude Code，权限请求将发送到飞书"
+                echo "  3. 使用已配置的 Agent，权限请求将发送到飞书"
                 echo ""
                 print_dim "可选：VSCode SSH 代理 - python3 src/proxy/vscode_ssh_proxy.py --vps <host>"
             fi

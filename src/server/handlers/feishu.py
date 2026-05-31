@@ -47,6 +47,9 @@ _feishu_message_logger_lock = threading.Lock()
 # 消息内容清理正则：移除 @_user_1 提及（带或不带尾随空格）
 _AT_USER_PATTERN = re.compile(r'@_user_1\s?')
 
+# 协作者允许执行的命令白名单（其余命令仅 owner 可执行）
+_COLLABORATOR_ALLOWED_COMMANDS = {'clear'}
+
 
 # =============================================================================
 # WebSocket 隧道路由分发
@@ -331,6 +334,37 @@ def _is_at_bot(message: dict) -> bool:
     return False
 
 
+def _find_cowork_owner(chat_id: str, sender_owner_id: str = '') -> Optional[Dict[str, Any]]:
+    """查找 chat_id 所属的、开启了协作模式的 owner 的 binding
+
+    Args:
+        chat_id: 群聊 ID
+        sender_owner_id: 发送者的 owner_id（传入时跳过 owner 自己）
+
+    Returns:
+        owner 的 binding（含 _owner_id），或 None
+    """
+    from services.group_session_store import GroupSessionStore
+    from services.binding_store import BindingStore
+
+    gs_store = GroupSessionStore.get_instance()
+    binding_store = BindingStore.get_instance()
+    if not gs_store or not binding_store:
+        return None
+
+    owner_id = gs_store.find_owner_by_chat(chat_id)
+    if not owner_id:
+        return None
+    if sender_owner_id and owner_id == sender_owner_id:
+        return None
+
+    owner_binding = binding_store.get(owner_id)
+    if not owner_binding or not owner_binding.get('group_allow_cowork', False):
+        return None
+
+    return owner_binding
+
+
 def _handle_message_event(data: dict):
     """处理飞书消息事件 im.message.receive_v1
 
@@ -341,6 +375,7 @@ def _handle_message_event(data: dict):
     event = data.get('event', {})
     message = event.get('message', {})
     sender = event.get('sender', {})
+    sender_id_obj = sender.get('sender_id', {})
 
     event_id = header.get('event_id', '')
     message_id = message.get('message_id', '')
@@ -348,7 +383,8 @@ def _handle_message_event(data: dict):
     chat_type = message.get('chat_type', '')  # p2p / group
     message_type = message.get('message_type', '')  # text / image / ...
     content = message.get('content', '{}')
-    sender_id = sender.get('sender_id', {}).get('open_id', '')
+    sender_id = sender_id_obj.get('open_id', '')
+    user_id = sender_id_obj.get('user_id', sender_id)
     parent_id = message.get('parent_id', '')  # 是否是回复消息
 
     # 解析消息纯文本内容
@@ -402,20 +438,40 @@ def _handle_message_event(data: dict):
     # 获取用户绑定信息（后续处理统一使用）
     binding = _get_binding_from_event(event)
 
-    # 未注册用户：根据 chat_type 和 is_at_bot 决定是否响应
-    # - p2p 消息（单聊）：无论是否 @bot，都提示未注册
-    # - group 消息（群聊）：只有 @bot 时才提示未注册，否则忽略
+    # 协作者模式前置检测：群聊 + 无 binding 或群内无自己 session + owner 开启 cowork
+    # 原始 binding 保存到 _original_binding，供 _handle_command 非白名单命令时恢复
+    if chat_type == 'group':
+        owner_binding = None
+        original_binding = None
+        if not binding:
+            # 未注册用户：尝试借用 owner binding
+            owner_binding = _find_cowork_owner(chat_id)
+        else:
+            # 已注册用户：群内没有自己的 session 时作为协作者
+            owner_id = binding.get('_owner_id', '')
+            from services.group_session_store import GroupSessionStore
+            gs_store = GroupSessionStore.get_instance()
+            has_own_session = gs_store and gs_store.get(owner_id, chat_id) is not None
+            if not has_own_session:
+                owner_binding = _find_cowork_owner(chat_id, owner_id)
+                original_binding = binding
+        if owner_binding:
+            binding = dict(owner_binding)
+            binding['_collaborator_user_id'] = user_id
+            binding['_original_binding'] = original_binding
+            event['_effective_binding'] = binding
+
+    # 未注册且非协作者：提示注册
+    # - 单聊始终提示；群聊仅 @bot 时提示
     if not binding:
         is_p2p = (chat_type == 'p2p')
         should_respond = is_p2p or message.get('is_at_bot', False)
-
         if should_respond:
-            user_id = sender.get('sender_id', {}).get('user_id', sender_id)
             gateway_ws_url = _get_gateway_ws_url()
             hint = "您（用户 ID：`%s`）尚未注册，无法使用此功能。" % user_id
             if gateway_ws_url:
                 hint += "\n\n请在部署了 CLI（如 Claude Code、Codex 等）的系统终端上执行以下命令完成注册：\n" \
-                        "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
+                        "```\ncurl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/refs/heads/main/setup.sh | bash -s -- --gateway-url=%s --owner-id=%s\n```" \
                         "\n如果网关地址（`--gateway-url`）非公网可达，请联系管理员获取对外可用的网关地址。" \
                         "\n\n注意：执行命令前，请先申请当前应用的使用权限，否则将无法接收到注册绑定卡片。如未申请，请先申请权限后再执行命令。" % (gateway_ws_url, user_id)
             _run_in_background(_send_notice_message, (chat_id, hint, message_id))
@@ -453,8 +509,15 @@ def _handle_message_event(data: dict):
         return
 
     if SessionFacade.RouteSource.is_resolved(route_source):
-        logger.info("[feishu] Route to session (%s): session_id=%s, prompt=%s",
-                    route_source, route_info['session_id'], _sanitize_user_content(prompt))
+        # 协作者：添加发送者前缀（binding 已替换为 owner 的，转发天然正确）
+        collaborator_user_id = binding.get('_collaborator_user_id', '')
+        if collaborator_user_id:
+            prompt = "[来自群成员 %s] %s" % (collaborator_user_id, prompt)
+            logger.info("[feishu] Collaborator route to session (%s): session_id=%s, collaborator=%s, prompt=%s",
+                        route_source, route_info['session_id'], collaborator_user_id, _sanitize_user_content(prompt))
+        else:
+            logger.info("[feishu] Route to session (%s): session_id=%s, prompt=%s",
+                        route_source, route_info['session_id'], _sanitize_user_content(prompt))
         # 刷新群聊活跃时间（供自动解散空闲判断）
         if route_source == SessionFacade.RouteSource.GROUP_CHAT:
             from services.group_session_store import GroupSessionStore
@@ -474,6 +537,11 @@ def _handle_message_event(data: dict):
                                (binding, route_info['session_id'],
                                 route_info['project_dir'], prompt,
                                 chat_id, message_id))
+        return
+
+    # 协作者未路由到 session：群内无活跃 session，静默忽略
+    if binding.get('_collaborator_user_id'):
+        logger.debug("[feishu] Collaborator message ignored: no active session in chat=%s", chat_id)
         return
 
     # 未路由到已有 session：走默认聊天目录 / 使用提示
@@ -657,13 +725,33 @@ def _handle_command(data: dict, command: str, args: str):
     """
     from config import FEISHU_OWNER_ID as gateway_owner_id
 
-    # 统一获取事件信息
+    # 统一获取事件信息（协作者场景下 _effective_binding 已由 _handle_message_event 前置注入）
     event = data.get('event', {})
     message = event.get('message', {})
     chat_id = message.get('chat_id', '')
     message_id = message.get('message_id', '')
     binding = _get_binding_from_event(event)
-    owner_id = binding.get('_owner_id', '') if binding else ''
+    if not binding:
+        return
+
+    owner_id = binding.get('_owner_id', '')
+
+    # 协作者命令处理（身份已由 _handle_message_event 前置判定）
+    # - 白名单命令（如 /clear）→ 用 owner binding 操作 owner 的 session
+    # - 非白名单命令 → 恢复原始 binding 操作自己的 session；未注册用户无原始 binding 则拒绝
+    if binding.get('_collaborator_user_id'):
+        if command not in _COLLABORATOR_ALLOWED_COMMANDS:
+            original_binding = binding.get('_original_binding')
+            if original_binding:
+                # 已注册用户：恢复自己的 binding，以自己的身份执行命令
+                binding = original_binding
+                owner_id = binding.get('_owner_id', '')
+                event.pop('_effective_binding', None)
+            else:
+                # 未注册用户：无自己的 binding，拒绝
+                _run_in_background(_send_notice_message,
+                                   (chat_id, "协作者暂不支持此命令，仅会话创建者可执行管理操作。", message_id))
+                return
 
     handler_info = _COMMANDS.get(command)
     if handler_info:
@@ -1146,6 +1234,11 @@ def _get_binding_from_event(feishu_event: Dict[str, Any]) -> Optional[Dict[str, 
     Returns:
         绑定信息字典（包含 auth_token, callback_url, _owner_id 等），未找到返回 None。
     """
+    # 协作者模式：上游已注入 owner binding，优先使用
+    effective = feishu_event.get('_effective_binding')
+    if effective:
+        return effective
+
     from services.binding_store import BindingStore
 
     binding_store = BindingStore.get_instance()
@@ -2558,6 +2651,7 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     default_chat_follow_thread = value.get('default_chat_follow_thread', True)
     group_name_prefix = value.get('group_name_prefix')
     group_dissolve_days = value.get('group_dissolve_days')
+    group_allow_cowork = value.get('group_allow_cowork')
 
     # WebSocket 模式
     if mode == 'ws':
@@ -2573,7 +2667,8 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
                 default_chat_dir=default_chat_dir,
                 default_chat_follow_thread=default_chat_follow_thread,
                 group_name_prefix=group_name_prefix,
-                group_dissolve_days=group_dissolve_days
+                group_dissolve_days=group_dissolve_days,
+                group_allow_cowork=group_allow_cowork
             )
         elif action == 'deny_register':
             logger.info("[feishu] WS registration denied: owner_id=%s, request_id=%s", owner_id, request_id)
@@ -2603,7 +2698,8 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             default_chat_dir=default_chat_dir,
             default_chat_follow_thread=default_chat_follow_thread,
             group_name_prefix=group_name_prefix,
-            group_dissolve_days=group_dissolve_days
+            group_dissolve_days=group_dissolve_days,
+            group_allow_cowork=group_allow_cowork
         )
     elif action == 'deny_register':
         logger.info("[feishu] Registration denied: owner_id=%s", owner_id)

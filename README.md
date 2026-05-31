@@ -18,7 +18,7 @@
 - **多 Agent 支持** - 同一服务可同时启用 Claude Code 和 OpenAI Codex
 - **任务完成通知** - 处理完成后自动发送响应摘要和会话标识
 - **优雅降级** - 回调服务不可用时自动降级为仅通知模式
-- **权限持久化** - "始终允许"自动写入项目权限规则
+- **权限持久化** - "始终允许"按 Agent 持久化规则（Claude `updatedPermissions`，Codex `prefix_rule`）
 
 ### 项目组件
 
@@ -58,27 +58,47 @@ code-anywhere/
 │   │   ├── config.py           # 配置管理
 │   │   ├── socket_client.py    # Socket 客户端
 │   │   ├── models/             # 数据模型
+│   │   ├── agents/             # Agent 适配层
+│   │   │   ├── __init__.py     # AgentAdapter 基类、工厂、共享启动逻辑
+│   │   │   ├── claude.py       # Claude Code CLI 适配器
+│   │   │   └── codex.py        # OpenAI Codex CLI 适配器
 │   │   ├── services/           # 业务服务
 │   │   │   ├── request_manager.py   # 请求管理器
 │   │   │   ├── decision_handler.py  # 决策处理器
-│   │   │   ├── rule_writer.py       # 权限规则写入
+│   │   │   ├── codex_rule_writer.py # Codex 权限规则写入
+│   │   │   ├── session_facade.py    # 会话操作门面
 │   │   │   ├── message_session_store.py # Message-Session 映射存储
 │   │   │   ├── session_chat_store.py   # Session-Chat 映射存储
 │   │   │   ├── binding_store.py     # 群聊绑定存储
+│   │   │   ├── group_chat_store.py  # 群聊会话存储（group 模式）
+│   │   │   ├── group_session_store.py # 群聊 Session 存储（group 模式）
 │   │   │   ├── directory_store.py   # 目录使用记录存储
+│   │   │   ├── card_cache.py        # 卡片消息缓存
 │   │   │   ├── auto_register.py     # 网关注册服务
 │   │   │   ├── auth_token.py        # 认证令牌管理
 │   │   │   ├── auth_token_store.py  # 认证令牌存储
 │   │   │   ├── feishu_api.py        # 飞书 API 封装
-│   │   │   └── feishu_longpoll.py   # 飞书 WebSocket 长连接服务
-│   │   └── handlers/           # HTTP 处理器
-│   │       ├── http_handler.py # HTTP 请求处理器（GET/POST 路由分发）
-│   │       ├── callback.py     # 权限回调处理器
-│   │       ├── feishu.py       # 飞书事件处理器（OpenAPI 网关）
-│   │       ├── agent.py        # Agent 会话处理器（新建/继续）
-│   │       ├── register.py     # 网关注册处理器
-│   │       ├── permission_mcp.py # MCP 权限审批服务（headless 模式）
-│   │       └── utils.py        # 处理器通用工具函数
+│   │   │   ├── feishu_longpoll.py   # 飞书 WebSocket 长连接服务
+│   │   │   ├── ws_protocol.py       # WebSocket 协议封装
+│   │   │   ├── ws_registry.py       # WebSocket 连接注册
+│   │   │   └── ws_tunnel_client.py  # WebSocket 隧道客户端
+│   │   ├── handlers/           # HTTP 处理器
+│   │   │   ├── http_handler.py # HTTP 请求处理器（GET/POST 路由分发）
+│   │   │   ├── callback.py     # 权限回调处理器
+│   │   │   ├── feishu.py       # 飞书事件处理器（OpenAPI 网关）
+│   │   │   ├── agent.py        # Agent 会话处理器（新建/继续）
+│   │   │   ├── register.py     # 网关注册处理器
+│   │   │   ├── ws_handler.py   # WebSocket 连接处理器
+│   │   │   ├── permission_mcp.py # MCP 权限审批服务（headless 模式）
+│   │   │   └── utils.py        # 处理器通用工具函数
+│   │   ├── telemetry/          # 遥测服务
+│   │   │   ├── client.py       # 遥测数据上报客户端
+│   │   │   ├── client_id.py    # 匿名客户端 ID 管理
+│   │   │   ├── handler.py      # 遥测事件处理
+│   │   │   ├── store.py        # 遥测数据存储
+│   │   │   └── utils.py        # 遥测工具函数
+│   │   └── utils/              # 通用工具
+│   │       └── ttl_cache.py    # TTL 缓存
 │   ├── config/                 # 配置文件
 │   │   └── tools.json          # 工具类型配置
 │   ├── templates/              # 飞书卡片模板
@@ -100,11 +120,18 @@ code-anywhere/
 │   │   └── DEPLOYMENT_WEBHOOK.md
 │   ├── design/                 # 架构设计
 │   │   ├── FEISHU_SESSION_CONTINUE.md
+│   │   ├── FEISHU_THREAD_REPLY.md
 │   │   ├── GATEWAY_AUTH.md
-│   │   └── SECURITY_ANALYSIS.md
+│   │   ├── SECURITY_ANALYSIS.md
+│   │   ├── CODEX_VS_CLAUDE.md
+│   │   ├── CODEX_PERMISSION_INVESTIGATION.md
+│   │   ├── ACP_ONESHOT_CLIENT.md
+│   │   ├── INTERACTIVE_CLAUDE_SESSION_INVESTIGATION.md
+│   │   └── PERMISSION_PROMPT_TOOL.md
 │   └── reference/              # 参考资料
 │       ├── CLAUDE_CODE_HOOKS.md
-│       └── CODE_REVIEW.md
+│       ├── CODE_REVIEW.md
+│       └── USER_GUIDE.md
 ├── test/                       # 测试脚本
 ├── runtime/                    # 运行时数据（session 映射等）
 └── log/                        # 日志目录
@@ -118,11 +145,11 @@ code-anywhere/
 
 ```bash
 # 单机模式
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --app-id=cli_xxx --app-secret=xxx --owner-id=<用户ID>
 
 # 分离模式（连接远程网关）
-curl -fsSL https://raw.githubusercontent.com/frankie-huang/claude-anywhere/main/setup.sh | \
+curl -fsSL https://raw.githubusercontent.com/frankie-huang/code-anywhere/main/setup.sh | \
   bash -s -- --gateway-url=ws://gateway:8080 --owner-id=<用户ID>
 ```
 
@@ -302,7 +329,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 ### 权限控制
 - **可交互权限控制**: 用户可直接在飞书消息中点击按钮批准/拒绝权限请求
 - **四种操作模式**: 批准运行、始终允许、拒绝运行、拒绝并中断
-- **权限持久化**: 支持"始终允许"选项，自动写入项目权限规则
+- **权限持久化**: 支持"始终允许"选项；Claude 通过官方 `updatedPermissions` 应用规则，Codex 追加 `prefix_rule(...)` 到 `$CODEX_HOME/rules/default.rules`
 - **多工具支持**: 支持 Bash、Edit、Write、Read、Glob、Grep、WebSearch、WebFetch、ExitPlanMode 等 Agent 工具
 
 ### 会话继续（OpenAPI 模式）
@@ -367,7 +394,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | 脚本 | 用途 | Hook 类型 |
 |------|------|-----------|
 | `setup.sh` | 一键安装、服务管理、更新 | - |
-| `src/hook-router.sh` | Hook 统一入口（配置到 Claude Code） | 所有 Hook 事件 |
+| `src/hook-router.sh` | Hook 统一入口（配置到 Agent CLI） | 所有 Hook 事件 |
 | `src/hooks/user_prompt.sh` | 用户 Prompt 同步到飞书 | UserPromptSubmit |
 | `src/hooks/permission.sh` | 权限请求处理（可交互） | PermissionRequest |
 | `src/hooks/stop.sh` | 任务完成通知（含响应摘要） | Stop |
@@ -403,7 +430,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 |------|------|
 | `request_manager.py` | 请求管理器（注册、查询、超时处理） |
 | `decision_handler.py` | 决策处理器（通过 Socket 返回决策） |
-| `rule_writer.py` | 权限规则写入器（"始终允许"功能） |
+| `codex_rule_writer.py` | Codex 权限规则写入器（`prefix_rule`） |
 | `message_session_store.py` | Message-Session 映射存储（message_id → session） |
 | `session_chat_store.py` | Session-Chat 映射存储（session_id → chat_id） |
 | `binding_store.py` | 网关注册绑定存储（owner_id → callback_url + auth_token） |
@@ -482,9 +509,11 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 ./src/start-server.sh
 ```
 
-#### 3. 配置 Claude Code Hooks
+#### 3. 配置 Agent Hooks
 
-在 `~/.claude/settings.json` 中添加：
+> 使用 `./setup.sh init` 安装时会自动配置，以下仅供手动配置参考。
+
+**Claude Code**（`~/.claude/settings.json`）：
 
 ```json
 {
@@ -526,6 +555,29 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 ```
 
 > **注意**：PermissionRequest hook 的 `timeout`（秒）建议配置为大于服务端 `PERMISSION_REQUEST_TIMEOUT`（默认值见 `.env.example`）的值，确保服务端超时先触发，避免 hook 被 Claude Code 强制终止。上例配置为 660 秒。
+
+**Codex**（`~/.codex/config.toml`）：
+
+```toml
+[[hooks.UserPromptSubmit]]
+
+  [[hooks.UserPromptSubmit.hooks]]
+    type = "command"
+    command = "/path/to/code-anywhere/src/hook-router.sh"
+
+[[hooks.Stop]]
+
+  [[hooks.Stop.hooks]]
+    type = "command"
+    command = "/path/to/code-anywhere/src/hook-router.sh"
+
+[[hooks.PermissionRequest]]
+
+  [[hooks.PermissionRequest.hooks]]
+    type = "command"
+    command = "/path/to/code-anywhere/src/hook-router.sh"
+    timeout = 660
+```
 
 ### 环境变量
 
@@ -657,12 +709,22 @@ FEISHU_OWNER_ID=ou_admin_user
 | `CALLBACK_SERVER_URL` | 回调服务外部访问地址（所有模式建议配置） | `http://localhost:8080` |
 | `CALLBACK_SERVER_PORT` | HTTP 服务端口 | 8080 |
 
-#### 四、通知与交互行为
+#### 四、会话与消息行为
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `FEISHU_SESSION_MODE` | 会话模式：`message`=普通消息、`thread`=话题模式、`group`=群聊模式（需 im:chat 权限） | `message` |
+| `FEISHU_GROUP_NAME_PREFIX` | group 模式下群聊名称前缀 | `Agent` |
+| `FEISHU_GROUP_DISSOLVE_DAYS` | group 模式下群聊空闲自动解散天数（0=不自动解散） | `0` |
+| `FEISHU_GROUP_ALLOW_COWORK` | group 模式下群聊协作模式，开启后群内所有成员均可参与对话 | `false` |
+| `SESSION_EXPIRE_DAYS` | 会话过期天数（超期后继续对话会提示 /new） | `30` |
+
+#### 五、通知与交互行为
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `FEISHU_AT_USER` | 通知 @ 用户配置：空=@ `FEISHU_OWNER_ID`，`all`=@ 所有人，`off`=禁用 | 空 |
-| `FEISHU_REPLY_IN_THREAD` | 话题内回复模式：回复消息是否收进话题详情（仅 OpenAPI 模式） | `false` |
+| ~~`FEISHU_REPLY_IN_THREAD`~~ | **已废弃**，由 `FEISHU_SESSION_MODE=thread` 替代。仅为向后兼容保留 | `false` |
 | `PERMISSION_SOCKET_PATH` | Unix Socket 路径（PermissionRequest hook 与回调服务通信） | `/tmp/claude-permission.sock` |
 | `PERMISSION_REQUEST_TIMEOUT` | 权限请求服务端超时秒数（需为正整数，无效值回退默认值） | 600 |
 | `PERMISSION_NOTIFY_DELAY` | 权限通知延迟发送秒数 | 60 |
@@ -670,7 +732,15 @@ FEISHU_OWNER_ID=ou_admin_user
 | `STOP_THINKING_MAX_LENGTH` | Stop 事件思考过程最大长度（字符数，0 禁用） | 10000 |
 | `STOP_MESSAGE_MAX_LENGTH` | Stop 事件消息最大长度（字符数） | 10000 |
 
-#### 五、Agent 与会话配置
+#### 六、Hook 事件开关
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `HOOK_USER_PROMPT_ENABLED` | 控制 UserPrompt hook（用户 prompt 同步到飞书） | `true` |
+| `HOOK_PERMISSION_ENABLED` | 控制 Permission hook（关闭后回退到终端审批） | `true` |
+| `HOOK_STOP_ENABLED` | 控制 Stop hook（任务完成通知） | `true` |
+
+#### 七、Agent 与会话配置
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -720,7 +790,7 @@ DEFAULT_CHAT_DIR=/home/user/my-project
 `DEFAULT_CHAT_FOLLOW_THREAD` 控制默认聊天目录的回复是否收敛进话题：
 
 ```bash
-# 跟随全局配置（默认）- 若 FEISHU_REPLY_IN_THREAD=true，则回复收敛进话题
+# 跟随全局配置（默认）- 若 FEISHU_SESSION_MODE=thread，则回复收敛进话题
 DEFAULT_CHAT_FOLLOW_THREAD=true
 
 # 始终在主界面显示 - 回复不收敛进话题，适合即时通讯场景
@@ -729,7 +799,7 @@ DEFAULT_CHAT_FOLLOW_THREAD=false
 
 | 配置值 | 行为 |
 |--------|------|
-| `true`（默认） | 跟随 `FEISHU_REPLY_IN_THREAD` 全局配置 |
+| `true`（默认） | 跟随 `FEISHU_SESSION_MODE` 全局配置 |
 | `false` | 默认聊天目录的回复始终在群聊主界面显示 |
 
 **多命令配置**
@@ -755,7 +825,7 @@ CODEX_COMMAND=[codex, codex --model gpt-5]
 - `/reply --cmd=opus prompt` — 回复消息时指定 Command（仅在回复消息时可用）
 - 每个 session 会记忆最近使用的 Command，后续回复自动复用
 
-#### 六、VSCode 集成（可选，以下两种模式二选一）
+#### 八、VSCode 集成（可选，以下两种模式二选一）
 
 | 模式 | 变量 | 说明 | 默认值 |
 |------|------|------|--------|
@@ -820,7 +890,7 @@ brew install python3 curl jq socat
 1. Agent 发起权限请求
 2. `src/hooks/permission.sh` 发送飞书交互卡片（4 个按钮）：
    - **批准运行** - 允许这一次执行
-   - **始终允许** - 允许并写入规则
+   - **始终允许** - 允许并记住规则
    - **拒绝运行** - 拒绝，Agent 可继续尝试其他方式
    - **拒绝并中断** - 拒绝并停止当前任务
 3. 用户点击按钮，决策通过 Unix Socket 返回给触发请求的 Agent
