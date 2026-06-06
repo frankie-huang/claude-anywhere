@@ -8,9 +8,9 @@ Codex 使用 `codex exec` 子命令进行非交互执行，通过 `--json`
 import json
 import logging
 import shlex
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from agents import AgentAdapter, expand_template
+from agents import AgentAdapter, SlashCommandInfo, expand_template
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ class CodexAdapter(AgentAdapter):
     def session_id_capture_timeout(self) -> int:
         """Codex 首条 JSONL 事件等待时间"""
         return 10
+
+    def get_slash_commands(self) -> Dict[str, SlashCommandInfo]:
+        """Codex headless 模式（codex exec）不支持斜杠命令"""
+        return {}
 
     def get_commands(self) -> List[str]:
         """获取 Codex 可用命令列表"""

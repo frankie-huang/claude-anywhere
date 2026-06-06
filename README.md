@@ -918,9 +918,15 @@ brew install python3 curl jq socat
 | `/new --dir=/path prompt` | 直接指定目录和提示词创建会话 |
 | `/new --cmd=1 --dir=/path prompt` | 指定 Agent Command（按索引或名称子串） |
 | `/reply --cmd=opus prompt` | 回复消息时指定 Command 继续会话 |
+| `/init` | 为当前项目生成 CLAUDE.md 配置文件（Agent 指令） |
+| `/compact` | 压缩当前会话的上下文窗口（Agent 指令） |
+| `/context` | 查看当前会话的 token 用量分布（Agent 指令） |
+| `/review` | 对当前工作区的代码变更进行审查（Agent 指令） |
+| `/simplify` | 审查变更代码的复用、质量和效率（Agent 指令） |
 
 - `/reply` 仅在回复消息时可用，用于临时切换 Command 继续会话
 - 未指定 `--cmd` 时，使用 session 记忆的 Command 或默认命令
+- Agent 指令由框架转发给 Agent 执行，各 Agent 支持的完整指令见 `/help` 卡片
 
 ## 日志
 

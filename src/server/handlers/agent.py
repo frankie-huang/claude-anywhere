@@ -10,15 +10,16 @@ agent 协议层（命令构建、进程启动/监控）已迁移至 agents/ 模�
 import logging
 import os
 import uuid
-from typing import Tuple, Dict, Any
+from typing import Callable, Optional, Tuple, Dict, Any
 
-from agents import launch_agent, get_agent_adapter
+from agents import AgentAdapter, launch_agent, get_agent_adapter
 from services.session_chat_store import SessionChatStore
 
 logger = logging.getLogger(__name__)
 
 # 通知消息最大长度
-MAX_NOTIFICATION_LENGTH = 500
+MAX_ERROR_NOTIFICATION_LENGTH = 500
+MAX_COMPLETE_OUTPUT_LENGTH = 10000  # 完成通知输出最大长度（/compact、/context 等）
 
 
 class Response:
@@ -123,6 +124,9 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             '无效的命令 "%s"，%s 可用命令: %s' % (command, adapter.display_name, available),
             agent_type=adapter.agent_type)
 
+    # 斜杠命令检测：从 prompt 解析，匹配 adapter 声明的命令时走框架路径
+    on_complete = _resolve_slash_command_callback(adapter, prompt)
+
     # Command 优先级: 请求指定 > session 记录 > 默认
     if not command:
         command = session_data.get('command', '')
@@ -147,6 +151,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
         adapter, session_id, project_dir, prompt,
         chat_id, message_id, session_mode='resume',
         command_name=actual_cmd,
+        on_complete=on_complete,
         on_error=_send_error_notification)
     return result
 
@@ -214,6 +219,10 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         return Response.error(
             '无效的命令 "%s"，%s 可用命令: %s' % (command, adapter.display_name, available),
             agent_type=adapter.agent_type)
+
+    # 斜杠命令检测：从 prompt 解析，匹配 adapter 声明的命令时走框架路径
+    on_complete = _resolve_slash_command_callback(adapter, prompt)
+
     actual_cmd = adapter.resolve_command(command)
     logger.info("[%s-new] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
                 adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
@@ -255,8 +264,38 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         adapter, session_id, project_dir, prompt,
         chat_id, message_id, session_mode='new',
         command_name=actual_cmd,
+        on_complete=on_complete,
         on_error=_send_error_notification)
     return result
+
+
+# =============================================
+# 斜杠命令辅助
+# =============================================
+
+
+def _resolve_slash_command_callback(adapter: AgentAdapter, prompt: str) -> Optional[Callable]:
+    """从 prompt 解析斜杠命令，返回 on_complete 回调或 None
+
+    注意：本函数仅决定通知策略，不影响 prompt 透传。无论是否匹配，
+    prompt 都会原样发送给 agent 进程，命令执行由 agent CLI 自行处理。
+
+    如果 prompt 以 / 开头且命令名匹配 adapter 声明的斜杠命令：
+    - triggers_stop_hook=False → 返回 _send_complete_notification（框架手动通知）
+    - triggers_stop_hook=True  → 返回 None（stop hook 自动通知）
+    不匹配时返回 None，prompt 作为普通消息透传给 agent。
+    """
+    if not prompt.startswith('/'):
+        return None
+    parts = prompt[1:].split(None, 1)
+    if not parts:
+        return None
+    cmd_info = adapter.get_slash_commands().get(parts[0])
+    if cmd_info is None:
+        return None
+    if not cmd_info.triggers_stop_hook:
+        return _send_complete_notification
+    return None
 
 
 # =============================================
@@ -264,18 +303,21 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
 # =============================================
 
 
-def _send_error_notification(agent_type: str, chat_id: str, message_id: str, error_msg: str):
+def _send_error_notification(agent_type: str, chat_id: str, message_id: str,
+                             session_id: str, error_msg: str):
     """发送错误通知到飞书
 
     截断过长的错误消息，防止飞书消息超限。
+    同时清理 session 状态（skip_next_user_prompt、last_message_id）。
 
     Args:
         agent_type: agent 类型标识（用于展示正确产品名）
         chat_id: 群聊 ID
         message_id: 要回复的消息 ID（为空时降级为普通消息）
+        session_id: 会话 ID（用于更新 session 状态）
         error_msg: 错误消息
     """
-    from handlers.utils import reply_feishu_text
+    from handlers.utils import remove_feishu_typing, reply_feishu_text
 
     try:
         adapter = get_agent_adapter(agent_type or None)
@@ -283,13 +325,83 @@ def _send_error_notification(agent_type: str, chat_id: str, message_id: str, err
         logger.warning("Unknown agent_type for error notification: %s", agent_type)
         adapter = get_agent_adapter()
 
-    truncated = error_msg[:MAX_NOTIFICATION_LENGTH] if len(error_msg) > MAX_NOTIFICATION_LENGTH else error_msg
+    # 移除原消息上的 Typing 表情
+    remove_feishu_typing(message_id)
+
+    truncated = error_msg[:MAX_ERROR_NOTIFICATION_LENGTH] if len(error_msg) > MAX_ERROR_NOTIFICATION_LENGTH else error_msg
     text = f"❌ {adapter.display_name} 执行异常:\n{truncated}"
-    success, result = reply_feishu_text(chat_id, message_id, text)
+    success, sent_id = reply_feishu_text(chat_id, message_id, text)
     if success:
         logger.info("[%s] Sent error notification to %s", adapter.agent_type, chat_id)
     else:
-        logger.error("[%s] Failed to send error notification: %s", adapter.agent_type, result)
+        logger.error("[%s] Failed to send error notification: %s", adapter.agent_type, sent_id)
+
+    # 更新 session 状态（无论通知是否发送成功都需清理，避免状态残留）
+    session_store = SessionChatStore.get_instance()
+    if session_store and session_id:
+        # 清除残留的 skip_next_user_prompt（进程失败不触发 stop hook，无法自然消费）
+        session_store.check_and_clear_skip_user_prompt(session_id)
+        # 更新 last_message_id
+        if success and sent_id:
+            session_store.set_last_message_id(session_id, sent_id)
+            logger.info("[%s] Updated last_message_id: %s -> %s",
+                        adapter.agent_type, session_id, sent_id)
+
+
+def _send_complete_notification(agent_type: str, chat_id: str, message_id: str,
+                                session_id: str, output: str):
+    """发送透传命令完成通知到飞书
+
+    用于无 stop hook 的透传命令（如 /compact），进程成功完成时通知用户。
+    负责：移除 Typing 表情、发送完成文案、更新 last_message_id。
+
+    Args:
+        agent_type: agent 类型标识
+        chat_id: 群聊 ID
+        message_id: 要回复的消息 ID（用户发送的消息，也是 Typing 所在消息）
+        session_id: 会话 ID（用于更新 last_message_id）
+        output: 命令输出内容（有内容时直接展示，为空时发送通用完成文案）
+    """
+    from handlers.utils import remove_feishu_typing, reply_feishu_text, reply_feishu_markdown
+
+    try:
+        adapter = get_agent_adapter(agent_type or None)
+    except ValueError:
+        adapter = get_agent_adapter()
+
+    log_prefix = '[%s]' % adapter.agent_type
+
+    # 移除原消息上的 Typing 表情
+    remove_feishu_typing(message_id)
+
+    # 回复完成文案：有输出时用卡片展示 markdown，无输出时发送纯文本完成提示
+    output = output.strip() if output else ''
+    if output and len(output) > MAX_COMPLETE_OUTPUT_LENGTH:
+        output = output[:MAX_COMPLETE_OUTPUT_LENGTH] + '\n\n...(内容过长，已截断)'
+    if output:
+        success, sent_id = reply_feishu_markdown(chat_id, message_id, output)
+        if not success:
+            # 卡片发送失败，降级为纯文本
+            logger.warning("%s Markdown card failed, fallback to text: %s", log_prefix, sent_id)
+            success, sent_id = reply_feishu_text(chat_id, message_id, output)
+    else:
+        text = f"✅ {adapter.display_name} 指令已完成"
+        success, sent_id = reply_feishu_text(chat_id, message_id, text)
+    if success:
+        logger.info("%s Sent complete notification to %s", log_prefix, chat_id)
+    else:
+        logger.error("%s Failed to send complete notification: %s", log_prefix, sent_id)
+
+    # 更新 session 状态（无论通知是否发送成功都需清理，避免状态残留）
+    session_store = SessionChatStore.get_instance()
+    if session_store and session_id:
+        # 清除残留的 skip_next_user_prompt（透传命令不触发 stop hook，无法自然消费）
+        session_store.check_and_clear_skip_user_prompt(session_id)
+        # 更新 last_message_id
+        if success and sent_id:
+            session_store.set_last_message_id(session_id, sent_id)
+            logger.info("%s Updated last_message_id: %s -> %s",
+                        log_prefix, session_id, sent_id)
 
 
 def _send_unmute_notification(chat_id: str, session_id: str, message_id: str = ''):

@@ -21,8 +21,36 @@ STARTUP_TIMEOUT_SECONDS = 30   # 后台启动阶段等待时间（秒），兜�
 STARTUP_CHECK_SECONDS = 2      # 启动检查等待时间（秒）
 MAX_LOG_LENGTH = 500           # 日志最大长度
 
-# on_error 回调类型: (agent_type, chat_id, message_id, error_msg) -> None
-ErrorCallback = Optional[Callable[[str, str, str, str], None]]
+# on_error 回调类型: (agent_type, chat_id, message_id, session_id, error_msg) -> None
+ErrorCallback = Optional[Callable[[str, str, str, str, str], None]]
+# on_complete 回调类型: (agent_type, chat_id, message_id, session_id, output) -> None
+CompleteCallback = Optional[Callable[[str, str, str, str, str], None]]
+
+
+# =============================================
+# 斜杠命令元信息
+# =============================================
+
+
+class SlashCommandInfo(object):
+    """Agent 斜杠命令元信息
+
+    描述一个 Agent 在 headless 模式下支持的斜杠命令及其属性。
+    框架根据 triggers_stop_hook 决定是否需要手动发送完成通知。
+
+    Attributes:
+        triggers_stop_hook: 命令执行后 Agent 是否产生输出触发 stop hook。
+            True  = 有输出，stop hook 自动通知
+            False = 无输出，框架手动发完成通知并清理状态（如 /compact、/context）
+        brief: 简短描述（用于 /help 卡片展示）
+        examples: 示例列表，每项为 (示例命令, 说明) 元组
+    """
+
+    def __init__(self, triggers_stop_hook: bool, brief: str,
+                 examples: Optional[List[Tuple[str, str]]] = None) -> None:
+        self.triggers_stop_hook = triggers_stop_hook
+        self.brief = brief
+        self.examples = examples or []
 
 
 # =============================================
@@ -163,6 +191,17 @@ class AgentAdapter(ABC):
         """
         return base_env
 
+    def get_slash_commands(self) -> Dict[str, SlashCommandInfo]:
+        """声明该 Agent 在 headless 模式下支持的斜杠命令
+
+        子类覆盖此方法来声明自己支持的命令及其属性。
+        默认返回空字典，表示不支持任何斜杠命令。
+
+        Returns:
+            命令名 -> SlashCommandInfo 的映射，如 {'compact': SlashCommandInfo(...)}
+        """
+        return {}
+
 
 # =============================================
 # 共享工具函数
@@ -295,6 +334,7 @@ def get_shell() -> str:
 def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
                  prompt: str, chat_id: str = '', message_id: str = '',
                  session_mode: str = 'resume', command_name: str = '',
+                 on_complete: CompleteCallback = None,
                  on_error: ErrorCallback = None) -> Tuple[bool, Dict[str, Any]]:
     """构建命令、启动 agent 进程并检查初始状态
 
@@ -309,7 +349,8 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
         message_id: 用户消息 ID（用于回复式通知）
         session_mode: 会话模式，'resume' 继续会话，'new' 新建会话
         command_name: 指定使用的命令（可选，为空时使用默认）
-        on_error: 错误通知回调 (agent_type, chat_id, message_id, error_msg) -> None
+        on_complete: 成功完成回调 (agent_type, chat_id, message_id, session_id, output) -> None
+        on_error: 错误通知回调 (agent_type, chat_id, message_id, session_id, error_msg) -> None
 
     Returns:
         (success, response): 成功时 response 包含 session_id（Codex 路径可能已 rename 为真实 ID）
@@ -377,7 +418,8 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
     startup_wait = 0 if did_capture else STARTUP_CHECK_SECONDS
     return _check_and_monitor(
         proc, agent_type, session_id, chat_id, message_id,
-        on_error, startup_wait=startup_wait)
+        startup_wait=startup_wait,
+        on_complete=on_complete, on_error=on_error)
 
 
 # =============================================
@@ -489,8 +531,9 @@ def _rename_session_in_store(old_id: str, new_id: str,
 def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
                        session_id: str, chat_id: str = '',
                        message_id: str = '',
-                       on_error: ErrorCallback = None,
-                       startup_wait: float = 0) -> Tuple[bool, Dict[str, Any]]:
+                       startup_wait: float = 0,
+                       on_complete: CompleteCallback = None,
+                       on_error: ErrorCallback = None) -> Tuple[bool, Dict[str, Any]]:
     """检查进程状态并决定是否进入后台监控
 
     统一处理 Claude（等待 startup_wait 秒）和 Codex（session ID 捕获后
@@ -505,8 +548,9 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
         session_id: 会话 ID（已经过 rename，为最终值）
         chat_id: 群聊 ID（用于异常通知）
         message_id: 用户消息 ID（用于回复式通知）
-        on_error: 错误通知回调
         startup_wait: 等待进程退出的秒数（0 = 非阻塞 poll）
+        on_complete: 成功完成回调（用于无 stop hook 的透传命令如 /compact）
+        on_error: 错误通知回调
 
     Returns:
         (success, response): 成功时 response 包含 session_id
@@ -529,7 +573,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
         logger.info("%s Command is running in background", log_prefix)
         run_in_background(
             _monitor_startup,
-            (proc, agent_type, session_id, chat_id, message_id, on_error))
+            (proc, agent_type, session_id, chat_id, message_id, on_complete, on_error))
         return True, {'status': 'processing', 'session_id': session_id,
                       'agent_type': agent_type}
 
@@ -537,6 +581,15 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
     returncode = proc.returncode
     if returncode == 0:
         logger.info("%s Command completed quickly", log_prefix)
+        if chat_id and on_complete:
+            # 由 on_complete 回调统一处理通知和状态清理（如 /compact），
+            # 网关侧无需再发通知
+            run_in_background(on_complete,
+                              (agent_type, chat_id, message_id, session_id,
+                               (stdout or '')))
+            return True, {'status': 'completed', 'session_id': session_id,
+                          'agent_type': agent_type,
+                          'notification_handled': True}
         return True, {'status': 'completed', 'session_id': session_id,
                       'agent_type': agent_type,
                       'output': (stdout or '')[:MAX_LOG_LENGTH * 2]}
@@ -546,6 +599,9 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
             error_msg = f"命令执行失败，退出码: {returncode}"
         logger.warning("%s Command failed with exit code %s: %s",
                        log_prefix, returncode, error_msg)
+        if chat_id and on_error:
+            run_in_background(on_error,
+                              (agent_type, chat_id, message_id, session_id, error_msg))
         return False, {'error': error_msg, 'agent_type': agent_type}
 
 
@@ -557,6 +613,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
 def _monitor_startup(proc: subprocess.Popen, agent_type: str,
                      session_id: str, chat_id: str = '',
                      message_id: str = '',
+                     on_complete: CompleteCallback = None,
                      on_error: ErrorCallback = None) -> None:
     """后台短暂等待，捕获启动阶段的延迟失败
 
@@ -569,6 +626,7 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
         session_id: 会话 ID
         chat_id: 群聊 ID（用于异常通知）
         message_id: 用户消息 ID（用于回复式通知）
+        on_complete: 成功完成回调
         on_error: 错误通知回调
     """
     log_prefix = '[%s]' % agent_type
@@ -580,6 +638,9 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
             if stdout:
                 logger.debug("%s stdout: %s...", log_prefix,
                              stdout[:MAX_LOG_LENGTH])
+            if chat_id and on_complete:
+                on_complete(agent_type, chat_id, message_id, session_id,
+                            stdout or '')
         else:
             error_summary = (stderr.strip()[:MAX_LOG_LENGTH]
                              if stderr.strip() else '(无错误输出)')
@@ -588,7 +649,7 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
                 log_prefix, proc.returncode, session_id, error_summary)
             if chat_id and on_error:
                 error_msg = stderr.strip() or f"{agent_type} 进程异常退出 (code={proc.returncode})"
-                on_error(agent_type, chat_id, message_id, error_msg)
+                on_error(agent_type, chat_id, message_id, session_id, error_msg)
     except subprocess.TimeoutExpired:
         logger.info(
             "%s Process still running after %ss, session: %s "
@@ -596,19 +657,20 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
             log_prefix, STARTUP_TIMEOUT_SECONDS, session_id)
         threading.Thread(
             target=_monitor_detached,
-            args=(proc, agent_type, session_id, chat_id, message_id, on_error),
+            args=(proc, agent_type, session_id, chat_id, message_id, on_complete, on_error),
             daemon=True
         ).start()
     except Exception as e:
         logger.error("%s Execution error: %s, session: %s",
                      log_prefix, e, session_id)
         if chat_id and on_error:
-            on_error(agent_type, chat_id, message_id, str(e))
+            on_error(agent_type, chat_id, message_id, session_id, str(e))
 
 
 def _monitor_detached(proc: subprocess.Popen, agent_type: str,
                       session_id: str, chat_id: str = '',
                       message_id: str = '',
+                      on_complete: CompleteCallback = None,
                       on_error: ErrorCallback = None) -> None:
     """后台持续读取 pipe 并等待子进程退出，失败时通过 on_error 通知
 
@@ -621,6 +683,7 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
         session_id: 会话 ID
         chat_id: 群聊 ID（用于异常通知）
         message_id: 用户消息 ID（用于回复式通知）
+        on_complete: 成功完成回调
         on_error: 错误通知回调
     """
     log_prefix = '[%s]' % agent_type
@@ -647,6 +710,12 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
         if returncode == 0:
             logger.info("%s Detached process completed successfully, session: %s",
                         log_prefix, session_id)
+            if stdout_tail:
+                logger.debug("%s stdout: %s...", log_prefix,
+                             stdout_tail[:MAX_LOG_LENGTH])
+            if chat_id and on_complete:
+                on_complete(agent_type, chat_id, message_id, session_id,
+                            stdout_tail or '')
         else:
             error_output = stderr_tail or stdout_tail
             logger.warning(
@@ -655,10 +724,12 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
                 error_output[:MAX_LOG_LENGTH])
             if chat_id and on_error:
                 error_msg = error_output or f"{agent_type} 进程异常退出 (code={returncode})"
-                on_error(agent_type, chat_id, message_id, error_msg)
+                on_error(agent_type, chat_id, message_id, session_id, error_msg)
     except Exception as e:
         logger.error("%s Error waiting for detached process: %s, session: %s",
                      log_prefix, e, session_id)
+        if chat_id and on_error:
+            on_error(agent_type, chat_id, message_id, session_id, str(e))
 
 
 # =============================================

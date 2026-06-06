@@ -23,7 +23,7 @@ from urllib.parse import urlparse, parse_qs
 
 from services.auth_token import verify_owner_based_auth_token
 from handlers.feishu import (handle_feishu_request, handle_send_message,
-                             handle_create_group)
+                             handle_create_group, handle_remove_reaction)
 from handlers.register import handle_register_request
 from handlers.utils import send_json, send_html_response
 from handlers.ws_handler import handle_ws_tunnel
@@ -156,6 +156,14 @@ class HttpRequestHandler(BaseHTTPRequestHandler):
             if binding is None:
                 return
             handled, response = handle_create_group(binding, data)
+            send_json(self, 200 if response.get('success') else 400, response)
+            return
+
+        if path == '/gw/feishu/remove-reaction':
+            binding = verify_owner_based_auth_token(self, data, '/gw/feishu/remove-reaction')
+            if binding is None:
+                return
+            handled, response = handle_remove_reaction(binding, data)
             send_json(self, 200 if response.get('success') else 400, response)
             return
 

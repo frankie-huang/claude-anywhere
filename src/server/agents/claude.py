@@ -11,7 +11,7 @@ import shlex
 import sys
 from typing import Dict, List
 
-from agents import AgentAdapter, expand_template
+from agents import AgentAdapter, SlashCommandInfo, expand_template
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,43 @@ class ClaudeAdapter(AgentAdapter):
         """获取 Claude 可用命令列表"""
         from config import get_claude_commands
         return get_claude_commands()
+
+    def get_slash_commands(self) -> Dict[str, SlashCommandInfo]:
+        """Claude Code 在 --print 模式下支持的斜杠命令
+
+        已测试的命令分类（--print 模式）：
+        - 支持且已注册：/compact, /context, /review, /simplify, /init
+        - 不适用：/cost（费用统计为 per-process，headless 下始终为 0）
+        - 不支持（Unknown skill）：/model, /memory, /config, /doctor,
+          /bug, /login, /status, /commit, /pr-comments
+        """
+        return {
+            'init': SlashCommandInfo(
+                triggers_stop_hook=True,
+                brief='初始化 CLAUDE.md',
+                examples=[('/init', '为当前项目生成 CLAUDE.md 配置文件')],
+            ),
+            'compact': SlashCommandInfo(
+                triggers_stop_hook=False,
+                brief='压缩上下文',
+                examples=[('/compact', '压缩当前会话的上下文窗口，释放 token 空间')],
+            ),
+            'context': SlashCommandInfo(
+                triggers_stop_hook=False,
+                brief='查看上下文使用情况',
+                examples=[('/context', '查看当前会话的 token 用量分布')],
+            ),
+            'review': SlashCommandInfo(
+                triggers_stop_hook=True,
+                brief='代码审查',
+                examples=[('/review', '对当前工作区的代码变更进行审查')],
+            ),
+            'simplify': SlashCommandInfo(
+                triggers_stop_hook=True,
+                brief='代码精简审查',
+                examples=[('/simplify', '审查变更代码的复用、质量和效率并修复问题')],
+            ),
+        }
 
     def build_command_string(self, command_name: str, prompt: str,
                              session_id: str, session_mode: str,

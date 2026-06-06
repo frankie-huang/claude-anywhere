@@ -485,8 +485,10 @@ def _handle_message_event(data: dict):
             return
 
     # 检查是否是命令（优先处理，因为命令也可能是回复消息）
+    # Agent 斜杠命令（如 /compact）不由网关处理，作为普通消息转发给 Agent 执行
     is_command, command, args = _parse_command(text)
-    if is_command:
+    is_slash_cmd = is_command and command in _get_slash_commands()
+    if is_command and not is_slash_cmd:
         _handle_command(data, command, args)
         return
 
@@ -510,9 +512,11 @@ def _handle_message_event(data: dict):
 
     if SessionFacade.RouteSource.is_resolved(route_source):
         # 协作者：添加发送者前缀（binding 已替换为 owner 的，转发天然正确）
+        # Agent 斜杠命令不加前缀，否则 Agent 无法解析（如 /compact → "[来自群成员 xxx] /compact"）
         collaborator_user_id = binding.get('_collaborator_user_id', '')
         if collaborator_user_id:
-            prompt = "[来自群成员 %s] %s" % (collaborator_user_id, prompt)
+            if not is_slash_cmd:
+                prompt = "[来自群成员 %s] %s" % (collaborator_user_id, prompt)
             logger.info("[feishu] Collaborator route to session (%s): session_id=%s, collaborator=%s, prompt=%s",
                         route_source, route_info['session_id'], collaborator_user_id, _sanitize_user_content(prompt))
         else:
@@ -654,6 +658,11 @@ def _send_help_card(binding: Optional[Dict[str, Any]], chat_id: str,
     normal_rows = _build_cmd_rows(_COMMANDS, False)
     if normal_rows:
         elements.append(_wrap_section("**支持的指令**", normal_rows))
+
+    # Agent 斜杠指令（从各 adapter 的 get_slash_commands() 收集）
+    slash_cmd_rows = _build_cmd_rows(_slash_commands_as_help_dict(), False)
+    if slash_cmd_rows:
+        elements.append(_wrap_section("**Agent 指令**（转发给 Agent 执行）", slash_cmd_rows))
 
     # 管理员指令
     admin_rows = _build_cmd_rows(_COMMANDS, True)
@@ -1062,6 +1071,9 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
                                                               reply_in_thread=reply_in_thread)
 
     elif status == 'completed':
+        if response.get('notification_handled'):
+            # 通知已由 callback 侧的 on_complete 回调处理（如 /compact），网关无需再发
+            return
         # 快速完成
         output = response.get('output', '')
         message = f"✅ {agent_display} 已完成: {_sanitize_user_content(output, 50)}" if output else f"✅ {agent_display} 已完成"
@@ -3504,6 +3516,39 @@ def handle_send_message(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict
     return True, {'success': True, 'message_id': sent_message_id}
 
 
+def handle_remove_reaction(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict]:
+    """处理 /gw/feishu/remove-reaction 请求，移除消息上的表情回应
+
+    Args:
+        binding: 绑定信息（由调用方鉴权后传入）
+        data: 请求 JSON 数据
+            - message_id: 消息 ID（必需）
+            - emoji_type: 表情类型，如 "Typing"（必需）
+
+    Returns:
+        (handled, response): handled 始终为 True，response 包含结果
+    """
+    from services.feishu_api import FeishuAPIService
+
+    message_id = data.get('message_id', '') or ''
+    emoji_type = data.get('emoji_type', '') or ''
+
+    if not message_id:
+        return True, {'success': False, 'error': 'Missing message_id'}
+    if not emoji_type:
+        return True, {'success': False, 'error': 'Missing emoji_type'}
+
+    service = FeishuAPIService.get_instance()
+    if service is None or not service.enabled:
+        return True, {'success': False, 'error': 'Feishu API service not enabled'}
+
+    success, deleted_count = service.remove_reaction(message_id, emoji_type)
+    if success:
+        return True, {'success': True, 'deleted_count': deleted_count}
+    else:
+        return True, {'success': False, 'error': 'remove_reaction failed'}
+
+
 # 卡片状态更新时的 header 配置
 _CARD_STATUS_CONFIG = {
     'allow': {'template': 'green', 'title_suffix': ' - 已批准'},
@@ -4655,6 +4700,59 @@ _COMMANDS = {
         ("/help", "显示本帮助卡片"),
     ]),
 }
+
+# =============================================================================
+# Agent 斜杠命令（从各 adapter 动态收集，替代硬编码的透传命令列表）
+# =============================================================================
+
+_slash_commands_cache = None
+_slash_help_cache = None
+
+
+def _get_slash_commands():
+    """获取所有 Agent 斜杠命令（带缓存）
+
+    首次调用时从各 adapter 的 get_slash_commands() 收集并构建两份缓存：
+    - 路由用：命令名 -> SlashCommandInfo 映射
+    - Help 用：命令名 -> _build_cmd_rows 格式（含 Agent 归属标注）
+    """
+    global _slash_commands_cache, _slash_help_cache
+    if _slash_commands_cache is None:
+        from config import VALID_AGENTS
+        from agents import SlashCommandInfo, get_agent_adapter
+
+        commands: Dict[str, SlashCommandInfo] = {}
+        cmd_agents: Dict[str, List[str]] = {}
+        for agent_type in VALID_AGENTS:
+            adapter = get_agent_adapter(agent_type)
+            for name, info in adapter.get_slash_commands().items():
+                # 与网关内置命令冲突时跳过，避免绕过网关逻辑
+                if name in _COMMANDS:
+                    logger.warning("Slash command '%s' conflicts with gateway command, skipped", name)
+                    continue
+                # 多个 adapter 声明同名命令时，brief 和 examples 取首个 adapter 的
+                commands.setdefault(name, info)
+                cmd_agents.setdefault(name, []).append(adapter.display_name)
+
+        help_dict = {}
+        for name, info in commands.items():
+            agents_label = ' / '.join(cmd_agents[name])
+            brief = f"{info.brief}（{agents_label}）"
+            help_dict[name] = (None, False, brief, info.examples)
+
+        _slash_commands_cache = commands
+        _slash_help_cache = help_dict
+    return _slash_commands_cache
+
+
+def _slash_commands_as_help_dict():
+    """获取斜杠命令的 help 卡片字典（含 Agent 归属标注）
+
+    Returns:
+        与 _COMMANDS 相同格式的字典：{name: (None, False, brief, examples)}
+    """
+    _get_slash_commands()  # 确保缓存已构建
+    return _slash_help_cache
 
 
 # 模块加载末尾：注入 SessionFacade 的下游依赖（避免 services -> handlers 循环 import）

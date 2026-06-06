@@ -131,9 +131,10 @@ def handle_decision(
         else:
             permission_suggestions = extra_data.get('permission_suggestions')
             if not permission_suggestions:
-                logger.error(f"[decision] Missing permission_suggestions for always request {request_id}")
-                return False, None, '当前 Claude 版本未提供权限规则建议，无法始终允许'
-            decision = Decision.allow_with_updated_permissions(permission_suggestions)
+                logger.warning(f"[decision] No permission_suggestions for request {request_id}, fallback to single allow")
+                decision = Decision.allow()
+            else:
+                decision = Decision.allow_with_updated_permissions(permission_suggestions)
         decision_type = 'allow'
     elif action == 'deny':
         decision = Decision.deny('用户拒绝')
@@ -157,11 +158,18 @@ def handle_decision(
             return False, None, f'处理失败: {error_msg}'
 
     # 成功响应消息
-    action_messages = {
-        'allow': '已批准运行',
-        'always': '已始终允许，后续相同操作将自动批准',
-        'deny': '已拒绝运行',
-        'interrupt': '已拒绝并中断',
-        'answer': '已提交回答'
-    }
-    return True, decision_type, action_messages.get(action, '操作成功')
+    always_fallback = (action == 'always'
+                       and extra_data.get('agent_type') == 'claude'
+                       and not extra_data.get('permission_suggestions'))
+    if always_fallback:
+        message = '该操作不支持始终允许，已改为本次允许'
+    else:
+        action_messages = {
+            'allow': '已批准运行',
+            'always': '已始终允许，后续相同操作将自动批准',
+            'deny': '已拒绝运行',
+            'interrupt': '已拒绝并中断',
+            'answer': '已提交回答'
+        }
+        message = action_messages.get(action, '操作成功')
+    return True, decision_type, message

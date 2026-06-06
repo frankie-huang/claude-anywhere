@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-06-07
+
+#### "始终允许"降级优化
+
+- Claude 权限请求无 `permission_suggestions` 时，"始终允许"从报错改为降级为本次允许
+- 降级提示仅对 `agent_type == 'claude'` 生效，避免误伤 Codex 等其他 Agent
+
+### Changed - 2026-06-07
+
+#### 协作者支持 Agent 斜杠命令
+
+- 群聊协作者发送 Agent 斜杠命令（如 `/compact`）时跳过 `[来自群成员 xxx]` 前缀，避免 Agent 无法解析
+
+#### Agent 斜杠命令增强
+
+- Claude adapter 新增 `/context`、`/review`、`/simplify`、`/init` 四个斜杠命令
+- `CompleteCallback` 新增 `output` 参数，有输出的命令通过 markdown 卡片展示
+- 新增 `reply_feishu_markdown()` 工具函数，支持发送 Card JSON 2.0 markdown 卡片（卡片失败时降级纯文本）
+- `ErrorCallback` 新增 `session_id` 参数，错误路径也执行 session 状态清理和 Typing 移除
+- session 状态清理不再依赖通知发送成功，避免 `skip_next_user_prompt` 残留
+- 修复 `_check_and_monitor` 快速失败路径未调用 `on_error` 的 bug
+- 修复 `_monitor_detached` 异常路径未调用 `on_error` 的 bug
+
+### Added - 2026-06-06
+
+#### Agent 斜杠命令框架
+
+- 新增 `SlashCommandInfo` 类和 `AgentAdapter.get_slash_commands()` 方法，各 adapter 声明自己支持的斜杠命令
+- Claude adapter 声明 `/compact`（`triggers_stop_hook=False`），后续新增命令只需在 adapter 中添加一行
+- 网关路由自动识别斜杠命令，跳过内置命令处理，转发给 Agent 执行
+- `/help` 卡片新增「Agent 指令」区域，展示各命令及 Agent 归属标注
+- 新增 `on_complete` 回调链，无 stop hook 的命令由框架手动发送完成通知并清理状态
+- 新增 `/gw/feishu/remove-reaction` 网关接口，`remove_feishu_typing()` 兼容单机和分离部署
+- 错误通知路径（`_send_error_notification`）也清理 Typing 表情
+- 网关命令与斜杠命令名称冲突保护，避免 adapter 声明覆盖内置命令
+
 ### Added - 2026-06-01
 
 #### 群聊协作模式（group_allow_cowork）
