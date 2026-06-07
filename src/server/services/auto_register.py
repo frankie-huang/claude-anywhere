@@ -16,7 +16,7 @@ import logging
 import threading
 import urllib.request
 import urllib.error
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class AutoRegister:
     def _register(self):
         """执行注册"""
         from config import (
-            FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
+            FEISHU_REPLY_IN_THREAD,
             FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
             DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
             FEISHU_GROUP_DISSOLVE_DAYS, FEISHU_GROUP_ALLOW_COWORK
@@ -114,21 +114,21 @@ class AutoRegister:
 
         all_cmds = get_all_agent_commands()
         register_url = self._gateway_url.rstrip('/') + '/gw/register'
+        binding_params = {
+            'reply_in_thread': FEISHU_REPLY_IN_THREAD,
+            'session_mode': FEISHU_SESSION_MODE,
+            'default_agent': get_default_agent(),
+            'claude_commands': all_cmds.get('claude'),
+            'codex_commands': all_cmds.get('codex'),
+            'default_chat_dir': DEFAULT_CHAT_DIR,
+            'default_chat_follow_thread': DEFAULT_CHAT_FOLLOW_THREAD,
+            'group_name_prefix': FEISHU_GROUP_NAME_PREFIX,
+            'group_dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+            'group_allow_cowork': FEISHU_GROUP_ALLOW_COWORK,
+        }
         success, message = self._do_register(
-            self._callback_url,
-            self._owner_id,
-            register_url,
-            reply_in_thread=FEISHU_REPLY_IN_THREAD,
-            at_bot_only=FEISHU_AT_BOT_ONLY,
-            session_mode=FEISHU_SESSION_MODE,
-            default_agent=get_default_agent(),
-            claude_commands=all_cmds.get('claude'),
-            codex_commands=all_cmds.get('codex'),
-            default_chat_dir=DEFAULT_CHAT_DIR,
-            default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
-            group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
-            group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS,
-            group_allow_cowork=FEISHU_GROUP_ALLOW_COWORK
+            self._callback_url, self._owner_id, register_url,
+            binding_params=binding_params
         )
 
         if success:
@@ -141,17 +141,7 @@ class AutoRegister:
         callback_url: str,
         owner_id: str,
         register_url: str,
-        reply_in_thread: bool = False,
-        at_bot_only: Optional[bool] = None,
-        session_mode: str = '',
-        default_agent: str = '',
-        claude_commands: Optional[List[str]] = None,
-        codex_commands: Optional[List[str]] = None,
-        default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True,
-        group_name_prefix: Optional[str] = None,
-        group_dissolve_days: Optional[int] = None,
-        group_allow_cowork: Optional[bool] = None
+        binding_params: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, str]:
         """向飞书网关注册
 
@@ -159,46 +149,20 @@ class AutoRegister:
             callback_url: Callback 后端 URL
             owner_id: 飞书用户 ID
             register_url: 飞书网关注册接口完整 URL（已包含 /gw/register）
-            reply_in_thread: 是否使用回复话题模式
-            at_bot_only: 群聊 @bot 过滤
-            default_agent: 默认 agent 标识
-            claude_commands: 可用的 Claude 命令列表
-            codex_commands: 可用的 Codex 命令列表
-            default_chat_dir: 默认聊天目录
-            default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
-            group_name_prefix: 群聊名称前缀
-            group_dissolve_days: 群聊自动解散天数
-            group_allow_cowork: 群聊协作者模式
+            binding_params: per-user 配置参数
 
         Returns:
             (success, message): success 表示是否成功，message 是响应消息或错误信息
         """
+        if binding_params is None:
+            binding_params = {}
         api_url = register_url.rstrip('/')
 
         request_data = {
             'callback_url': callback_url,
             'owner_id': owner_id,
-            'reply_in_thread': reply_in_thread,
-            'at_bot_only': at_bot_only,
-            'session_mode': session_mode
         }
-        # 添加 default_agent（如果提供）
-        if default_agent:
-            request_data['default_agent'] = default_agent
-        # 添加 claude_commands（如果提供）
-        if claude_commands:
-            request_data['claude_commands'] = claude_commands
-        # 添加 codex_commands（如果提供）
-        if codex_commands:
-            request_data['codex_commands'] = codex_commands
-        # 添加 default_chat_dir（如果配置）
-        if default_chat_dir:
-            request_data['default_chat_dir'] = default_chat_dir
-        # 添加 default_chat_follow_thread
-        request_data['default_chat_follow_thread'] = default_chat_follow_thread
-        request_data['group_name_prefix'] = group_name_prefix
-        request_data['group_dissolve_days'] = group_dissolve_days
-        request_data['group_allow_cowork'] = group_allow_cowork
+        request_data.update(binding_params)
 
         logger.info(f"[auto-register] Registering to gateway: {api_url}")
 

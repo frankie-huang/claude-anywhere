@@ -385,12 +385,6 @@ DEFAULT_CHAT_DIR = os.path.expanduser(get_config('DEFAULT_CHAT_DIR', ''))
 # False: 默认聊天目录的回复始终在主界面显示（不收敛进话题）
 DEFAULT_CHAT_FOLLOW_THREAD = get_config('DEFAULT_CHAT_FOLLOW_THREAD', 'true').lower() in ('true', '1', 'yes')
 
-# 群聊 @bot 过滤：群聊中是否仅响应 @bot 的消息
-# False (默认): 处理群聊中的所有消息
-# True: 群聊中只处理 @bot 的消息，其他消息静默忽略
-# 注意：P2P 单聊不受此配置影响，始终响应
-FEISHU_AT_BOT_ONLY = get_config('FEISHU_AT_BOT_ONLY', 'false').lower() in ('true', '1', 'yes')
-
 # 话题内回复模式：回复消息时是否收进话题详情（不刷群聊主界面）
 # True: 回复消息仅出现在话题详情中，不会冒泡到群聊主界面
 # False (默认): 回复消息正常显示在群聊主界面

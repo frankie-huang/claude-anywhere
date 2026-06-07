@@ -47,46 +47,16 @@ class WSTunnelClient:
     WS_TUNNEL_PATH = '/ws/tunnel'
 
     def __init__(self, gateway_url: str, owner_id: str,
-                 reply_in_thread: bool = False,
-                 at_bot_only: Optional[bool] = None,
-                 session_mode: str = '',
-                 default_agent: str = '',
-                 claude_commands: Optional[List[str]] = None,
-                 codex_commands: Optional[List[str]] = None,
-                 default_chat_dir: str = '',
-                 default_chat_follow_thread: bool = True,
-                 group_name_prefix: Optional[str] = None,
-                 group_dissolve_days: Optional[int] = None,
-                 group_allow_cowork: Optional[bool] = None) -> None:
+                 binding_params: Optional[Dict[str, Any]] = None) -> None:
         """
         Args:
             gateway_url: 网关 HTTP base URL（如 http://gateway:8080）
             owner_id: 飞书用户 ID
-            reply_in_thread: 是否使用回复话题模式
-            at_bot_only: 群聊 @bot 过滤（传递给 gateway BindingStore）
-            session_mode: 会话模式（message/thread/group）
-            default_agent: 默认 agent 标识（如 'claude'、'codex'）
-            claude_commands: 可用的 Claude 命令列表
-            codex_commands: 可用的 Codex 命令列表
-            default_chat_dir: 默认聊天目录
-            default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
-            group_name_prefix: 群聊名称前缀（传递给 gateway BindingStore）
-            group_dissolve_days: 群聊自动解散天数（传递给 gateway BindingStore）
-            group_allow_cowork: 群聊协作者模式（传递给 gateway BindingStore）
+            binding_params: per-user 配置参数（传递给 gateway BindingStore）
         """
         self.gateway_url = gateway_url
         self.owner_id = owner_id
-        self.reply_in_thread = reply_in_thread
-        self.at_bot_only = at_bot_only
-        self.session_mode = session_mode
-        self.default_agent = default_agent
-        self.claude_commands = claude_commands
-        self.codex_commands = codex_commands
-        self.default_chat_dir = default_chat_dir
-        self.default_chat_follow_thread = default_chat_follow_thread
-        self.group_name_prefix = group_name_prefix
-        self.group_dissolve_days = group_dissolve_days
-        self.group_allow_cowork = group_allow_cowork
+        self.binding_params = binding_params or {}
         self.sock: Optional[socket.socket] = None
         self.running = False
         self.authenticated = False
@@ -198,22 +168,8 @@ class WSTunnelClient:
         register_data = {
             'type': 'register',
             'owner_id': self.owner_id,
-            'reply_in_thread': self.reply_in_thread,
-            'at_bot_only': self.at_bot_only,
-            'session_mode': self.session_mode
         }
-        if self.default_agent:
-            register_data['default_agent'] = self.default_agent
-        if self.claude_commands:
-            register_data['claude_commands'] = self.claude_commands
-        if self.codex_commands:
-            register_data['codex_commands'] = self.codex_commands
-        if self.default_chat_dir:
-            register_data['default_chat_dir'] = self.default_chat_dir
-        register_data['default_chat_follow_thread'] = self.default_chat_follow_thread
-        register_data['group_name_prefix'] = self.group_name_prefix
-        register_data['group_dissolve_days'] = self.group_dissolve_days
-        register_data['group_allow_cowork'] = self.group_allow_cowork
+        register_data.update(self.binding_params)
 
         # 携带已持久化的 auth_token，用于网关判断续期/换绑
         token_store = AuthTokenStore.get_instance()
@@ -470,33 +426,13 @@ _client_instance: Optional['WSTunnelClient'] = None
 
 
 def start_ws_tunnel_client(gateway_url: str, owner_id: str,
-                           reply_in_thread: bool = False,
-                           at_bot_only: Optional[bool] = None,
-                           session_mode: str = '',
-                           default_agent: str = '',
-                           claude_commands: Optional[List[str]] = None,
-                           codex_commands: Optional[List[str]] = None,
-                           default_chat_dir: str = '',
-                           default_chat_follow_thread: bool = True,
-                           group_name_prefix: Optional[str] = None,
-                           group_dissolve_days: Optional[int] = None,
-                           group_allow_cowork: Optional[bool] = None) -> WSTunnelClient:
+                           binding_params: Optional[Dict[str, Any]] = None) -> WSTunnelClient:
     """启动 WebSocket 隧道客户端
 
     Args:
         gateway_url: 网关 HTTP base URL（如 http://gateway:8080）
         owner_id: 飞书用户 ID
-        reply_in_thread: 是否使用回复话题模式
-        at_bot_only: 群聊 @bot 过滤（传递给 gateway BindingStore）
-        session_mode: 会话模式（message/thread/group）
-        default_agent: 默认 agent 标识（如 'claude'、'codex'）
-        claude_commands: 可用的 Claude 命令列表
-        codex_commands: 可用的 Codex 命令列表
-        default_chat_dir: 默认聊天目录
-        default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
-        group_name_prefix: 群聊名称前缀（传递给 gateway BindingStore）
-        group_dissolve_days: 群聊自动解散天数（传递给 gateway BindingStore）
-        group_allow_cowork: 群聊协作者模式（传递给 gateway BindingStore）
+        binding_params: per-user 配置参数（传递给 gateway BindingStore）
 
     Returns:
         客户端实例
@@ -509,17 +445,7 @@ def start_ws_tunnel_client(gateway_url: str, owner_id: str,
 
     _client_instance = WSTunnelClient(
         gateway_url, owner_id,
-        reply_in_thread=reply_in_thread,
-        at_bot_only=at_bot_only,
-        session_mode=session_mode,
-        default_agent=default_agent,
-        claude_commands=claude_commands,
-        codex_commands=codex_commands,
-        default_chat_dir=default_chat_dir,
-        default_chat_follow_thread=default_chat_follow_thread,
-        group_name_prefix=group_name_prefix,
-        group_dissolve_days=group_dissolve_days,
-        group_allow_cowork=group_allow_cowork
+        binding_params=binding_params
     )
     _client_instance.start()
     return _client_instance

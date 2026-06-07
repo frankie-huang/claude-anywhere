@@ -1113,6 +1113,42 @@ class MessageSender:
         logger.info("[feishu-api] Group dissolved: %s", chat_id)
         return True, ''
 
+    def get_chat_info(self, chat_id: str) -> Tuple[bool, Dict[str, Any]]:
+        """获取群聊信息
+
+        所需权限：im:chat 或 im:chat:readonly
+        https://open.feishu.cn/document/server-docs/group/chat/get-2
+
+        Args:
+            chat_id: 群聊 ID
+
+        Returns:
+            (success, data_dict or error_dict)
+            data_dict 包含 name, user_count, bot_count, owner_id 等字段
+            注意：user_count/bot_count 为字符串类型
+        """
+        if not chat_id:
+            return False, {'error': 'Missing chat_id'}
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, {'error': 'Failed to get access token'}
+
+        url = f'{FEISHU_API_BASE}/im/v1/chats/{chat_id}'
+        headers = {
+            'Authorization': f'Bearer {token}'
+        }
+
+        success, resp = _http_request(url, method='GET', headers=headers)
+        if not success:
+            return False, resp
+
+        code = resp.get('code', -1)
+        if code != 0:
+            return False, resp
+
+        return True, resp.get('data', {})
+
 
 # =============================================================================
 # FeishuAPIService
@@ -1440,3 +1476,9 @@ class FeishuAPIService:
         if not self._enabled:
             return False, "Feishu API service not enabled"
         return self._message_sender.dissolve_group_chat(chat_id)
+
+    def get_chat_info(self, chat_id: str) -> Tuple[bool, Dict[str, Any]]:
+        """获取群聊信息"""
+        if not self._enabled:
+            return False, {'error': 'Feishu API service not enabled'}
+        return self._message_sender.get_chat_info(chat_id)

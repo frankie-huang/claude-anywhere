@@ -27,7 +27,6 @@ class BindingStore:
             "callback_url": "https://callback.example.com",
             "auth_token": "abc123.def456",
             "reply_in_thread": true,
-            "at_bot_only": false,
             "session_mode": "message",
             "default_agent": "claude",
             "claude_commands": ["claude", "claude --model opus"],
@@ -112,16 +111,7 @@ class BindingStore:
         callback_url: str,
         auth_token: str,
         registered_ip: str = '',
-        at_bot_only: Optional[bool] = None,
-        session_mode: str = 'message',
-        default_agent: str = '',
-        claude_commands: Optional[List[str]] = None,
-        codex_commands: Optional[List[str]] = None,
-        default_chat_dir: str = '',
-        default_chat_follow_thread: bool = True,
-        group_name_prefix: Optional[str] = None,
-        group_dissolve_days: Optional[int] = None,
-        group_allow_cowork: Optional[bool] = None
+        binding_params: Optional[Dict[str, Any]] = None
     ) -> bool:
         """创建或更新绑定
 
@@ -130,20 +120,32 @@ class BindingStore:
             callback_url: Callback 后端 URL
             auth_token: 认证令牌
             registered_ip: 注册来源 IP
-            at_bot_only: 群聊 @bot 过滤（None = 未传，保留旧值；True/False 显式写入）
-            session_mode: 会话模式，message/thread/group
-            default_agent: 默认 agent 标识（如 'claude'、'codex'）
-            claude_commands: 可用的 Claude 命令列表（从 Callback 后端传递）
-            codex_commands: 可用的 Codex 命令列表（从 Callback 后端传递）
-            default_chat_dir: 默认聊天目录（从 Callback 后端传递）
-            default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
-            group_name_prefix: 群聊名称前缀（None = 未传，保留旧值；显式值含 '' 原样写入）
-            group_dissolve_days: 群聊自动解散天数（None = 未传，保留旧值；显式值含 0 原样写入）
-            group_allow_cowork: 群聊协作者模式（None = 未传，保留旧值；True/False 显式写入）
+            binding_params: per-user 配置参数 dict，字段说明：
+                session_mode: 会话模式 message/thread/group（默认 message）
+                default_agent: 默认 agent 标识，如 'claude'/'codex'（非空才写入）
+                claude_commands: 可用的 Claude 命令列表（非空才写入）
+                codex_commands: 可用的 Codex 命令列表（非空才写入）
+                default_chat_dir: 默认聊天目录（非空写入，变更时清除关联 session_id）
+                default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
+                group_name_prefix: 群聊名称前缀（None=保留旧值；含 '' 显式写入）
+                group_dissolve_days: 群聊自动解散天数（None=保留旧值；含 0 显式写入）
+                group_allow_cowork: 群聊协作者模式（None=保留旧值；True/False 显式写入）
 
         Returns:
             是否保存成功
         """
+        if binding_params is None:
+            binding_params = {}
+        # 从 binding_params 中提取各字段
+        session_mode = binding_params.get('session_mode', 'message')
+        default_agent = binding_params.get('default_agent', '')
+        claude_commands = binding_params.get('claude_commands')
+        codex_commands = binding_params.get('codex_commands')
+        default_chat_dir = binding_params.get('default_chat_dir', '')
+        default_chat_follow_thread = binding_params.get('default_chat_follow_thread', True)
+        group_name_prefix = binding_params.get('group_name_prefix')
+        group_dissolve_days = binding_params.get('group_dissolve_days')
+        group_allow_cowork = binding_params.get('group_allow_cowork')
         with self._file_lock:
             try:
                 data = self._load()
@@ -186,11 +188,6 @@ class BindingStore:
                 # codex_commands：非空才写入
                 if valid_codex_commands:
                     binding_data['codex_commands'] = valid_codex_commands
-                # at_bot_only：None = 调用方未传，保留旧值；True/False 显式写入
-                if at_bot_only is not None:
-                    binding_data['at_bot_only'] = bool(at_bot_only)
-                elif existing and 'at_bot_only' in existing:
-                    binding_data['at_bot_only'] = existing['at_bot_only']
                 # 群聊配置：None = 调用方未传，保留旧值；其他值（含 ''、0）显式写入
                 if group_name_prefix is not None:
                     binding_data['group_name_prefix'] = group_name_prefix
@@ -204,7 +201,7 @@ class BindingStore:
                     binding_data['group_dissolve_days'] = group_dissolve_days
                 elif existing and 'group_dissolve_days' in existing:
                     binding_data['group_dissolve_days'] = existing['group_dissolve_days']
-                # group_allow_cowork：同 at_bot_only 逻辑
+                # group_allow_cowork：None = 调用方未传，保留旧值；True/False 显式写入
                 if group_allow_cowork is not None:
                     binding_data['group_allow_cowork'] = bool(group_allow_cowork)
                 elif existing and 'group_allow_cowork' in existing:

@@ -565,7 +565,7 @@ def main():
         if FEISHU_GATEWAY_MODE == 'ws':
             # WS 隧道模式：客户端主动连接网关，适用于本地开发（callback 不可公网访问）
             from services.ws_tunnel_client import start_ws_tunnel_client
-            from config import (FEISHU_REPLY_IN_THREAD, FEISHU_AT_BOT_ONLY,
+            from config import (FEISHU_REPLY_IN_THREAD,
                                 FEISHU_SESSION_MODE,
                                 DEFAULT_CHAT_FOLLOW_THREAD,
                                 FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS,
@@ -573,19 +573,21 @@ def main():
                                 get_default_agent)
             from agents import get_all_agent_commands
             all_cmds = get_all_agent_commands()
+            binding_params = {
+                'reply_in_thread': FEISHU_REPLY_IN_THREAD,
+                'session_mode': FEISHU_SESSION_MODE,
+                'default_agent': get_default_agent(),
+                'claude_commands': all_cmds.get('claude'),
+                'codex_commands': all_cmds.get('codex'),
+                'default_chat_dir': DEFAULT_CHAT_DIR,
+                'default_chat_follow_thread': DEFAULT_CHAT_FOLLOW_THREAD,
+                'group_name_prefix': FEISHU_GROUP_NAME_PREFIX,
+                'group_dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+                'group_allow_cowork': FEISHU_GROUP_ALLOW_COWORK,
+            }
             start_ws_tunnel_client(
                 FEISHU_GATEWAY_URL, FEISHU_OWNER_ID,
-                reply_in_thread=FEISHU_REPLY_IN_THREAD,
-                at_bot_only=FEISHU_AT_BOT_ONLY,
-                session_mode=FEISHU_SESSION_MODE,
-                default_agent=get_default_agent(),
-                claude_commands=all_cmds.get('claude'),
-                codex_commands=all_cmds.get('codex'),
-                default_chat_dir=DEFAULT_CHAT_DIR,
-                default_chat_follow_thread=DEFAULT_CHAT_FOLLOW_THREAD,
-                group_name_prefix=FEISHU_GROUP_NAME_PREFIX,
-                group_dissolve_days=FEISHU_GROUP_DISSOLVE_DAYS,
-                group_allow_cowork=FEISHU_GROUP_ALLOW_COWORK
+                binding_params=binding_params
             )
             logger.info("WebSocket tunnel client started, gateway: %s", FEISHU_GATEWAY_URL)
         elif CALLBACK_SERVER_URL:

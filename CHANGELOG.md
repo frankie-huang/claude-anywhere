@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-06-08
+
+#### 群聊自动 @bot 过滤：按成员数自动判断
+
+- 移除 `at_bot_only` per-user 配置，改为根据群成员数自动判断：单人群（owner + bot）不需要 @bot，多人群（2+ 用户）需要 @bot
+- 新增 `feishu_api.get_chat_info()` 获取群信息，内部缓存 `user_count` 60 秒（TTLCache）
+- 全链路清理 `at_bot_only`：config、extract_binding_params、binding_store、main、auto_register、.env.example
+
+#### 注册参数透传重构：per-user 配置打包为 binding_params dict
+
+- 注册链路中 10 个 per-user 参数（at_bot_only、session_mode、group_allow_cowork 等）从逐参数透传改为 `binding_params: Dict[str, Any]` 统一传递
+- 新增 `extract_binding_params()` 提取函数，作为字段定义的唯一入口
+- 涉及 7 个文件，净减少约 350 行代码
+- 未来新增 per-user 配置只需改 3 处：提取（extract_binding_params）→ 存储（binding_store.upsert）→ 默认值（config）
+
 ### Fixed - 2026-06-07
 
 #### "始终允许"降级优化

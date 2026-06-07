@@ -31,6 +31,7 @@ from logging_config import setup_logging
 
 from handlers.utils import run_in_background as _run_in_background, post_json as _post_json
 from services.session_facade import SessionFacade
+from utils.ttl_cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,36 @@ _AT_USER_PATTERN = re.compile(r'@_user_1\s?')
 
 # 协作者允许执行的命令白名单（其余命令仅 owner 可执行）
 _COLLABORATOR_ALLOWED_COMMANDS = {'clear'}
+
+# 群成员数缓存：用于多人群 @bot 过滤判断（TTL 60 秒）
+_group_member_cache = TTLCache(ttl=60, max_size=500, name='group_member')
+
+
+def _is_multi_person_group(chat_id: str) -> bool:
+    """判断群聊是否为多人群（成员数 > 2）
+
+    用于 @bot 过滤：单人群（owner + bot）不需要 @bot，多人群需要 @bot。
+    内部缓存 user_count 60 秒（_group_member_cache），减少 API 调用。
+    API 失败时安全降级为 True（要求 @bot），不缓存。
+    """
+    cached = _group_member_cache.get(chat_id)
+    if cached is None:
+        from services.feishu_api import FeishuAPIService
+        service = FeishuAPIService.get_instance()
+        success, data = service.get_chat_info(chat_id)
+        if not success:
+            logger.warning("[feishu] Failed to get chat info for %s, defaulting to multi-person", chat_id)
+            return True
+        try:
+            cached = int(data.get('user_count', '0'))
+        except (ValueError, TypeError):
+            logger.warning("[feishu] Invalid user_count for %s, defaulting to multi-person", chat_id)
+            return True
+        _group_member_cache.put(chat_id, cached)
+        logger.debug("[feishu] Group %s user_count=%d", chat_id, cached)
+
+    # user_count 不含 bot；单人群 = 1 个用户 + bot，多人群 = 2+ 个用户
+    return cached > 1
 
 
 # =============================================================================
@@ -477,10 +508,10 @@ def _handle_message_event(data: dict):
             _run_in_background(_send_notice_message, (chat_id, hint, message_id))
         return
 
-    # 群聊 @bot 过滤：at_bot_only=true 时，群聊中非 @bot 的消息静默忽略
+    # group 模式下多人群需要 @bot，单人群（owner + bot）不需要
     if chat_type == 'group' and not message.get('is_at_bot', False):
-        if binding.get('at_bot_only', False):
-            logger.debug("[feishu] Ignored non-@bot message in group: chat=%s msg=%s",
+        if binding.get('session_mode') == 'group' and _is_multi_person_group(chat_id):
+            logger.debug("[feishu] Ignored non-@bot message in multi-person group: chat=%s msg=%s",
                          chat_id, message_id)
             return
 
@@ -2632,7 +2663,6 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             - owner_id: 飞书用户 ID
             - request_ip: 注册来源 IP（仅 approve_register 需要）
             - request_id: 注册请求 ID（WS 模式需要）
-            - at_bot_only: 群聊 @bot 过滤（仅 approve_register 需要）
             - session_mode: 会话模式 message/thread/group（仅 approve_register 需要）
             - default_agent: 默认 agent 类型（仅 approve_register 需要）
             - claude_commands: 可用的 Claude 命令列表（仅 approve_register 需要）
@@ -2647,6 +2677,7 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     """
     from handlers.register import handle_authorization_decision, handle_register_unbind
     from handlers.register import handle_ws_authorization_approved, handle_ws_authorization_denied, handle_ws_register_unbind
+    from handlers.register import extract_binding_params
 
     action = value.get('action', '')
     mode = value.get('mode', 'http')  # 默认 HTTP 模式
@@ -2654,16 +2685,7 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
     owner_id = value.get('owner_id', '')
     request_ip = value.get('request_ip', '')
     request_id = value.get('request_id', '')
-    at_bot_only = value.get('at_bot_only')
-    session_mode = value.get('session_mode', 'message')
-    default_agent = value.get('default_agent', '')
-    claude_commands = value.get('claude_commands', None)
-    codex_commands = value.get('codex_commands', None)
-    default_chat_dir = value.get('default_chat_dir', '')
-    default_chat_follow_thread = value.get('default_chat_follow_thread', True)
-    group_name_prefix = value.get('group_name_prefix')
-    group_dissolve_days = value.get('group_dissolve_days')
-    group_allow_cowork = value.get('group_allow_cowork')
+    binding_params = extract_binding_params(value)
 
     # WebSocket 模式
     if mode == 'ws':
@@ -2671,16 +2693,7 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             logger.info("[feishu] WS registration approved: owner_id=%s", owner_id)
             return True, handle_ws_authorization_approved(
                 owner_id, request_id, request_ip,
-                at_bot_only=at_bot_only,
-                session_mode=session_mode,
-                default_agent=default_agent,
-                claude_commands=claude_commands,
-                codex_commands=codex_commands,
-                default_chat_dir=default_chat_dir,
-                default_chat_follow_thread=default_chat_follow_thread,
-                group_name_prefix=group_name_prefix,
-                group_dissolve_days=group_dissolve_days,
-                group_allow_cowork=group_allow_cowork
+                binding_params=binding_params
             )
         elif action == 'deny_register':
             logger.info("[feishu] WS registration denied: owner_id=%s, request_id=%s", owner_id, request_id)
@@ -2699,19 +2712,10 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
 
     # HTTP 模式
     if action == 'approve_register':
-        logger.info("[feishu] Registration approved: owner_id=%s, callback_url=%s, session_mode=%s", owner_id, callback_url, session_mode)
+        logger.info("[feishu] Registration approved: owner_id=%s, callback_url=%s, session_mode=%s", owner_id, callback_url, binding_params.get('session_mode'))
         return True, handle_authorization_decision(
             callback_url, owner_id, request_ip, approved=True,
-            at_bot_only=at_bot_only,
-            session_mode=session_mode,
-            default_agent=default_agent,
-            claude_commands=claude_commands,
-            codex_commands=codex_commands,
-            default_chat_dir=default_chat_dir,
-            default_chat_follow_thread=default_chat_follow_thread,
-            group_name_prefix=group_name_prefix,
-            group_dissolve_days=group_dissolve_days,
-            group_allow_cowork=group_allow_cowork
+            binding_params=binding_params
         )
     elif action == 'deny_register':
         logger.info("[feishu] Registration denied: owner_id=%s", owner_id)
