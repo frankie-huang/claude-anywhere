@@ -1029,6 +1029,11 @@ class MessageSender:
                 self.dissolve_group_chat(chat_id)
                 return False, "Failed to add owner to group: %s" % add_err
 
+            # 设置 owner 为群管理员（失败不回滚，管理员权限非核心功能）
+            mgr_ok, mgr_err = self.add_chat_managers(chat_id, [owner_id])
+            if not mgr_ok:
+                logger.warning("[feishu-api] Failed to set owner as manager: %s, chat_id=%s", mgr_err, chat_id)
+
         logger.info("[feishu-api] Group created: name=%s, chat_id=%s", name, chat_id)
         return True, chat_id
 
@@ -1070,6 +1075,46 @@ class MessageSender:
             return False, resp.get('msg', 'Unknown error')
 
         logger.info("[feishu-api] Added %d members to chat %s", len(id_list), chat_id)
+        return True, ''
+
+    def add_chat_managers(self, chat_id: str, manager_ids: List[str],
+                          member_id_type: str = 'user_id') -> Tuple[bool, str]:
+        """设置群管理员
+
+        所需权限：im:chat 或 im:chat.managers:write_only
+        https://open.feishu.cn/document/server-docs/group/chat-member/add_managers
+
+        Args:
+            chat_id: 群聊 ID
+            manager_ids: 要设置为管理员的用户 ID 列表
+            member_id_type: ID 类型，默认 user_id
+
+        Returns:
+            (success, error_message)
+        """
+        if not chat_id or not manager_ids:
+            return False, "Missing parameters"
+
+        token = self._token_manager.get_token()
+        if not token:
+            return False, "Failed to get access token"
+
+        url = f'{FEISHU_API_BASE}/im/v1/chats/{chat_id}/managers/add_managers?member_id_type={member_id_type}'
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Authorization': f'Bearer {token}'
+        }
+        body = json.dumps({'manager_ids': manager_ids}).encode('utf-8')
+
+        success, resp = _http_request(url, method='POST', headers=headers, data=body)
+        if not success:
+            return False, resp.get('msg', 'Request failed')
+
+        code = resp.get('code', -1)
+        if code != 0:
+            return False, resp.get('msg', 'Unknown error')
+
+        logger.info("[feishu-api] Added %d managers to chat %s", len(manager_ids), chat_id)
         return True, ''
 
     def dissolve_group_chat(self, chat_id: str) -> Tuple[bool, str]:
@@ -1470,6 +1515,13 @@ class FeishuAPIService:
         if not self._enabled:
             return False, "Feishu API service not enabled"
         return self._message_sender.add_chat_members(chat_id, id_list, member_id_type)
+
+    def add_chat_managers(self, chat_id: str, manager_ids: List[str],
+                          member_id_type: str = 'user_id') -> Tuple[bool, str]:
+        """设置群管理员"""
+        if not self._enabled:
+            return False, "Feishu API service not enabled"
+        return self._message_sender.add_chat_managers(chat_id, manager_ids, member_id_type)
 
     def dissolve_group_chat(self, chat_id: str) -> Tuple[bool, str]:
         """解散群聊"""

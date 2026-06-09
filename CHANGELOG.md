@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-06-10
+
+#### Codex 自动补充 `--skip-git-repo-check` 参数
+
+- Codex 启动命令自动补充 `--skip-git-repo-check`，允许在非 git 目录下使用
+- 若用户已在 `CODEX_COMMAND` 中配置该参数则不重复添加
+- 补充 session ID 捕获失败时的 stderr 诊断日志
+
+### Changed - 2026-06-09
+
+#### `/groups dissolve` 支持按目录解散群聊
+
+- 新增 `/groups dissolve /path` 精准匹配解散指定目录的群聊
+- 新增 `/groups dissolve /path/**` 递归匹配解散指定目录及子目录的群聊
+- 使用 `os.path.normpath` 做路径规范化，避免跨机器 symlink 不一致
+- 群聊列表卡片优化：标题改为"由服务创建的群聊（共 N 个）"，解散提示置顶，未关联目录排最后，分隔线移至目录标题前
+
+#### 帮助卡片布局优化
+
+- 从每条 example 一个 `column_set` 改为每个命令一个 `column_set`，解决飞书卡片元素超限问题（错误码 11310）
+
+#### 创建群聊时自动设置 owner 为群管理员
+
+- 创建群聊并拉入 owner 后，自动将 owner 设置为群管理员
+- 新增 `add_chat_managers()` API 封装，调用飞书 `POST /im/v1/chats/{chat_id}/managers/add_managers`
+- 设置管理员失败只记日志警告，不影响群聊创建
+
 ### Changed - 2026-06-08
 
 #### 群聊自动 @bot 过滤：按成员数自动判断

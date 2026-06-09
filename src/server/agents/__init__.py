@@ -483,8 +483,19 @@ def _capture_session_id(adapter: AgentAdapter, proc: subprocess.Popen,
                                log_prefix, timeout)
                 break
             if line is None:
-                logger.warning("%s Process exited before session ID captured",
-                               log_prefix)
+                # stdout 已关闭，读取退出码和 stderr 帮助诊断原因
+                returncode = proc.poll()
+                stderr_output = ''
+                # 只在进程已退出时读 stderr，避免阻塞
+                if returncode is not None and proc.stderr:
+                    try:
+                        stderr_output = proc.stderr.read(4096).strip()
+                    except Exception:
+                        pass
+                logger.warning("%s stdout closed before session ID captured, "
+                               "exit_code=%s, stderr=%s",
+                               log_prefix, returncode,
+                               stderr_output[:500] if stderr_output else '(empty)')
                 break
             stripped = line.strip()
             if not stripped or not stripped.startswith('{'):
@@ -717,6 +728,10 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
                 on_complete(agent_type, chat_id, message_id, session_id,
                             stdout_tail or '')
         else:
+            # 注意：用户通过飞书点击"拒绝并中断"时，hook 返回 interrupt: true，
+            # Claude Code 会以 exit code=1 + "Execution error" 退出，也会走到这里。
+            # 这属于用户主动中断的预期行为，但当前无法与真正的执行错误区分，
+            # 因此统一作为错误通知。如需区分可在 resolve interrupt 时标记 session 状态。
             error_output = stderr_tail or stdout_tail
             logger.warning(
                 "%s Detached process failed (code=%s), session: %s, output: %s",

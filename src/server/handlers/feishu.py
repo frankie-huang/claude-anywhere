@@ -627,44 +627,38 @@ def _send_help_card(binding: Optional[Dict[str, Any]], chat_id: str,
         })
         elements.append({"tag": "hr"})
 
-    # 构建指令行
+    # 构建指令帮助：每个命令一个 column_set（命令名 | examples 合并为 markdown）
     def _build_cmd_rows(cmd_dict, admin_filter):
-        """生成 column_set 行列表，首行显示指令名+说明，后续行留空"""
+        """生成 column_set 行列表，每个命令一个 column_set"""
         rows = []
         for cmd, (_, admin_only, brief, examples) in cmd_dict.items():
             if admin_only != admin_filter:
                 continue
-            for i, (example, desc) in enumerate(examples):
-                cmd_col = f"**`/{cmd}`**\n{brief}" if i == 0 else ""
-                rows.append({
-                    "tag": "column_set",
-                    "flex_mode": "none",
-                    "horizontal_spacing": "8px",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 2,
-                            "vertical_align": "top",
-                            "elements": [{"tag": "markdown", "content": cmd_col}]
-                        },
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 2,
-                            "vertical_align": "top",
-                            "elements": [{"tag": "markdown", "content": f"`{example}`"}]
-                        },
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 3,
-                            "vertical_align": "top",
-                            "elements": [{"tag": "markdown", "content": desc}]
-                        }
-                    ]
-                })
-            # 指令之间加分隔线
+            # 每条 example 作为独立 markdown 元素，飞书自动加间距
+            example_elements = []
+            for example, desc in examples:
+                example_elements.append({"tag": "markdown", "content": f"`{example}`  {desc}"})
+            rows.append({
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "columns": [
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 2,
+                        "vertical_align": "top",
+                        "elements": [{"tag": "markdown", "content": f"**`/{cmd}`**\n{brief}"}]
+                    },
+                    {
+                        "tag": "column",
+                        "width": "weighted",
+                        "weight": 5,
+                        "vertical_align": "top",
+                        "elements": example_elements
+                    }
+                ]
+            })
             rows.append({"tag": "hr"})
         # 去掉最后一个 hr
         if rows and rows[-1].get('tag') == 'hr':
@@ -3993,9 +3987,11 @@ def _handle_groups_command(data: dict, args: str) -> None:
     """处理 /groups 命令：列出或解散群聊
 
     用法：
-        /groups              - 列出活跃群聊
-        /groups dissolve 1 2 - 按序号解散
-        /groups dissolve all - 解散所有群聊
+        /groups                       - 列出活跃群聊
+        /groups dissolve 1 2          - 按序号解散
+        /groups dissolve all          - 解散所有群聊
+        /groups dissolve /path        - 解散指定目录的群聊（精准匹配）
+        /groups dissolve /path/**     - 解散指定目录及子目录的群聊
     """
     event = data.get('event', {})
     message = event.get('message', {})
@@ -4005,10 +4001,16 @@ def _handle_groups_command(data: dict, args: str) -> None:
 
     args = args.strip()
 
-    if args.startswith('dissolve'):
+    if args == 'dissolve' or args.startswith('dissolve '):
         dissolve_args = args[len('dissolve'):].strip()
         if dissolve_args == 'all':
             payload = {'all': True}
+        elif dissolve_args and dissolve_args.startswith('/'):
+            # 目录模式：/path 精准匹配，/path/** 递归匹配子目录
+            if dissolve_args.endswith('/**'):
+                payload = {'dir': dissolve_args[:-3] or '/', 'recursive': True}
+            else:
+                payload = {'dir': dissolve_args, 'recursive': False}
         elif dissolve_args:
             try:
                 seqs = [int(x) for x in dissolve_args.split()]
@@ -4080,30 +4082,34 @@ def _send_groups_card(binding: Dict[str, Any], chat_id: str, message_id: str) ->
     for e in entries:
         groups.setdefault(e['project_dir'], []).append(e)
     # 每组取最近活跃时间，组间按此降序
+    # 空目录（未关联目录）始终排最后，其余按最近活跃时间降序
     sorted_dirs = sorted(groups.keys(),
-                         key=lambda d: max(x['last_active_at'] for x in groups[d]),
+                         key=lambda d: (d != '', max(x['last_active_at'] for x in groups[d])),
                          reverse=True)
     for group in groups.values():
         group.sort(key=lambda x: x['last_active_at'], reverse=True)
 
     # 用 markdown 生成完整列表，避免 column_set 元素过多超限
-    md_parts = [f"**由服务创建的群聊 ({len(entries)})**", ""]
+    md_parts = ["> **解散群聊：**",
+                "> `/groups dissolve all`",
+                "> `/groups dissolve <序号1> <序号2> ...`",
+                "> `/groups dissolve /path`  或  `/groups dissolve /path/**`",
+                ""]
     for d in sorted_dirs:
         dir_label = d if d else '(未关联目录)'
+        md_parts.append("---")
         md_parts.append(f"\U0001F4C1 **{dir_label}**")
         for e in groups[d]:
             sid = e['session_id'] or '-'
             ago = _format_ago(now - e['last_active_at']) if e['last_active_at'] else ''
             link = "https://applink.feishu.cn/client/chat/open?openChatId=%s" % e['chat_id']
             md_parts.append(f"- **{e['seq']}**  `{sid}`  {ago}  [进入群聊]({link})")
-        md_parts.append("---")
-    md_parts.append("**解散群聊：**`/groups dissolve <序号1> <序号2> ...` 或 `/groups dissolve all`")
 
     card = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "群聊列表"},
+            "title": {"tag": "plain_text", "content": f"由服务创建的群聊（共 {len(entries)} 个）"},
             "template": "blue"
         },
         "body": {
@@ -4159,6 +4165,24 @@ def _dissolve_groups(binding: Dict[str, Any], payload: dict,
     target_chat_ids: List[str] = []
     if payload.get('all'):
         target_chat_ids = [item['chat_id'] for item in owner_chats]
+    elif payload.get('dir') is not None:
+        # 目录模式：按 project_dir 匹配群聊
+        # 用 normpath 而非 realpath：project_dir 来自 callback/agent 机器，
+        # gateway 上解析 symlink 可能与源机器不一致，纯字符串规范化更可靠
+        target_dir = os.path.normpath(payload['dir'])
+        recursive = payload.get('recursive', False)
+        owner_chat_ids = {item['chat_id'] for item in owner_chats}
+        dir_prefix = '/' if target_dir == '/' else target_dir + '/'
+        gs_data = gs_store.get_by_owner(owner_id) if owner_id else {}
+        for cid, gs_item in gs_data.items():
+            if cid not in owner_chat_ids:
+                continue
+            project_dir = gs_item.get('project_dir', '')
+            if not project_dir:
+                continue
+            project_dir = os.path.normpath(project_dir)
+            if project_dir == target_dir or (recursive and project_dir.startswith(dir_prefix)):
+                target_chat_ids.append(cid)
     else:
         # seqs 由 _handle_groups_command 上游 int() 校验，此处防御性跳过非法值
         seqs = payload.get('seqs') or []
@@ -4690,6 +4714,8 @@ _COMMANDS = {
         ("/groups", "列出所有自动创建的群聊"),
         ("/groups dissolve all", "解散所有自动创建的群聊"),
         ("/groups dissolve 1 2", "按序号解散群聊，支持批量指定"),
+        ("/groups dissolve /path", "解散指定目录的群聊（精准匹配）"),
+        ("/groups dissolve /path/**", "解散指定目录及子目录的群聊"),
     ]),
     'attach': (_handle_attach_command, False, "【群聊模式】绑定 session 到当前群聊", [
         ("/attach <session_id>", "`<session_id>` 可以使用前缀（至少 8 个字符）"),

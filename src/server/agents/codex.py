@@ -67,6 +67,7 @@ class CodexAdapter(AgentAdapter):
             # resume 不支持 --cd，工作目录由原始会话决定
             args_argv = ['exec', 'resume', '--json', session_id, prompt]
 
+        self._ensure_skip_git_check(cmd_argv, args_argv)
         return expand_template(template, cmd_argv, args_argv)
 
     def build_debug_command_string(self, command_name: str, session_id: str,
@@ -83,7 +84,14 @@ class CodexAdapter(AgentAdapter):
         else:
             debug_args = ['exec', 'resume', '--json', session_id, 'PROMPT']
 
+        self._ensure_skip_git_check(cmd_argv, debug_args)
         return expand_template(template, cmd_argv, debug_args)
+
+    def _ensure_skip_git_check(self, cmd_argv: List[str], args_argv: List[str]) -> None:
+        """自动补充 --skip-git-repo-check，允许在非 git 目录下使用"""
+        skip_flag = '--skip-git-repo-check'
+        if skip_flag not in cmd_argv and skip_flag not in args_argv:
+            args_argv.insert(1, skip_flag)
 
     def parse_session_id(self, line: str) -> Optional[str]:
         """从 Codex --json 输出行解析 session ID
