@@ -5,7 +5,7 @@
 ### 方式一：快捷菜单测试（推荐）
 
 ```bash
-./test/test-permission-quick.sh
+./tests/integration/test-permission-quick.sh
 ```
 
 提供交互式菜单，预设常见测试场景：
@@ -23,24 +23,24 @@
 
 ```bash
 # 基本用法（默认 Bash）
-./test/test-permission.sh
+./tests/integration/test-permission.sh
 
 # 指定工具和命令
-./test/test-permission.sh bash "rm -rf /tmp/test"
+./tests/integration/test-permission.sh bash "rm -rf /tmp/test"
 
 # Bash 命令
-./test/test-permission.sh bash "npm install"
-./test/test-permission.sh bash "git push origin main"
+./tests/integration/test-permission.sh bash "npm install"
+./tests/integration/test-permission.sh bash "git push origin main"
 
 # Edit 文件编辑
-./test/test-permission.sh edit "/etc/hosts"
-./test/test-permission.sh edit ".env"
+./tests/integration/test-permission.sh edit "/etc/hosts"
+./tests/integration/test-permission.sh edit ".env"
 
 # Write 文件写入
-./test/test-permission.sh write "/tmp/test.txt" "测试内容"
+./tests/integration/test-permission.sh write "/tmp/test.txt" "测试内容"
 
 # Read 文件读取
-./test/test-permission.sh read "/etc/passwd"
+./tests/integration/test-permission.sh read "/etc/passwd"
 ```
 
 ## 测试前准备

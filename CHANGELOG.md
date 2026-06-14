@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-06-14
+
+#### 环境变量续聊透传
+
+- 新增 `SESSION_ENV_WHITELIST` / `SESSION_ENV_BLACKLIST` 配置，按白名单捕获启动 agent 时的 shell 环境变量，续聊时以 K=V 前缀注入，覆盖登录 shell 全局 export 的同名变量
+- 新增 `/cb/session/set-env` 回调路由，hook 进程后台上报 env 快照
+- Shell hook 子脚本（permission/stop/user_prompt）的 `source` 统一提升到 `hook-router.sh`，子脚本不再重复引入
+
+### Added - 2026-06-13
+
+#### `/notify` 指令：运行时覆盖通知配置
+
+- 新增 `/notify at self|all|off|<user_id>` 飞书指令，无需改 `.env`/重启即可临时调整通知 @ 行为
+- 新增 `/notify at HH:MM-HH:MM` 时段控制，仅在时段内 @；`/notify at always` 清除时段限制
+- 新增 `/notify delay <秒>` 运行时覆盖权限通知延迟；`/notify delay default` 恢复默认
+- 新增 `/notify status` 统一查看所有通知配置（@ 对象、时段、延迟）
+- 新增 `NotifyConfigStore`，运行时覆盖配置持久化到 `runtime/notify_config.json`
+- 新增 Callback 路由 `/cb/notify/config`（set_at/set_at_time/clear_at_time/set_permission_delay/clear_permission_delay/query）
+- `feishu.sh` 的 `_build_at_user_tag` 优先读取运行时覆盖，支持时段判断（含跨午夜），无覆盖时默认 @ owner
+- 废弃 `FEISHU_AT_USER` 环境变量，功能由 `/notify at` 完全替代
+- 废弃 `PERMISSION_NOTIFY_DELAY` 环境变量，功能由 `/notify delay` 完全替代（默认值从 60 调整为 0 即立即发送，升级时自动迁移已有配置）
+
+#### `/mute` 支持递归静音和加白
+
+- 新增 `/mute /path/**` 递归静音：静音指定目录及其所有子孙目录
+- 新增 `/unmute /path/**` 递归加白：标记目录及其所有子孙目录为不静音
+- 新增 `/unmute /path` 加白语义：对非静音目录写入显式加白，可预防性保护目录不被祖先递归静音覆盖
+- `mute_dir`/`unmute_dir` 不再校验目录是否存在，允许对已删除或尚未创建的路径操作（清除规则/预防性加白）
+- `DirectoryStore` 新增 3 字段数据模型（`muted_at`/`unmuted_at`/`recursive_at`），支持 6 种状态、24 条转移规则和 walk-up 匹配算法
+- `/mute list` 卡片改版：中文状态标签（静音·自身、不静音·自身+子目录 等）、按路径层级排序、顶部引用块展示命令帮助
+- 新增 38 个单元测试覆盖全部状态转移规则、walk-up 匹配、翻转保护和清除路径
+
 ### Changed - 2026-06-10
 
 #### Codex 自动补充 `--skip-git-repo-check` 参数

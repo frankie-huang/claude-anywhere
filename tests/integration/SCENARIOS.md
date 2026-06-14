@@ -568,7 +568,7 @@ export CALLBACK_SERVER_URL="http://wrong-server:9999"
 ```bash
 # 脚本测试快速连续请求
 for i in {1..10}; do
-  ./test/test-permission.sh bash "echo test$i"
+  ./tests/integration/test-permission.sh bash "echo test$i"
   sleep 0.5
 done
 ```

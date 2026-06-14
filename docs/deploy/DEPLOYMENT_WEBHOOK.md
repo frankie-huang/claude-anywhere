@@ -159,10 +159,8 @@ PERMISSION_SOCKET_PATH=/tmp/claude-permission.sock
 | `CALLBACK_SERVER_URL` | 否 | `http://localhost:8080` | 回调服务外部访问地址 |
 | `CALLBACK_SERVER_PORT` | 否 | `8080` | 回调服务监听端口 |
 | `PERMISSION_SOCKET_PATH` | 否 | `/tmp/claude-permission.sock` | Unix Socket 路径 |
-| `PERMISSION_NOTIFY_DELAY` | 否 | `60` | 权限通知延迟（秒） |
 | `PERMISSION_REQUEST_TIMEOUT` | 否 | `600` | 请求超时时间（秒，需为正整数，无效值回退默认值） |
 | `CALLBACK_PAGE_CLOSE_DELAY` | 否 | `3` | 决策页面自动关闭延迟（秒） |
-| `FEISHU_AT_USER` | 否 | 空 | 通知 @ 配置：空/`all`/`off` |
 
 ---
 

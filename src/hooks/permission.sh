@@ -15,10 +15,9 @@
 # =============================================================================
 
 # =============================================================================
-# 引入额外的函数库
+# 引入额外的函数库（core.sh / json.sh / feishu.sh 已由 hook-router.sh 引入）
 # =============================================================================
 source "$LIB_DIR/tool.sh"
-source "$LIB_DIR/feishu.sh"
 source "$LIB_DIR/socket.sh"
 source "$LIB_DIR/vscode-proxy.sh"
 
@@ -37,10 +36,26 @@ EXIT_HOOK_ERROR=2
 # =============================================================================
 # 配置 (优先级: .env > 环境变量 > 默认值)
 # =============================================================================
+
+# 从 runtime/notify_config.json 读取权限通知延迟（/notify delay 设置），默认 0
+_get_permission_notify_delay() {
+    local config_json delay
+    config_json=$(_get_notify_config)
+    if [ -n "$config_json" ]; then
+        delay=$(json_get "$config_json" "permission_delay")
+        # 非负整数才采用，否则回落到默认值 0
+        if [ -n "$delay" ] && [ "$delay" -ge 0 ] 2>/dev/null; then
+            echo "$delay"
+            return 0
+        fi
+    fi
+    echo "0"
+}
+
 SOCKET_PATH=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
 WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
 CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
-NOTIFY_DELAY=$(get_config "PERMISSION_NOTIFY_DELAY" "60")
+NOTIFY_DELAY=$(_get_permission_notify_delay)
 OWNER_ID=$(get_config "FEISHU_OWNER_ID" "")
 
 # MCP 模式下跳过延迟等待（用户无法在终端操作）

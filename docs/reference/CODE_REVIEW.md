@@ -228,7 +228,7 @@ if [ "${DEBUG:-0}" != "1" ]; then
 
 ### 16. [测试] 测试覆盖严重不足 — 待修复（原 #32）
 
-仍仅有 2 个手动测试脚本（`test/test-permission.sh`、`test/test-permission-quick.sh`），均针对 PermissionRequest。新增的 WebSocket 注册、多 Agent 支持、群聊会话、遥测等模块均无测试。
+仍仅有 2 个手动测试脚本（`tests/integration/test-permission.sh`、`tests/integration/test-permission-quick.sh`），均针对 PermissionRequest。新增的 WebSocket 注册、多 Agent 支持、群聊会话、遥测等模块均无测试。
 
 缺少：
 - WebSocket 协议测试

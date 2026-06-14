@@ -391,32 +391,109 @@ render_card_template() {
 # =============================================================================
 
 # ----------------------------------------------------------------------------
+# _get_notify_config - 读取运行时通知配置覆盖
+# ----------------------------------------------------------------------------
+# 功能: 从 runtime/notify_config.json 读取配置
+# 输出: JSON 字符串，文件不存在时输出空
+# ----------------------------------------------------------------------------
+_get_notify_config() {
+    local config_file="${RUNTIME_DIR}/notify_config.json"
+    if [ ! -f "$config_file" ]; then
+        return 0
+    fi
+    cat "$config_file" 2>/dev/null
+}
+
+# ----------------------------------------------------------------------------
+# _is_in_at_time_range - 检查当前时间是否在 @ 时段内
+# ----------------------------------------------------------------------------
+# 参数:
+#   $1 - at_start (HH:MM)
+#   $2 - at_end   (HH:MM)
+# 返回值:
+#   0 = 在时段内，应该 @
+#   1 = 不在时段内，不应该 @
+# ----------------------------------------------------------------------------
+_is_in_at_time_range() {
+    local at_start="$1" at_end="$2"
+    local current
+    current=$(date +%H:%M)
+
+    if ! [ "$at_start" \> "$at_end" ]; then
+        # 不跨午夜：08:00-22:00
+        ! [ "$current" \< "$at_start" ] && ! [ "$current" \> "$at_end" ] && return 0
+        return 1
+    else
+        # 跨午夜：22:00-08:00（current >= start 或 current <= end）
+        ! [ "$current" \< "$at_start" ] && return 0
+        ! [ "$current" \> "$at_end" ] && return 0
+        return 1
+    fi
+}
+
+# ----------------------------------------------------------------------------
 # _build_at_user_tag - 构建 @ 用户标签
 # ----------------------------------------------------------------------------
-# 功能: 根据 FEISHU_AT_USER 配置构建飞书 @ 用户标签
+# 功能: 根据运行时通知配置构建飞书 @ 用户标签
 #
 # 输出:
 #   飞书 @ 用户标签字符串（含尾部空格），或空字符串
 #
-# 配置规则:
-#   - FEISHU_AT_USER 为空:   默认 @ FEISHU_OWNER_ID
-#   - FEISHU_AT_USER=all:    @ 所有人
-#   - FEISHU_AT_USER=off:    不 @ 任何人
+# 优先级:
+#   1. runtime/notify_config.json 中的 at_user（通过 /notify at 设置）
+#   2. FEISHU_OWNER_ID → 默认（@ 自己）
 # ----------------------------------------------------------------------------
 _build_at_user_tag() {
-    local at_user_config
-    at_user_config=$(get_config "FEISHU_AT_USER" "")
+    local at_user_config notify_config_json
 
-    if [ "$at_user_config" = "off" ]; then
-        # 禁用 @ 功能
-        echo ""
-        return 0
-    fi
+    # 读取运行时通知配置覆盖
+    notify_config_json=$(_get_notify_config)
+    if [ -n "$notify_config_json" ]; then
+        # 一次 json_get_multi 取 3 个字段，减少子进程调用
+        local -a vals=()
+        while IFS= read -r _line; do
+            vals+=("$_line")
+        done <<< "$(json_get_multi "$notify_config_json" at_user at_start at_end)"
+        at_user_config="${vals[0]:-}"
+        local at_start="${vals[1]:-}"
+        local at_end="${vals[2]:-}"
 
-    if [ -n "$at_user_config" ]; then
-        # 使用指定的值（包括 "all"）
-        echo "<at id=${at_user_config}></at> "
-        return 0
+        # 有 runtime 覆盖时，检查时段
+        if [ -n "$at_user_config" ]; then
+            if [ "$at_user_config" = "off" ]; then
+                echo ""
+                return 0
+            fi
+            # 检查时段范围
+            if [ -n "$at_start" ] && [ -n "$at_end" ]; then
+                if ! _is_in_at_time_range "$at_start" "$at_end"; then
+                    echo ""
+                    return 0
+                fi
+            fi
+            if [ "$at_user_config" = "self" ]; then
+                # self → @ owner
+                local owner_id
+                owner_id=$(get_config "FEISHU_OWNER_ID" "")
+                if [ -n "$owner_id" ]; then
+                    echo "<at id=${owner_id}></at> "
+                else
+                    echo ""
+                fi
+                return 0
+            fi
+            # all 或 user_id
+            echo "<at id=${at_user_config}></at> "
+            return 0
+        fi
+
+        # at_user 为空但有时段设置时，也要检查时段
+        if [ -n "$at_start" ] && [ -n "$at_end" ]; then
+            if ! _is_in_at_time_range "$at_start" "$at_end"; then
+                echo ""
+                return 0
+            fi
+        fi
     fi
 
     # 默认 @ FEISHU_OWNER_ID
@@ -885,12 +962,8 @@ _get_chat_id() {
         return 0
     fi
 
-    # 调用 Callback 后端的 /cb/session/get-chat-id 接口查询
     # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
     # 传入 agent_type 用于 auto-mute 创建占位 session 时写入正确的 agent 类型
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
     local agent_type="${AGENT_TYPE:-claude}"
     local request_body
     if [ -n "$project_dir" ]; then
@@ -902,10 +975,7 @@ _get_chat_id() {
     fi
 
     local response
-    response=$(_do_curl_post "${callback_url}/cb/session/get-chat-id" \
-        "$request_body" \
-        "cb/session/get-chat-id" \
-        "$(_get_auth_token)")
+    response=$(_do_callback_post "/cb/session/get-chat-id" "$request_body")
 
     local http_code
     http_code=$(echo "$response" | head -n 1)
@@ -957,18 +1027,13 @@ _ensure_chat() {
         return 0
     fi
 
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
     local escaped_project_dir
     escaped_project_dir=$(json_escape "$project_dir")
 
     local response
     local agent_type="${AGENT_TYPE:-claude}"
-    response=$(_do_curl_post "${callback_url}/cb/session/ensure-chat" \
-        "{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_project_dir\"}" \
-        "cb/session/ensure-chat" \
-        "$(_get_auth_token)")
+    response=$(_do_callback_post "/cb/session/ensure-chat" \
+        "{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_project_dir\"}")
 
     local http_code
     http_code=$(echo "$response" | head -n 1)
@@ -988,6 +1053,74 @@ _ensure_chat() {
     else
         echo ""
     fi
+}
+
+# ----------------------------------------------------------------------------
+# _capture_session_env - 把启动 agent 时的白名单 env 快照上报给 callback
+# ----------------------------------------------------------------------------
+# 功能:
+#   hook 是 agent 的子进程，继承了启动 shell 实际生效的 env。
+#   按 SESSION_ENV_WHITELIST 配置取出匹配的 env，POST 给 /cb/session/set-env，
+#   后端写入 session.env_overrides。续聊时 AgentAdapter 读出作 K=V 前缀注入。
+#
+# 白名单格式（SESSION_ENV_WHITELIST）:
+#   逗号或空格分隔；末尾带 * 视作前缀通配，否则视作精确名。
+#   例: "ANTHROPIC_*, OPENAI_*, API_TIMEOUT_MS"
+#
+# 参数:
+#   $1 - session_id  当前会话 ID（必填，空则跳过）
+#
+# 行为:
+#   - 失败时仅记录日志，不影响主流程（best-effort）
+#   - 每次 hook 触发都调用一次（幂等覆盖）
+# ----------------------------------------------------------------------------
+_capture_session_env() {
+    local session_id="$1"
+    [ -z "$session_id" ] && return 0
+
+    local whitelist
+    whitelist=$(get_config "SESSION_ENV_WHITELIST" "")
+    [ -z "$whitelist" ] && return 0
+    whitelist="${whitelist//,/ }"
+
+    # 单遍遍历 env，逐条匹配白名单规则
+    local json_pairs=""
+    local line var_name val rule match
+    while IFS= read -r line; do
+        var_name="${line%%=*}"
+        val="${line#*=}"
+        [ -z "$var_name" ] && continue
+
+        match=""
+        for rule in $whitelist; do
+            [ -z "$rule" ] && continue
+            if [[ "$rule" == *\* ]]; then
+                [[ "$var_name" == "${rule%\*}"* ]] && match=1 && break
+            else
+                [ "$var_name" = "$rule" ] && match=1 && break
+            fi
+        done
+        [ -z "$match" ] && continue
+
+        [ -n "$json_pairs" ] && json_pairs="${json_pairs},"
+        json_pairs="${json_pairs}\"${var_name}\":\"$(json_escape "$val")\""
+    done < <(env 2>/dev/null)
+
+    if [ -z "$json_pairs" ]; then
+        log "capture_session_env: no whitelisted env vars present, skipping"
+        return 0
+    fi
+
+    local request_body="{\"session_id\":\"$session_id\",\"env\":{${json_pairs}}}"
+
+    local response http_code
+    response=$(_do_callback_post "/cb/session/set-env" "$request_body")
+
+    http_code=$(echo "$response" | head -n 1)
+    if [ "$http_code" != "200" ]; then
+        log "capture_session_env: backend returned $http_code (non-fatal)"
+    fi
+    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -1071,15 +1204,9 @@ _get_last_message_id() {
         return 0
     fi
 
-    # 调用 Callback 后端的 /cb/session/get-last-message-id 接口查询
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
     local response
-    response=$(_do_curl_post "${callback_url}/cb/session/get-last-message-id" \
-        "{\"session_id\":\"$session_id\"}" \
-        "cb/session/get-last-message-id" \
-        "$(_get_auth_token)")
+    response=$(_do_callback_post "/cb/session/get-last-message-id" \
+        "{\"session_id\":\"$session_id\"}")
 
     local http_code
     http_code=$(echo "$response" | head -n 1)
@@ -1121,14 +1248,9 @@ _check_skip_user_prompt() {
         return 0
     fi
 
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
     local response
-    response=$(_do_curl_post "${callback_url}/cb/session/check-skip-user-prompt" \
-        "{\"session_id\":\"$session_id\"}" \
-        "cb/session/check-skip-user-prompt" \
-        "$(_get_auth_token)")
+    response=$(_do_callback_post "/cb/session/check-skip-user-prompt" \
+        "{\"session_id\":\"$session_id\"}")
 
     local http_code
     http_code=$(echo "$response" | head -n 1)
@@ -1149,6 +1271,28 @@ _check_skip_user_prompt() {
 }
 
 # ----------------------------------------------------------------------------
+# _do_callback_post - 向 Callback 后端发送 POST 请求
+# ----------------------------------------------------------------------------
+# 功能: 封装 callback_url 构造和 auth_token，简化 /cb/* 路由的调用
+#
+# 参数:
+#   $1 - path          路由路径（如 /cb/session/set-env）
+#   $2 - request_body  请求 JSON 字符串
+#   $3 - log_prefix    日志前缀 (可选，默认取 path 去掉前导 /)
+#
+# 输出/返回: 同 _do_curl_post
+# ----------------------------------------------------------------------------
+_do_callback_post() {
+    local path="$1"
+    local request_body="$2"
+    local log_prefix="${3:-${path#/}}"
+
+    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
+    callback_url=$(echo "$callback_url" | sed 's:/*$::')
+
+    _do_curl_post "${callback_url}${path}" "$request_body" "$log_prefix" "$(_get_auth_token)"
+}
+
 # _do_curl_post - 执行 POST 请求的通用函数
 # ----------------------------------------------------------------------------
 # 功能: 执行 JSON POST 请求，并解析响应
@@ -1416,13 +1560,8 @@ _record_dir_usage() {
         return 0
     fi
 
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
-    _do_curl_post "${callback_url}/cb/directory/record-usage" \
-        "$(json_build_object "project_dir" "$project_dir")" \
-        "cb/directory/record-usage" \
-        "$(_get_auth_token)" >/dev/null 2>&1 || true
+    _do_callback_post "/cb/directory/record-usage" \
+        "$(json_build_object "project_dir" "$project_dir")" >/dev/null 2>&1 || true
 }
 
 # ----------------------------------------------------------------------------
@@ -1953,7 +2092,7 @@ send_feishu_text() {
 # 说明:
 #   - 仅 openapi 模式可用（需要 FEISHU_OWNER_ID 配置）
 #   - 传入 session_id 时自动查询 chat_id 和 last_message_id 实现链式回复
-#   - 默认 at 机器人（不受 FEISHU_AT_USER 配置控制，后续如需可另加配置）
+#   - 默认 at 机器人（与 /notify at 的 @ 通知配置无关，此处是 @ bot 自身）
 #   - 非 openapi 模式自动降级为 send_feishu_text 纯文本发送
 # ----------------------------------------------------------------------------
 send_feishu_post() {

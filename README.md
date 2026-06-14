@@ -132,7 +132,9 @@ code-anywhere/
 │       ├── CLAUDE_CODE_HOOKS.md
 │       ├── CODE_REVIEW.md
 │       └── USER_GUIDE.md
-├── test/                       # 测试脚本
+├── tests/                      # 测试
+│   ├── test_*.py               # Python 单元测试
+│   └── integration/            # Shell 集成测试脚本
 ├── runtime/                    # 运行时数据（session 映射等）
 └── log/                        # 日志目录
 ```
@@ -360,7 +362,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 ## 已完成功能
 
 ### 核心功能
-- ✅ **权限通知延迟发送**: 支持配置延迟时间，避免快速连续请求时的消息轰炸（`PERMISSION_NOTIFY_DELAY`）
+- ✅ **权限通知延迟发送**: 支持通过 `/notify delay` 配置延迟时间，避免快速连续请求时的消息轰炸
 - ✅ **飞书卡片模板化**: 支持模块化的飞书卡片模板，便于自定义和扩展
 - ✅ **决策页面自动关闭**: 支持定时自动关闭决策页面（`CALLBACK_PAGE_CLOSE_DELAY`）
 - ✅ **任务完成通知**: Agent 处理完成后自动发送飞书通知，包含响应摘要和会话标识
@@ -723,11 +725,11 @@ FEISHU_OWNER_ID=ou_admin_user
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `FEISHU_AT_USER` | 通知 @ 用户配置：空=@ `FEISHU_OWNER_ID`，`all`=@ 所有人，`off`=禁用 | 空 |
+| ~~`FEISHU_AT_USER`~~ | **已废弃**，由飞书指令 `/notify at` 替代（支持 self/all/off/时段控制） | 空 |
 | ~~`FEISHU_REPLY_IN_THREAD`~~ | **已废弃**，由 `FEISHU_SESSION_MODE=thread` 替代。仅为向后兼容保留 | `false` |
 | `PERMISSION_SOCKET_PATH` | Unix Socket 路径（PermissionRequest hook 与回调服务通信） | `/tmp/claude-permission.sock` |
 | `PERMISSION_REQUEST_TIMEOUT` | 权限请求服务端超时秒数（需为正整数，无效值回退默认值） | 600 |
-| `PERMISSION_NOTIFY_DELAY` | 权限通知延迟发送秒数 | 60 |
+| ~~`PERMISSION_NOTIFY_DELAY`~~ | **已废弃**，由 `/notify delay` 替代（默认 0，立即发送） | 0 |
 | `CALLBACK_PAGE_CLOSE_DELAY` | 回调页面自动关闭秒数（仅 Webhook 模式，建议范围 1-10） | 3 |
 | `STOP_THINKING_MAX_LENGTH` | Stop 事件思考过程最大长度（字符数，0 禁用） | 10000 |
 | `STOP_MESSAGE_MAX_LENGTH` | Stop 事件消息最大长度（字符数） | 10000 |
@@ -752,6 +754,8 @@ FEISHU_OWNER_ID=ou_admin_user
 | `CLAUDE_ARGS_TEMPLATE` | Claude 命令行模板，详见下文 | `{cmd} {args}` |
 | `CODEX_COMMAND` | Codex 命令，仅当 `ENABLED_AGENTS` 包含 `codex` 时生效，格式同 `CLAUDE_COMMAND` | `codex` |
 | `CODEX_ARGS_TEMPLATE` | Codex 命令行模板，仅当 `ENABLED_AGENTS` 包含 `codex` 时生效 | `{cmd} {args}` |
+| `SESSION_ENV_WHITELIST` | 续聊 env 透传白名单，逗号分隔，支持 `PREFIX_*` 通配 | 空 |
+| `SESSION_ENV_BLACKLIST` | 续聊时 `env -u` 移除的变量，逗号分隔，支持 `PREFIX_*` 通配 | 空 |
 
 **多 Agent 支持**
 
@@ -972,6 +976,6 @@ brew install python3 curl jq socat
 - [OpenSpec 规范](openspec/specs/) - 项目变更规范管理
 
 ### 测试文档
-- [测试文档](test/README.md) - 测试脚本使用说明
-- [测试指令集](test/PROMPTS.md) - 权限请求测试指令
-- [测试场景](test/SCENARIOS.md) - 详细测试场景文档
+- [测试文档](tests/integration/README.md) - 测试脚本使用说明
+- [测试指令集](tests/integration/PROMPTS.md) - 权限请求测试指令
+- [测试场景](tests/integration/SCENARIOS.md) - 详细测试场景文档

@@ -32,6 +32,9 @@ source "$SCRIPT_DIR/lib/core.sh"
 source "$LIB_DIR/json.sh"
 json_init
 
+# 引入飞书/通信函数库（子脚本共享，不需要重复 source）
+source "$LIB_DIR/feishu.sh"
+
 # 初始化日志
 log_init
 
@@ -70,6 +73,19 @@ esac
 export AGENT_TYPE
 
 log "Hook router received event: $HOOK_EVENT, agent: $AGENT_TYPE"
+
+# =============================================================================
+# 会话 env 快照
+# =============================================================================
+# hook 继承了用户 shell 实际生效的 env，路由前抓一次白名单 env 供续聊注入
+if [ "${MCP_MODE:-}" != "1" ]; then
+    # 仅非 MCP 模式：MCP 下 env 来自 server 进程而非用户 shell，捕获无意义
+    _session_id=$(json_get "$INPUT" "session_id")
+    if [ -n "$_session_id" ] && [ "$_session_id" != "null" ]; then
+        _capture_session_env "$_session_id" >/dev/null 2>&1 &  # 后台执行，不阻塞 hook 主流程
+    fi
+    unset _session_id
+fi
 
 # =============================================================================
 # 路由分发

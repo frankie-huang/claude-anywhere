@@ -491,6 +491,11 @@ def main():
     DirectoryStore.initialize(runtime_dir)
     logger.info(f"DirectoryStore initialized with runtime_dir={runtime_dir}")
 
+    # 初始化 NotifyConfigStore（运行时通知配置覆盖）
+    from services.notify_config_store import NotifyConfigStore
+    NotifyConfigStore.initialize(runtime_dir)
+    logger.info(f"NotifyConfigStore initialized with runtime_dir={runtime_dir}")
+
     # 初始化 BindingStore（用于网关注册功能）
     BindingStore.initialize(runtime_dir)
     logger.info(f"BindingStore initialized with runtime_dir={runtime_dir}")

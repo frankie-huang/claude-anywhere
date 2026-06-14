@@ -80,7 +80,7 @@ Agent 触发 Hook 事件 → src/hook-router.sh（统一入口）
 ```
 1. Agent 触发 PermissionRequest → hook-router.sh → permission.sh
 2. permission.sh 通过 Unix Socket 发送请求到 Server
-3. Server 发 ACK + 推送飞书卡片（延迟 PERMISSION_NOTIFY_DELAY 秒）
+3. Server 发 ACK + 推送飞书卡片（延迟由 /notify delay 配置）
 4. 用户点飞书按钮 → Server 收到决策 → 通过 Socket 发回 permission.sh
 5. permission.sh 返回决策给 Agent（exit code: 0=成功, 1=回退终端, 2=错误）
 ```
@@ -120,14 +120,18 @@ Agent 触发 Hook 事件 → src/hook-router.sh（统一入口）
 ### 测试
 
 ```bash
-./test/test-permission-quick.sh                        # 交互式菜单测试（推荐）
-./test/test-permission.sh                              # 默认 Bash 工具测试
-./test/test-permission.sh bash "git push"              # 测试指定 Bash 命令
-./test/test-permission.sh edit "/etc/hosts"            # 测试文件编辑
-./test/test-permission.sh write "/tmp/f.txt" "content" # 测试文件写入
+# Python 单元测试
+python3 -m unittest tests.test_directory_store_recursive -v
+
+# Shell 集成测试（需先启动服务）
+./tests/integration/test-permission-quick.sh                        # 交互式菜单测试（推荐）
+./tests/integration/test-permission.sh                              # 默认 Bash 工具测试
+./tests/integration/test-permission.sh bash "git push"              # 测试指定 Bash 命令
+./tests/integration/test-permission.sh edit "/etc/hosts"            # 测试文件编辑
+./tests/integration/test-permission.sh write "/tmp/f.txt" "content" # 测试文件写入
 ```
 
-测试前需先启动服务（`./setup.sh start`）。详细测试场景见 `test/SCENARIOS.md`。
+集成测试前需先启动服务（`./setup.sh start`）。详细测试场景见 `tests/integration/SCENARIOS.md`。
 
 ### 直接管理服务进程
 

@@ -52,7 +52,11 @@ class SessionChatStore:
                 "updated_at": 1706745600,          # 最近更新时间戳
                 "project_dir": "/path/to/project", # 项目目录（可选）
                 "muted_at": 1706745600,            # 出站静音时间戳（可选）
-                "dissolved": true                  # 群已解散标志（可选）
+                "dissolved": true,                 # 群已解散标志（可选）
+                "env_overrides": {                 # hook 快照的白名单 env（可选，续聊注入，值可为空串）
+                    "ANTHROPIC_BASE_URL": "https://x.com",
+                    "NO_PROXY": ""
+                }
             }
         }
 
@@ -292,6 +296,63 @@ class SessionChatStore:
             except Exception as e:
                 logger.error("[session-chat-store] Failed to set skip flag: %s", e)
                 return False
+
+    def set_env_overrides(self, session_id: str, env: Dict[str, str]) -> bool:
+        """记录该 session 启动时的白名单 env 快照
+
+        续聊时由 AgentAdapter 取出，以 K=V 前缀注入续聊命令，覆盖登录 shell
+        中 .zshenv/.bashrc 全局 export 的同名变量。
+
+        每次 hook 触发都会调用（幂等覆盖）。不会为不存在的 session 创建
+        占位记录——否则 do_ensure_chat 误判为"session 存在"跳过建群。
+
+        Args:
+            session_id: 会话 ID
+            env: 已过白名单过滤的 env 字典
+
+        Returns:
+            是否成功写入；session 不存在时返回 False
+        """
+        if not session_id or not isinstance(env, dict):
+            return False
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False
+                filtered = {str(k): str(v) for k, v in env.items() if k}
+                existing = item.get('env_overrides') or {}
+                if filtered == existing:
+                    return True
+                if not filtered:
+                    item.pop('env_overrides', None)
+                else:
+                    item['env_overrides'] = filtered
+                item['updated_at'] = int(time.time())
+                data[session_id] = item
+                if not self._save(data):
+                    return False
+                logger.info("[session-chat-store] Set env_overrides: session=%s, keys=%s",
+                            session_id, sorted(filtered.keys()))
+                return True
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to set env_overrides: %s", e)
+                return False
+
+    def get_env_overrides(self, session_id: str) -> Dict[str, str]:
+        """读取 session 的 env_overrides 快照
+
+        Returns:
+            env 字典；不存在/过期/dissolved 返回空 dict
+        """
+        item = self.get_session(session_id)
+        if not item:
+            return {}
+        env = item.get('env_overrides') or {}
+        if not isinstance(env, dict):
+            return {}
+        return env
 
     def check_and_clear_skip_user_prompt(self, session_id: str) -> bool:
         """原子检查并清除 skip_next_user_prompt 标志

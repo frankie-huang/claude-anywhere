@@ -663,13 +663,6 @@ send_stop_notification_async() {
         return 0
     fi
 
-    # 引入函数库（后台进程需要重新引入）
-    source "$LIB_DIR/core.sh" 2>/dev/null || return 0
-    source "$LIB_DIR/feishu.sh" 2>/dev/null || return 0
-    source "$LIB_DIR/json.sh" 2>/dev/null || return 0
-    json_init
-    log_init
-
     log "Stop notification: extracting response from transcript"
 
     # 提取响应内容（texts 数组 + thinking）

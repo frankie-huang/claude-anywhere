@@ -433,8 +433,8 @@ permission.sh SHALL 作为 Claude 和 Codex 的共享权限审批脚本，两种
 
 #### Scenario: 配置延迟时间
 
-- **GIVEN** 用户在 `.env` 文件中配置 `PERMISSION_NOTIFY_DELAY=3`
-- **WHEN** permission-notify.sh 收到权限请求
+- **GIVEN** 用户通过 `/notify delay 3` 配置了 3 秒延迟
+- **WHEN** permission.sh 收到权限请求
 - **THEN** 脚本等待 3 秒后再发送飞书通知
 - **AND** 默认值为 0（立即发送）
 

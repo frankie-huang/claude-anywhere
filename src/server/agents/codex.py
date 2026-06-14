@@ -10,7 +10,7 @@ import logging
 import shlex
 from typing import Dict, List, Optional
 
-from agents import AgentAdapter, SlashCommandInfo, expand_template
+from agents import AgentAdapter, SlashCommandInfo, expand_template, prepend_env_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,15 @@ class CodexAdapter(AgentAdapter):
             args_argv = ['exec', 'resume', '--json', session_id, prompt]
 
         self._ensure_skip_git_check(cmd_argv, args_argv)
-        return expand_template(template, cmd_argv, args_argv)
+        cmd_str = expand_template(template, cmd_argv, args_argv)
+        return prepend_env_overrides(session_id, cmd_str)
 
     def build_debug_command_string(self, command_name: str, session_id: str,
                                    session_mode: str) -> str:
-        """构建日志版本的 Codex 命令（隐藏 prompt）"""
+        """构建日志版本的 Codex 命令（隐藏 prompt）
+
+        env_overrides 的 key 以 KEY=*** 形式打印，避免敏感值入日志。
+        """
         from config import get_codex_args_template
 
         cmd = self.resolve_command(command_name)
@@ -85,7 +89,8 @@ class CodexAdapter(AgentAdapter):
             debug_args = ['exec', 'resume', '--json', session_id, 'PROMPT']
 
         self._ensure_skip_git_check(cmd_argv, debug_args)
-        return expand_template(template, cmd_argv, debug_args)
+        cmd_str = expand_template(template, cmd_argv, debug_args)
+        return prepend_env_overrides(session_id, cmd_str, redact=True)
 
     def _ensure_skip_git_check(self, cmd_argv: List[str], args_argv: List[str]) -> None:
         """自动补充 --skip-git-repo-check，允许在非 git 目录下使用"""

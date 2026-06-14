@@ -2841,8 +2841,6 @@ def _set_last_message_id_to_callback(binding: Dict[str, Any],
                                      session_id: str, message_id: str) -> bool:
     """通过 Callback 后端设置 session 的 last_message_id
 
-    优先使用 WS 隧道，fallback 到 HTTP。
-
     Args:
         binding: 绑定信息字典（包含 _owner_id、callback_url、auth_token）
         session_id: 会话 ID
@@ -2851,27 +2849,8 @@ def _set_last_message_id_to_callback(binding: Dict[str, Any],
     Returns:
         是否设置成功
     """
-    request_data = {
-        'session_id': session_id,
-        'message_id': message_id
-    }
-
-    try:
-        response_data = _forward_via_ws_or_http(binding, '/cb/session/set-last-message-id', request_data)
-
-        if response_data is None:
-            return False
-
-        success = response_data.get('success', False)
-        if success:
-            logger.info(f"[feishu] Set last_message_id via callback: session={session_id}, message_id={message_id}")
-        else:
-            logger.warning(f"[feishu] Failed to set last_message_id: {response_data.get('error', 'unknown')}")
-        return success
-
-    except Exception as e:
-        logger.error(f"[feishu] Set last_message_id error: {e}")
-        return False
+    from services.session_facade import SessionFacade
+    return SessionFacade.set_last_message_id(binding, session_id, message_id)
 
 
 # 会话路由失败时的通用反馈文案（/mute /unmute / 主路由等场景共用）
@@ -3313,24 +3292,13 @@ def batch_dissolve_groups(binding: Dict[str, Any],
         return {'dissolved_items': [], 'skipped_items': skipped_items, 'failed': []}
 
     # 2) 先通知 callback 标记 dissolved；失败则中止，等下次清理重试
-    try:
-        resp = _forward_via_ws_or_http(binding,
-                                       '/cb/session/invalidate-chats',
-                                       {'chat_ids': targets})
-        if not resp or not resp.get('ok'):
-            err_msg = (resp or {}).get('error', 'unknown error')
-            logger.error("[dissolve] invalidate-chats returned not-ok: %s", err_msg)
-            return {
-                'dissolved_items': [],
-                'skipped_items': skipped_items,
-                'failed': [{'chat_id': cid, 'error': 'pre-notify failed: %s' % err_msg} for cid in targets],
-            }
-    except Exception as e:
-        logger.error("[dissolve] invalidate-chats pre-notify failed, aborting: %s", e)
+    from services.session_facade import SessionFacade
+    resp = SessionFacade.invalidate_chats(binding, targets)
+    if resp is None:
         return {
             'dissolved_items': [],
             'skipped_items': skipped_items,
-            'failed': [{'chat_id': cid, 'error': 'pre-notify failed: %s' % e} for cid in targets],
+            'failed': [{'chat_id': cid, 'error': 'pre-notify failed'} for cid in targets],
         }
 
     # 3) 再调飞书 API 解散 + 清 GroupChatStore
@@ -4276,10 +4244,8 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
         _send_notice_message(chat_id, "存储服务未就绪，请稍后重试", message_id)
         return
 
-    resp = _forward_via_ws_or_http(binding, '/cb/session/attach', {
-        'session_prefix': prefix,
-        'chat_id': chat_id,
-    })
+    from services.session_facade import SessionFacade
+    resp = SessionFacade.attach(binding, prefix, chat_id)
 
     if not resp:
         _send_notice_message(chat_id, "Callback 服务不可达", message_id)
@@ -4370,7 +4336,8 @@ def _handle_mute_command(data: dict, args: str) -> None:
         /mute                — 静音当前会话
         /mute <session_id>   — 静音指定会话，需要指定完整的 session_id
         /mute /path          — 静音指定目录（以 / 开头的参数视为目录）
-        /mute list           — 查看所有已静音的会话和目录
+        /mute /path/**       — 递归静音指定目录及其所有子孙目录
+        /mute list           — 查看所有静音和加白规则
     """
     event = data.get('event', {})
     message = event.get('message', {})
@@ -4390,13 +4357,17 @@ def _handle_mute_command(data: dict, args: str) -> None:
 
     # 参数以 / 开头 → 目录 mute
     if trimmed.startswith('/'):
-        changed = SessionFacade.mute_dir(binding, trimmed)
-        if changed is None:
+        recursive = trimmed.endswith('/**')
+        dir_path = trimmed[:-3] if recursive else trimmed
+        if not dir_path:
+            dir_path = '/'
+        result = SessionFacade.mute_dir(binding, dir_path, recursive=recursive)
+        if result is None:
             _run_in_background(_send_notice_message,
                                (chat_id, "目录静音操作失败，请查看日志。", message_id))
             return
-        text = (f"已静音目录 `{trimmed}`，从终端发起的新会话将自动静音。"
-                if changed else f"目录 `{trimmed}` 已处于静音状态。")
+        display = f"`{dir_path.rstrip('/')}/**`" if recursive else f"`{dir_path}`"
+        text = f"目录 {display} {result['message']}"
         _run_in_background(_send_notice_message, (chat_id, text, message_id))
         return
 
@@ -4431,12 +4402,13 @@ def _handle_mute_command(data: dict, args: str) -> None:
 
 
 def _handle_unmute_command(data: dict, args: str) -> None:
-    """处理 /unmute 命令：解除会话或目录静音
+    """处理 /unmute 命令：解除静音 / 标记目录为不静音
 
     用法：
         /unmute                — 解除当前会话静音
         /unmute <session_id>   — 解除指定会话静音，需要指定完整的 session_id
-        /unmute /path          — 解除指定目录静音
+        /unmute /path          — 解除目录静音，或标记为不静音
+        /unmute /path/**       — 解除目录递归静音，或标记目录及其所有子目录为不静音
     """
     event = data.get('event', {})
     message = event.get('message', {})
@@ -4451,13 +4423,17 @@ def _handle_unmute_command(data: dict, args: str) -> None:
 
     # 参数以 / 开头 → 目录 unmute
     if trimmed.startswith('/'):
-        changed = SessionFacade.unmute_dir(binding, trimmed)
-        if changed is None:
+        recursive = trimmed.endswith('/**')
+        dir_path = trimmed[:-3] if recursive else trimmed
+        if not dir_path:
+            dir_path = '/'
+        result = SessionFacade.unmute_dir(binding, dir_path, recursive=recursive)
+        if result is None:
             _run_in_background(_send_notice_message,
-                               (chat_id, "解除目录静音失败，请查看日志。", message_id))
+                               (chat_id, "目录加白操作失败，请查看日志。", message_id))
             return
-        text = (f"已解除目录 `{trimmed}` 的静音。"
-                if changed else f"目录 `{trimmed}` 当前未处于静音状态。")
+        display = f"`{dir_path.rstrip('/')}/**`" if recursive else f"`{dir_path}`"
+        text = f"目录 {display} {result['message']}"
         _run_in_background(_send_notice_message, (chat_id, text, message_id))
         return
 
@@ -4504,16 +4480,32 @@ def _send_mute_list_card(binding: Dict[str, Any], chat_id: str,
     sessions = result.get('sessions', [])
     dirs = result.get('dirs', [])
     if not sessions and not dirs:
-        _send_notice_message(chat_id, "当前没有任何静音的会话或目录。", reply_to)
+        _send_notice_message(chat_id, "当前没有任何静音和加白规则。", reply_to)
         return
 
     # 构建卡片元素列表，目录块和会话块用 column_set 背景色区分
-    elements = []
+    elements = [{"tag": "markdown", "content": (
+        "> **目录：**`/mute /path`  `/unmute /path`  加 `/**` 含子目录\n"
+        "> **会话：**`/mute` `/unmute`（在会话内），后接 session_id 可指定会话"
+    )}]
     if dirs:
-        dir_parts = [f"**已静音的目录 ({len(dirs)})**", ""]
+        dir_parts = [f"**目录规则 ({len(dirs)})**", ""]
+        from services.directory_store import (
+            S_MUTED, S_MUTED_RECURSIVE, S_MUTED_CHILDREN,
+            S_UNMUTED, S_UNMUTED_RECURSIVE,
+        )
+        _status_labels = {
+            S_MUTED: '静音·自身',
+            S_MUTED_RECURSIVE: '静音·自身+子目录',
+            S_MUTED_CHILDREN: '静音·仅子目录',
+            S_UNMUTED: '不静音·自身',
+            S_UNMUTED_RECURSIVE: '不静音·自身+子目录',
+        }
         for d in dirs:
-            muted_date = datetime.fromtimestamp(d['muted_at']).strftime('%Y-%m-%d')
-            dir_parts.append(f"- `{d['project_dir']}`  {muted_date}")
+            ts = max(d.get('muted_at', 0), d.get('unmuted_at', 0), d.get('recursive_at', 0))
+            date_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else ''
+            label = _status_labels.get(d.get('status', ''), d.get('status', ''))
+            dir_parts.append(f"- `{d['project_dir']}`  [{label}]  {date_str}")
         elements.append({
             "tag": "column_set",
             "background_style": "grey",
@@ -4552,13 +4544,12 @@ def _send_mute_list_card(binding: Dict[str, Any], chat_id: str,
                 "elements": [{"tag": "markdown", "content": '\n'.join(session_parts)}]
             }]
         })
-    elements.append({"tag": "markdown", "content": "**解除静音：**`/unmute`（在会话内）、`/unmute <session_id>` 或 `/unmute /path`"})
 
     card = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "静音列表"},
+            "title": {"tag": "plain_text", "content": "静音和加白规则"},
             "template": "blue"
         },
         "body": {
@@ -4639,17 +4630,8 @@ def _handle_clear_command(data: dict, args: str) -> None:
     new_session_id = str(uuid.uuid4())
 
     # 1. callback 侧创建新 session（继承旧 session 属性）
-    try:
-        resp = _forward_via_ws_or_http(binding, '/cb/session/clone', {
-            'old_session_id': old_session_id,
-            'new_session_id': new_session_id,
-            'chat_id': chat_id,
-        })
-    except Exception as e:
-        logger.error("[feishu] /clear clone failed: %s", e)
-        _run_in_background(_send_notice_message,
-                           (chat_id, "清空会话失败，请稍后重试", message_id))
-        return
+    from services.session_facade import SessionFacade
+    resp = SessionFacade.clone(binding, old_session_id, new_session_id, chat_id)
 
     if not resp or not resp.get('ok'):
         logger.error("[feishu] /clear clone returned error: %s", resp)
@@ -4668,6 +4650,195 @@ def _handle_clear_command(data: dict, args: str) -> None:
     _run_in_background(_send_notice_message,
                        (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
                         message_id))
+
+
+# =============================================================================
+# /notify 命令
+# =============================================================================
+
+_TIME_RANGE_RE = re.compile(
+    r'^((?:[01]\d|2[0-3]):[0-5]\d|24:00)-((?:[01]\d|2[0-3]):[0-5]\d|24:00)$'
+)
+
+
+def _parse_notify_args(args: str) -> Tuple:
+    """解析 /notify 子命令，返回 (action, ...) 元组。
+
+    Returns:
+        ('query',)                        — 查询所有通知配置
+        ('set_at', at_user)               — 设置 @ 对象
+        ('set_at_time', start, end)       — 设置 @ 时段
+        ('clear_at_time',)                — 清除时段限制
+        ('set_permission_delay', delay)   — 设置权限通知延迟
+        ('clear_permission_delay',)       — 清除通知延迟覆盖
+
+    Raises:
+        ValueError: 参数格式错误
+    """
+    try:
+        parts = shlex.split(args or '')
+    except ValueError:
+        raise ValueError('Invalid notify args')
+
+    # /notify 或 /notify status → 查询所有配置
+    if not parts or parts[0] == 'status':
+        return ('query',)
+
+    sub = parts[0]
+
+    # /notify at ...
+    if sub == 'at':
+        if len(parts) == 1:
+            raise ValueError('Missing at argument')
+        if len(parts) != 2:
+            raise ValueError('Invalid notify at args')
+        value = parts[1]
+        if value == 'always':
+            return ('clear_at_time',)
+        if re.match(r'^\d{2}:\d{2}-\d{2}:\d{2}$', value):
+            m = _TIME_RANGE_RE.match(value)
+            if not m:
+                raise ValueError('Invalid time range format')
+            return ('set_at_time', m.group(1), m.group(2))
+        return ('set_at', value)
+
+    # /notify delay ...
+    if sub == 'delay':
+        if len(parts) == 1:
+            raise ValueError('Missing delay argument')
+        if len(parts) != 2:
+            raise ValueError('Invalid notify delay args')
+        value = parts[1]
+        if value == 'default':
+            return ('clear_permission_delay',)
+        try:
+            delay = int(value)
+        except ValueError:
+            raise ValueError('Delay must be a non-negative integer')
+        if delay < 0 or delay > 86400:
+            raise ValueError('Delay must be 0-86400')
+        return ('set_permission_delay', delay)
+
+    raise ValueError('Unsupported notify command')
+
+
+def _handle_notify_command(data: dict, args: str) -> None:
+    """处理 /notify 命令：管理通知相关运行时配置。"""
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+
+    binding = _get_binding_from_event(event)
+    if not binding:
+        return
+
+    try:
+        parsed = _parse_notify_args(args)
+    except ValueError:
+        _run_in_background(
+            _send_notice_message,
+            (chat_id,
+             "用法：\n"
+             "  `/notify status` — 查看当前配置\n"
+             "  `/notify at self|all|off|<user_id>` — 设置 @ 对象\n"
+             "  `/notify at HH:MM-HH:MM` — 设置 @ 时段\n"
+             "  `/notify at always` — 清除时段限制\n"
+             "  `/notify delay <秒>` — 设置权限通知延迟\n"
+             "  `/notify delay default` — 恢复默认权限通知延迟",
+             message_id)
+        )
+        return
+
+    _run_in_background(
+        _forward_notify_command,
+        (binding, parsed, chat_id, message_id)
+    )
+
+
+def _forward_notify_command(binding: Dict[str, Any], parsed: Tuple,
+                            chat_id: str, message_id: str) -> None:
+    """转发 /notify 命令到 Callback 后端并反馈结果。"""
+    action = parsed[0]
+    payload = {'action': action}
+
+    if action == 'set_at':
+        payload['at_user'] = parsed[1]
+    elif action == 'set_at_time':
+        payload['at_start'] = parsed[1]
+        payload['at_end'] = parsed[2]
+    elif action == 'set_permission_delay':
+        payload['delay'] = parsed[1]
+
+    try:
+        resp = _forward_via_ws_or_http(binding, '/cb/notify/config', payload)
+    except Exception as e:
+        logger.error("[feishu] /cb/notify/config error: %s", e)
+        resp = None
+
+    if not resp or not resp.get('ok'):
+        _send_notice_message(chat_id, "通知配置操作失败，请查看日志。", message_id)
+        return
+
+    _send_notice_message(chat_id, _format_notify_result(action, resp), message_id)
+
+
+def _format_notify_result(action: str, resp: Dict[str, Any]) -> str:
+    """格式化 /notify 操作结果的反馈文案。"""
+    config = resp.get('config', {})
+    at_user = config.get('at_user', '')
+    at_start = config.get('at_start', '')
+    at_end = config.get('at_end', '')
+
+    if action == 'query':
+        parts = []
+        # @ 对象
+        if not at_user or at_user == 'self':
+            parts.append("@ 对象：自己（默认）")
+        elif at_user == 'off':
+            parts.append("@ 对象：已关闭")
+        elif at_user == 'all':
+            parts.append("@ 对象：所有人")
+        else:
+            parts.append("@ 对象：`%s`" % at_user)
+        # @ 时段
+        if at_start and at_end:
+            end_label = "次日 %s" % at_end if at_start > at_end else at_end
+            parts.append("@ 时段：%s - %s" % (at_start, end_label))
+        else:
+            parts.append("@ 时段：全天")
+        # 权限通知延迟
+        delay = config.get('permission_delay')
+        if delay is not None:
+            parts.append("权限通知延迟：%d 秒%s" % (delay, "（立即发送）" if delay == 0 else ""))
+        else:
+            parts.append("权限通知延迟：默认")
+        return '\n'.join(parts)
+
+    if action == 'clear_at_time':
+        return "已清除通知时段限制。"
+
+    if action == 'set_at_time':
+        end_label = "次日 %s" % at_end if at_start > at_end else at_end
+        return "已设置通知 @ 时段：%s - %s。" % (at_start, end_label)
+
+    if action == 'set_at':
+        if at_user == 'off':
+            return "已关闭通知 @。"
+        if at_user == 'all':
+            return "已设置通知 @ 所有人。"
+        if at_user == 'self':
+            return "已恢复默认通知 @ 配置（@ 自己）。"
+        return "已设置通知 @ `%s`。" % at_user
+
+    if action == 'set_permission_delay':
+        delay = config.get('permission_delay', 0)
+        return "已设置权限通知延迟：%d 秒%s。" % (delay, "（立即发送）" if delay == 0 else "")
+
+    if action == 'clear_permission_delay':
+        return "已恢复默认权限通知延迟。"
+
+    return "未知操作。"
 
 
 def _handle_help_command(data: dict, args: str) -> None:
@@ -4703,12 +4874,14 @@ _COMMANDS = {
         ("/mute", "静音当前会话"),
         ("/mute <session_id>", "静音指定会话，需要指定完整的 session_id"),
         ("/mute /path", "静音指定目录，后续从终端发起的该目录的新会话将不再通知"),
-        ("/mute list", "查看静音列表，展示被静音的工作目录和会话"),
+        ("/mute /path/**", "递归静音目录及其所有子孙目录"),
+        ("/mute list", "查看静音和加白规则列表"),
     ]),
-    'unmute': (_handle_unmute_command, False, "解除会话或目录静音", [
+    'unmute': (_handle_unmute_command, False, "解除静音 / 标记目录为不静音", [
         ("/unmute", "解除当前会话静音"),
         ("/unmute <session_id>", "解除指定会话静音，需要指定完整的 session_id"),
-        ("/unmute /path", "解除指定目录静音"),
+        ("/unmute /path", "解除目录静音，或标记为不静音"),
+        ("/unmute /path/**", "解除目录递归静音，或标记目录及其所有子目录为不静音"),
     ]),
     'groups': (_handle_groups_command, False, "【群聊模式】管理群聊会话", [
         ("/groups", "列出所有自动创建的群聊"),
@@ -4722,6 +4895,17 @@ _COMMANDS = {
     ]),
     'clear': (_handle_clear_command, False, "【群聊模式】重置当前群聊会话", [
         ("/clear", "解绑会话，下次发消息自动创建新会话"),
+    ]),
+    'notify': (_handle_notify_command, False, "管理通知配置", [
+        ("/notify status", "查看当前通知配置"),
+        ("/notify at off", "关闭通知 @"),
+        ("/notify at self", "恢复默认通知 @（@ 自己）"),
+        ("/notify at all", "通知 @ 所有人"),
+        ("/notify at <user_id>", "通知 @ 指定用户"),
+        ("/notify at HH:MM-HH:MM", "设置通知 @ 时段（仅在时段内 @）"),
+        ("/notify at always", "清除通知时段限制"),
+        ("/notify delay <秒>", "设置权限通知延迟秒数"),
+        ("/notify delay default", "恢复默认权限通知延迟"),
     ]),
     'users': (_handle_users_command, True, "查看已注册用户和在线状态", [
         ("/users", "列出用户及在线状态"),

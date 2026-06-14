@@ -37,12 +37,6 @@ send_user_prompt_async() {
         return 0
     fi
 
-    # 引入函数库（后台进程需要重新引入）
-    source "$LIB_DIR/core.sh" 2>/dev/null || return 0
-    source "$LIB_DIR/feishu.sh" 2>/dev/null || return 0
-    source "$LIB_DIR/json.sh" 2>/dev/null || return 0
-    json_init
-
     # 没有 session_id 则无法关联飞书话题，跳过
     if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
         log "UserPromptSubmit: no session_id, skipping"

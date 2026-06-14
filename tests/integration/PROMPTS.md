@@ -45,13 +45,13 @@ cp ~/.claude/settings.json ~/.claude/settings.json.bak
 #### 提示词 1：完整组合测试（推荐）
 
 ```
-请阅读 test/PROMPTS.md，然后执行组合测试（全工具覆盖，幂等）。
+请阅读 tests/integration/PROMPTS.md，然后执行组合测试（全工具覆盖，幂等）。
 ```
 
 #### 提示词 2：快速单个测试
 
 ```
-请阅读 test/PROMPTS.md，然后依次执行单个快速测试中的指令。
+请阅读 tests/integration/PROMPTS.md，然后依次执行单个快速测试中的指令。
 ```
 
 #### 提示词 3：自定义测试
@@ -74,7 +74,7 @@ cp ~/.claude/settings.json ~/.claude/settings.json.bak
 #### 提示词 4：边界条件测试
 
 ```
-请阅读 test/PROMPTS.md，然后执行边界条件测试。
+请阅读 tests/integration/PROMPTS.md，然后执行边界条件测试。
 ```
 
 ### 步骤 3：观察和验证

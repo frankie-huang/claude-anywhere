@@ -12,7 +12,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Callable, Dict, List, Optional, Tuple, Any
+from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,77 @@ def expand_template(template: str, cmd_argv: List[str],
             result.append(replaced)
 
     return shlex_join(result)
+
+
+def prepend_env_overrides(session_id: str, cmd_str: str,
+                          redact: bool = False) -> str:
+    """把 session.env_overrides 转成 K=V 前缀拼到命令前
+
+    输出形如 `env -u K1 K2='V2' claude --print --resume ...`。
+    POSIX shell 的 K=V 前缀仅作用于其后那条命令，覆盖 .zshenv/.bashrc
+    中已 export 的同名变量，让续聊命中用户实际启动 agent 时的 env。
+
+    Args:
+        session_id: 会话 ID（用于查 store）
+        cmd_str: expand_template 返回的命令串
+        redact: True 时把值替换成 *** 用于日志输出
+
+    Returns:
+        带前缀的命令串；无 env_overrides 且无黑名单时原样返回
+    """
+    from services.session_chat_store import SessionChatStore
+    store = SessionChatStore.get_instance()
+    env = store.get_env_overrides(session_id) if store else {}
+
+    blacklist = _resolve_env_blacklist(env)
+
+    # 黑名单中的 key 只做 unset，不注入值
+    inject_env = {k: v for k, v in env.items() if k not in blacklist}
+
+    if not blacklist and not inject_env:
+        return cmd_str
+
+    # 拼装前缀：先 env -u 黑名单，再 K=V 白名单
+    parts: List[str] = []
+    if blacklist:
+        parts.append('env')
+        for name in sorted(blacklist):
+            parts.extend(['-u', name])
+
+    for k in sorted(inject_env):
+        v = '***' if redact else inject_env[k]
+        parts.append('%s=%s' % (k, shlex.quote(v)))
+
+    return ' '.join(parts) + ' ' + cmd_str
+
+
+def _resolve_env_blacklist(env_overrides: Dict[str, str]) -> Set[str]:
+    """解析 SESSION_ENV_BLACKLIST 配置，返回需 unset 的变量名集合
+
+    支持精确名和 PREFIX_* 前缀通配。
+    通配仅对 env_overrides 中已捕获的 key 展开，避免无谓 env -u。
+
+    Args:
+        env_overrides: 当前 session 的 env_overrides
+
+    Returns:
+        变量名集合
+    """
+    from config import get_config
+    blacklist = (get_config('SESSION_ENV_BLACKLIST', '') or '').replace(',', ' ').split()
+    if not blacklist:
+        return set()
+
+    unset_names: Set[str] = set()
+    for rule in blacklist:
+        if rule.endswith('*'):
+            prefix = rule[:-1]
+            for key in env_overrides:
+                if key.startswith(prefix):
+                    unset_names.add(key)
+        else:
+            unset_names.add(rule)
+    return unset_names
 
 
 # =============================================

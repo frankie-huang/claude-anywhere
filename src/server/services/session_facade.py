@@ -9,8 +9,9 @@
       - 本地 MessageSessionStore —— parent_id 反查
 
     设计上预期后续把 feishu.py 里其它 "session 相关" 的能力（group 反查、
-    ensure-chat、attach 等）陆续搬到这里。当前已纳入：
+    ensure-chat 等）陆续搬到这里。当前已纳入：
       - resolve_from_message：根据飞书消息上下文解析归属 session
+      - attach / clone / set_last_message_id / invalidate_chats：session 生命周期 RPC
       - mute / unmute：透传 callback 端的 session 级静音指令
       - mute_dir / unmute_dir：透传 callback 端的目录级静音指令
 
@@ -26,7 +27,7 @@ mute 状态说明：
 """
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 
@@ -215,6 +216,124 @@ class SessionFacade:
         return {'source': cls.RouteSource.UNRESOLVED, **empty}
 
     # =========================================================================
+    # Session 生命周期（透传 callback RPC）
+    # =========================================================================
+
+    @classmethod
+    def attach(cls, binding: Dict[str, Any],
+               session_prefix: str, chat_id: str) -> Optional[Dict[str, Any]]:
+        """请求 callback 按前缀匹配并绑定 session
+
+        Args:
+            binding: 绑定信息字典
+            session_prefix: session_id 前缀（至少 8 字符）
+            chat_id: 目标群聊 ID
+
+        Returns:
+            callback 响应 dict（含 matched_ids, attached, session_id 等），
+            失败返回 None
+        """
+        if cls._forward_fn is None:
+            return None
+        try:
+            return cls._forward_fn(binding, '/cb/session/attach', {
+                'session_prefix': session_prefix,
+                'chat_id': chat_id,
+            })
+        except Exception as e:
+            logger.error("[session-facade] attach error: %s", e)
+            return None
+
+    @classmethod
+    def clone(cls, binding: Dict[str, Any], old_session_id: str,
+              new_session_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
+        """请求 callback 克隆 session（用于 /clear 命令）
+
+        Args:
+            binding: 绑定信息字典
+            old_session_id: 被克隆的原 session ID
+            new_session_id: 新 session ID
+            chat_id: 群聊 ID
+
+        Returns:
+            callback 响应 dict（含 ok, project_dir），失败返回 None
+        """
+        if cls._forward_fn is None:
+            return None
+        try:
+            return cls._forward_fn(binding, '/cb/session/clone', {
+                'old_session_id': old_session_id,
+                'new_session_id': new_session_id,
+                'chat_id': chat_id,
+            })
+        except Exception as e:
+            logger.error("[session-facade] clone error: %s", e)
+            return None
+
+    @classmethod
+    def set_last_message_id(cls, binding: Dict[str, Any],
+                            session_id: str, message_id: str) -> bool:
+        """通过 callback 设置 session 的 last_message_id
+
+        Args:
+            binding: 绑定信息字典
+            session_id: 会话 ID
+            message_id: 飞书消息 ID
+
+        Returns:
+            是否设置成功
+        """
+        if not session_id or not message_id or cls._forward_fn is None:
+            return False
+        try:
+            resp = cls._forward_fn(binding, '/cb/session/set-last-message-id', {
+                'session_id': session_id,
+                'message_id': message_id,
+            })
+            if resp is None:
+                return False
+            success = resp.get('success', False)
+            if success:
+                logger.info("[session-facade] set_last_message_id: session=%s, message_id=%s",
+                            session_id, message_id)
+            else:
+                logger.warning("[session-facade] set_last_message_id failed: %s",
+                               resp.get('error', 'unknown'))
+            return success
+        except Exception as e:
+            logger.error("[session-facade] set_last_message_id error: %s", e)
+            return False
+
+    @classmethod
+    def invalidate_chats(cls, binding: Dict[str, Any],
+                         chat_ids: List[str]) -> Optional[Dict[str, Any]]:
+        """通知 callback 标记指定群聊的 session 为 dissolved
+
+        在实际解散飞书群聊之前调用，确保 callback 端先标记状态。
+
+        Args:
+            binding: 绑定信息字典
+            chat_ids: 待标记的群聊 ID 列表
+
+        Returns:
+            callback 响应 dict（含 ok），失败返回 None
+        """
+        if cls._forward_fn is None:
+            return None
+        try:
+            resp = cls._forward_fn(binding, '/cb/session/invalidate-chats', {
+                'chat_ids': chat_ids,
+            })
+            if not resp or not resp.get('ok'):
+                err_msg = (resp or {}).get('error', 'unknown error')
+                logger.warning("[session-facade] invalidate_chats failed: %s", err_msg)
+                return None
+            return resp
+        except Exception as e:
+            logger.error("[session-facade] invalidate_chats error: %s", e)
+            return None
+
+    # =========================================================================
     # Mute 状态（透传 callback，网关不缓存）
     # =========================================================================
 
@@ -251,36 +370,44 @@ class SessionFacade:
         return bool(resp['changed'])
 
     @classmethod
-    def mute_dir(cls, binding: Dict[str, Any], project_dir: str) -> Optional[bool]:
+    def mute_dir(cls, binding: Dict[str, Any], project_dir: str,
+                 recursive: bool = False) -> Optional[Dict[str, Any]]:
         """将目录标记为静音
 
+        Args:
+            binding: 用户绑定信息
+            project_dir: 目标目录
+            recursive: True 表示递归静音（自身+子孙）
+
         Returns:
-            True  = 本次新增静音
-            False = 幂等：已静音
-            None  = callback 调用失败
+            {'changed': bool, 'message': str} 或 None（callback 调用失败）
         """
         if not project_dir:
             return None
-        resp = cls._call_dir_mute_api(binding, 'mute', project_dir)
+        resp = cls._call_dir_mute_api(binding, 'mute', project_dir, recursive=recursive)
         if resp is None or 'changed' not in resp:
             return None
-        return bool(resp['changed'])
+        return {'changed': bool(resp['changed']), 'message': resp.get('message', '')}
 
     @classmethod
-    def unmute_dir(cls, binding: Dict[str, Any], project_dir: str) -> Optional[bool]:
-        """取消目录静音
+    def unmute_dir(cls, binding: Dict[str, Any], project_dir: str,
+                   recursive: bool = False) -> Optional[Dict[str, Any]]:
+        """取消目录静音 / 加白目录
+
+        Args:
+            binding: 用户绑定信息
+            project_dir: 目标目录
+            recursive: True 表示递归加白（自身+子孙）
 
         Returns:
-            True  = 本次取消静音
-            False = 幂等：未静音
-            None  = callback 调用失败
+            {'changed': bool, 'message': str} 或 None（callback 调用失败）
         """
         if not project_dir:
             return None
-        resp = cls._call_dir_mute_api(binding, 'unmute', project_dir)
+        resp = cls._call_dir_mute_api(binding, 'unmute', project_dir, recursive=recursive)
         if resp is None or 'changed' not in resp:
             return None
-        return bool(resp['changed'])
+        return {'changed': bool(resp['changed']), 'message': resp.get('message', '')}
 
     @classmethod
     def list_muted(cls, binding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -326,7 +453,8 @@ class SessionFacade:
 
     @classmethod
     def _call_dir_mute_api(cls, binding: Dict[str, Any], action: str,
-                           project_dir: str = '') -> Optional[Dict[str, Any]]:
+                           project_dir: str = '',
+                           recursive: bool = False) -> Optional[Dict[str, Any]]:
         """调 /cb/directory/mute；action ∈ {mute, unmute, query, list}。失败返回 None。"""
         if cls._forward_fn is None:
             logger.error("[session-facade] forward_fn not configured")
@@ -335,6 +463,8 @@ class SessionFacade:
             payload = {'action': action}
             if project_dir:
                 payload['project_dir'] = project_dir
+            if recursive:
+                payload['recursive'] = True
             resp = cls._forward_fn(binding, '/cb/directory/mute', payload)
             if resp and resp.get('ok'):
                 return resp

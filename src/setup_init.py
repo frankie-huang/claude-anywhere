@@ -1920,21 +1920,10 @@ class SetupInit:
                 return "请输入正整数"
             return None
 
-        def _validate_non_negative_int(v):
-            try:
-                if int(v) < 0:
-                    raise ValueError
-            except ValueError:
-                return "请输入非负整数"
-            return None
-
         results = TerminalUI.review_settings("权限请求配置", [
-            ("PERMISSION_NOTIFY_DELAY", self.env.get('PERMISSION_NOTIFY_DELAY') or '60', _validate_non_negative_int,
-             "飞书审批卡片延迟发送秒数，0 = 立即发送"),
             ("PERMISSION_REQUEST_TIMEOUT", self.env.get('PERMISSION_REQUEST_TIMEOUT') or '600', _validate_positive_int,
              "权限请求超时秒数，超时后回退到终端交互"),
-        ], hint="Agent 触发权限请求时的飞书通知和超时行为")
-        self.env.set('PERMISSION_NOTIFY_DELAY', results['PERMISSION_NOTIFY_DELAY'] or '60')
+        ], hint="Agent 触发权限请求时的超时行为（通知延迟请使用 /notify delay 配置）")
         self.env.set('PERMISSION_REQUEST_TIMEOUT', results['PERMISSION_REQUEST_TIMEOUT'] or '600')
 
     # --- 辅助方法 ---

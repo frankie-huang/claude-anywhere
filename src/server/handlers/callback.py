@@ -18,6 +18,7 @@ POST 路由:
 - /cb/session/get-chat-id: 根据 session_id 获取 chat_id
 - /cb/session/get-last-message-id: 获取 session 的最近消息 ID
 - /cb/session/set-last-message-id: 设置 session 的最近消息 ID
+- /cb/session/set-env: 记录 session 启动时的白名单 env 快照（hook 调用，续聊注入）
 - /cb/session/check-skip-user-prompt: 检查并清除跳过用户 prompt 标志
 - /cb/session/ensure-chat: 确保 session 有 chat_id（group 模式懒创建群聊）
 - /cb/session/get-info: 按 session_id 返回 session 权威字段（command 等）
@@ -30,12 +31,14 @@ POST 路由:
 - /cb/directory/record-usage: 记录目录使用
 - /cb/directory/recent-dirs: 获取近期工作目录
 - /cb/directory/browse-dirs: 浏览子目录
+- /cb/notify/config: 设置/查询运行时通知配置覆盖（@ 谁、@ 时段）
 """
 
 import base64
 import json
 import logging
 import os
+import re
 import threading
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -281,6 +284,34 @@ def handle_set_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) ->
             return 500, {'success': False, 'error': 'Failed to set last_message_id'}
     else:
         return 500, {'success': False, 'error': 'SessionChatStore not initialized'}
+
+
+def handle_set_env_overrides(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """记录 session 启动时的白名单 env 快照（hook 调用）
+
+    hook 进程继承了启动 agent 的 shell 实际 env，白名单过滤后上报。
+    续聊时 AgentAdapter 取出作为 K=V 前缀注入，覆盖登录 shell 全局 env。
+    """
+    from services.session_chat_store import SessionChatStore
+
+    if not check_global_auth_token(headers, '/cb/session/set-env'):
+        return 401, {'error': 'Unauthorized'}
+
+    session_id = data.get('session_id', '')
+    env = data.get('env', {})
+
+    if not session_id:
+        return 400, {'success': False, 'error': 'Missing session_id'}
+    if not isinstance(env, dict):
+        return 400, {'success': False, 'error': 'env must be an object'}
+
+    store = SessionChatStore.get_instance()
+    if not store:
+        return 500, {'success': False, 'error': 'SessionChatStore not initialized'}
+
+    if store.set_env_overrides(session_id, env):
+        return 200, {'success': True}
+    return 500, {'success': False, 'error': 'Failed to save env_overrides'}
 
 
 def handle_record_dir_usage(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -816,12 +847,13 @@ def handle_directory_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
     请求:
         - project_dir: 目标目录（list 操作可省略）
         - action: 'mute' | 'unmute' | 'query' | 'list'
+        - recursive: bool（可选，mute/unmute 时是否递归，默认 False）
 
     响应:
         mute   -> {ok: True, changed: bool}
         unmute -> {ok: True, changed: bool}
         query  -> {ok: True, muted: bool}
-        list   -> {ok: True, dirs: [{project_dir, muted_at}, ...]}
+        list   -> {ok: True, dirs: [{project_dir, status, ...}, ...]}
     """
     from services.directory_store import DirectoryStore
 
@@ -846,17 +878,101 @@ def handle_directory_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
     if action == 'query':
         return 200, {'ok': True, 'muted': store.is_dir_muted(project_dir)}
 
+    recursive = data.get('recursive') is True
+
     if action == 'mute':
-        result = store.mute_dir(project_dir)
+        result = store.mute_dir(project_dir, recursive=recursive)
         if result is None:
             return 500, {'error': 'Failed to mute directory'}
-        return 200, {'ok': True, 'changed': result}
+        return 200, {'ok': True, 'changed': result['changed'], 'message': result['message']}
 
     # unmute
-    result = store.unmute_dir(project_dir)
+    result = store.unmute_dir(project_dir, recursive=recursive)
     if result is None:
         return 500, {'error': 'Failed to unmute directory'}
-    return 200, {'ok': True, 'changed': result}
+    return 200, {'ok': True, 'changed': result['changed'], 'message': result['message']}
+
+
+_TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$|^24:00$')
+
+
+def _is_valid_time(value: str) -> bool:
+    """校验 HH:MM 格式，允许 00:00-24:00。"""
+    return bool(_TIME_RE.match(value))
+
+
+def handle_notify_config(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """管理运行时通知配置覆盖：set / set_time / clear_time / query
+
+    请求:
+        - action: 'set' | 'set_time' | 'clear_time' | 'query'
+        - at_user: @ 对象（action=set 时必填）：self/all/<user_id>/off
+        - at_start, at_end: @ 时段（action=set_time 时必填）：HH:MM 格式
+
+    响应:
+        统一格式 {ok, config: {at_user, at_start?, at_end?}}
+    """
+    from services.notify_config_store import NotifyConfigStore
+
+    if not check_global_auth_token(headers, '/cb/notify/config'):
+        return 401, {'error': 'Unauthorized'}
+
+    action = data.get('action', '').strip()
+    if action not in ('set_at', 'set_at_time', 'clear_at_time',
+                      'set_permission_delay', 'clear_permission_delay', 'query'):
+        return 400, {'error': 'Invalid action'}
+
+    store = NotifyConfigStore.get_instance()
+    if not store:
+        return 500, {'error': 'Store not initialized'}
+
+    if action == 'query':
+        config = store.get_config()
+        return 200, {'ok': True, 'config': config}
+
+    if action == 'set_at':
+        at_user = str(data.get('at_user', '')).strip()
+        if not at_user or any(ch.isspace() for ch in at_user):
+            return 400, {'error': 'Invalid at_user'}
+        if not store.set_at_user(at_user):
+            return 500, {'error': 'Failed to set at_user'}
+        return 200, {'ok': True, 'config': store.get_config()}
+
+    if action == 'set_at_time':
+        at_start = str(data.get('at_start', '')).strip()
+        at_end = str(data.get('at_end', '')).strip()
+        if not at_start or not at_end:
+            return 400, {'error': 'Missing at_start or at_end'}
+        if not _is_valid_time(at_start) or not _is_valid_time(at_end):
+            return 400, {'error': 'Invalid time format, expected HH:MM (00:00-24:00)'}
+        if not store.set_time_range(at_start, at_end):
+            return 500, {'error': 'Failed to set time range'}
+        return 200, {'ok': True, 'config': store.get_config()}
+
+    if action == 'clear_at_time':
+        if not store.clear_time_range():
+            return 500, {'error': 'Failed to clear time range'}
+        return 200, {'ok': True, 'config': store.get_config()}
+
+    if action == 'set_permission_delay':
+        if 'delay' not in data:
+            return 400, {'error': 'Missing delay'}
+        try:
+            delay = int(data['delay'])
+        except (TypeError, ValueError):
+            return 400, {'error': 'Invalid delay value'}
+        if delay < 0 or delay > 86400:
+            return 400, {'error': 'Delay must be 0-86400'}
+        if not store.set_permission_delay(delay):
+            return 500, {'error': 'Failed to set delay'}
+        return 200, {'ok': True, 'config': store.get_config()}
+
+    if action == 'clear_permission_delay':
+        if not store.clear_permission_delay():
+            return 500, {'error': 'Failed to clear delay'}
+        return 200, {'ok': True, 'config': store.get_config()}
+
+    return 400, {'error': 'Invalid action'}
 
 
 def handle_invalidate_chats(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
@@ -1010,6 +1126,7 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/get-chat-id': handle_get_chat_id,
     '/cb/session/get-last-message-id': handle_get_last_message_id,
     '/cb/session/set-last-message-id': handle_set_last_message_id,
+    '/cb/session/set-env': handle_set_env_overrides,
     '/cb/session/check-skip-user-prompt': handle_check_skip_user_prompt,
     '/cb/session/ensure-chat': handle_ensure_chat,
     '/cb/session/get-info': handle_get_session_info,
@@ -1023,6 +1140,7 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/directory/recent-dirs': handle_recent_dirs,
     '/cb/directory/browse-dirs': handle_browse_dirs,
     '/cb/directory/mute': handle_directory_mute,
+    '/cb/notify/config': handle_notify_config,
 }
 
 # =============================================

@@ -11,7 +11,7 @@ import shlex
 import sys
 from typing import Dict, List
 
-from agents import AgentAdapter, SlashCommandInfo, expand_template
+from agents import AgentAdapter, SlashCommandInfo, expand_template, prepend_env_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,8 @@ class ClaudeAdapter(AgentAdapter):
         """构建 Claude CLI 完整命令字符串
 
         组装参数列表，通过模板展开生成可执行的 shell 命令。
+        若 session 记录了 env_overrides（启动时由 hook 快照），命令前会附加
+        K=V 前缀，覆盖登录 shell 全局 env，让续聊命中用户实际启动时的配置。
         """
         from config import get_claude_args_template
 
@@ -90,11 +92,15 @@ class ClaudeAdapter(AgentAdapter):
         # -- 分隔符确保 prompt 中的 --flag 不会被 CLI 误解析为参数
         args_argv = ['--print', session_flag, session_id] + mcp_argv + ['--', prompt]
 
-        return expand_template(template, cmd_argv, args_argv)
+        cmd_str = expand_template(template, cmd_argv, args_argv)
+        return prepend_env_overrides(session_id, cmd_str)
 
     def build_debug_command_string(self, command_name: str, session_id: str,
                                    session_mode: str) -> str:
-        """构建日志版本的 Claude 命令（隐藏 prompt 和 MCP 参数）"""
+        """构建日志版本的 Claude 命令（隐藏 prompt 和 MCP 参数）
+
+        env_overrides 的 key 以 KEY=*** 形式打印，避免敏感值入日志。
+        """
         from config import get_claude_args_template
 
         cmd = self.resolve_command(command_name)
@@ -104,7 +110,8 @@ class ClaudeAdapter(AgentAdapter):
         session_flag = '--session-id' if session_mode == 'new' else '--resume'
         debug_args = ['--print', session_flag, session_id, '--', 'PROMPT']
 
-        return expand_template(template, cmd_argv, debug_args)
+        cmd_str = expand_template(template, cmd_argv, debug_args)
+        return prepend_env_overrides(session_id, cmd_str, redact=True)
 
     def build_env(self, base_env: Dict[str, str]) -> Dict[str, str]:
         """清除 CLAUDECODE 环境变量，避免嵌套会话检测阻止子会话启动

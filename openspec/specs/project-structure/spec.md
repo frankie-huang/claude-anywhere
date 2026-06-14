@@ -28,7 +28,7 @@
   - docs/（文档）
   - log/（日志，运行时生成）
   - openspec/（规范）
-  - test/（测试）
+  - tests/（测试）
 
 ### Requirement: 源代码目录组织
 所有源代码 MUST 统一放置在 `src/` 目录下。
@@ -218,5 +218,7 @@ code-anywhere/
 │
 ├── openspec/                     # OpenSpec 规范
 │
-└── test/                         # 测试脚本
+└── tests/                        # 测试
+    ├── test_*.py                 # Python 单元测试
+    └── integration/              # Shell 集成测试脚本
 ```
