@@ -4,6 +4,91 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-06-24
+
+#### 飞书消息内容解析重构与 @提及 修复
+
+- 新增 `handlers/feishu/content.py`，将消息内容解析（text/post）和 @提及 解析从 `__init__.py` 中拆出，统一入口 `extract_message_text()` + `build_mention_resolution()`
+- **修复 @提及 处理 bug**：旧代码 `_AT_USER_PATTERN` 无脑删除 `@_user_1`，无论它是 bot 还是人。现在通过 `build_mention_resolution()` 精确识别：bot 提及删除，人员提及替换为 `@name`（如 `@Frankie`），让 agent 能识别具体是谁
+- 增强 post 富文本解析：支持标题、超链接（转 markdown）、代码块（带语言标识）、@提及；修复代码块尾部多余换行
+- 消息日志记录从 `__init__.py` 内联逻辑迁移到 `utils._log_message_event()`，日志器懒加载逻辑内聚
+- 移除 `_is_at_bot()` 函数和 `_AT_USER_PATTERN` 常量，bot 识别逻辑合并到 `build_mention_resolution()` 中
+
+### Changed - 2026-06-21
+
+#### runtime 目录与 .env 路径支持外置
+
+- `runtime/` 目录路径支持通过 `RUNTIME_DIR` 覆盖（`main.py`，默认仍为项目根下 `runtime/`），便于将运行时状态写到项目外
+- `.env` 文件路径支持通过 `CODE_ANYWHERE_ENV_FILE` 覆盖（`config.py` 与 `core.sh` 跨语言对称，默认仍为项目根下 `.env`）；该变量是「读哪个 .env」的引导开关，故只从进程环境读取、不从 .env 自身读，并用项目名前缀避免与其它仓库的通用变量名（如 `ENV_FILE`）撞名
+- 两项默认行为不变、生产零副作用，主要服务于让回调服务可在隔离的临时目录中运行（端到端测试隔离的前置能力）
+
+### Added - 2026-06-20
+
+#### `/groups dissolve idle <天数>`：按空闲天数解散群聊
+
+- 新增子命令 `/groups dissolve idle <N>`，直接解散空闲（超过 N 天未活跃）的群聊，避免手动逐个挑序号
+- 输入即执行，与其它 `/groups dissolve` 子命令（按序号 / all / 目录）行为一致；`/groups` 卡片已逐目录展示空闲时长，且该指令本身表意明确，故不做二次确认
+- 空闲判定（`now - last_active_at >= 天数 * 86400`，无 `last_active_at` 时回退 `created_at`）抽成 `find_idle_group_chats()`，自动解散（`main.py`）与本指令共用
+- `find_idle_group_chats()` 设计为纯过滤器：`owner_chats`（群列表）与 `now`（判定时刻）由调用方必传，函数内不自取，避免重复读 group_chat 文件（`JsonStore._load` 无缓存）。定时清理（`_cleanup_group_chats`）外层 `get_all()` 已拿全量、逐 owner 复用 `bucket.values()`，并对全 owner 共用同一 `now` 快照；手动指令（`_dissolve_groups`）顶部本就 `get_chats_by_owner()` 过，直接复用同一份。两条路径都不重复读盘
+
+### Changed - 2026-06-20
+
+#### 日志按月份分子目录归档
+
+- 日志文件在原有「组件/日期.log」基础上增加一层月份目录，变为「组件/YYYY-MM/日期.log」，避免单目录文件数无限增长：
+  - `log/hook/2026-06/2026-06-20.log`、`log/callback/2026-06/2026-06-20.log` 等
+  - `log/command/` 的 session 日志同样归入月份目录：`log/command/2026-06/2026-06-20_<session>.log`
+- 路径模板集中在 `src/shared/logging.json`，新增 `{month}` 占位符（格式 `month_format: "%Y-%m"`），Shell（`core.sh`）与 Python（`logging_config.py`）共用；`DailyRotatingFileHandler` 跨天/跨月时自动切换目录并创建
+- `command` 日志从硬编码路径收编进 `file_patterns`：新增 `command/{month}/{date}_{session}.log` 模板与 `{session}` 占位符（运行时值、仅 Shell 端展开），`log_command` 改用模板展开，月/日格式与其它组件一致由配置驱动
+- 生成日志路径时保证 month 与 date 同源取值（Shell 端 `date` 单次输出两值、Python 端 `time.localtime()` 快照），避免月末跨午夜临界时日志落入错误月份目录
+- `log_command` 对进入文件名的 `session_id` 清洗为安全字符，防止特殊字符破坏 `sed` 替换或构成目录穿越
+- 文件名保留完整日期不变（仅新增一层月份目录）；依赖文件名日期的脚本不受影响，按目录层级 glob 的需加一层（如 `hook/*/*.log`）
+- 存量旧日志（散在各组件根目录）不自动迁移，由各部署自行处理
+
+#### 拆分 `handlers/utils.py` 杂物文件
+
+- 将 561 行、9 个函数的 `handlers/utils.py` 按职责拆为 5 个文件，消除「什么都往里放」的杂物层：
+  - `handlers/responses.py` — HTTP 响应写回（`send_json` / `send_html_response`，需要 HTTP handler）
+  - `handlers/outbound.py` — callback 侧飞书出站门面（`reply_feishu_text` / `reply_feishu_markdown` / `remove_feishu_typing` / `create_feishu_group`）
+  - `utils/http_client.py` — 通用出站 HTTP（`post_json`）
+  - `utils/shell.py` — 子进程命令构建（`build_shell_cmd`）
+  - `utils/concurrency.py` — 后台线程执行（`run_in_background`）
+- `post_json` 通用化：移除项目特定的 `auth_token` 参数，改为通用 `headers`（合并到默认 `Content-Type` 之上），不再与飞书鉴权耦合
+- 给拆出的函数补齐 Python 3.6+ 内联类型注解
+- 移除 `register.py` 与 `feishu/*` 中零散的 `as _xxx` 私有 import 别名（约定不统一且部分缺失），统一为裸 import；真正的私有函数不受影响
+- 顺带修复 `register.py` 既有的 pyflakes 告警：删除未用的 `List` / `BindingStore` import，去掉 5 处无占位符的 f-string 前缀
+- 纯结构重构，外部 import 路径与运行时行为不变
+
+### Changed - 2026-06-19
+
+#### 统一子进程失败错误信息构建
+
+- 抽取 `_build_error_msg()` 收敛 `_check_and_monitor` / `_monitor_startup` / `_monitor_detached` 三处重复的"stderr→stdout→兜底"逻辑
+- 顺带修复 `_monitor_startup` 仅取 `stderr`、在 `claude -p` 把错误打到 stdout 时丢失错误信息的缺陷；三处日志统一截断到 `MAX_LOG_LENGTH`，并对 `None` 输入更稳健
+
+#### 抽取 `stores/` 子包
+
+- 将 9 个 store 文件（`json_store` 基类 + 8 个业务 store）从 `services/` 抽到 `src/server/stores/` 子包，让 `services/` 只留真正异构的服务（`feishu_api` / `session_facade` / `ws_*` 等）
+- 纯结构搬迁：`git mv` 保留历史，消费者与测试的 `from services.<store>` 统一改为 `from stores.<store>`，不改任何逻辑、不改运行时语义
+- `atomic_json.py` 留在 `utils/`（无状态通用工具）；放 `src/server/stores/` 而非 `src/stores/`，保持 server 单一 import 根、零 sys.path 改动
+
+#### 统一抽象 Store 持久化模型
+
+- 新增 `utils/atomic_json.py`（原子 JSON 读写工具）与 `services/json_store.py`（`JsonStore` 单例基类），消除 8 个 store 中逐字重复的 `_load`/`_save`/单例样板
+- 8 个 store（message_session / binding / notify_config / directory / auth_token / group_chat / group_session / session_chat）迁移到基类，仅保留 `FILENAME`/`LOG_TAG` 声明与各自业务方法，净减约 500 行
+- 一并修复两处一致性缺陷：加载时校验顶层为 dict（文件被篡改成数组/字符串时返回默认值而非崩溃）、写入异常时清理临时 `.tmp` 文件
+- per-subclass 单例隔离（`__init_subclass__` 注入独立 `_instance`/`_lock`）；外部 API（`get_instance()` / `initialize()` / 各业务方法签名）不变，不改变运行时语义
+- 新增 `tests/test_atomic_json.py`、`tests/test_json_store.py` 覆盖缺陷修复与 per-subclass 隔离不变量
+
+### Changed - 2026-06-16
+
+#### 拆分 `handlers/feishu.py` 上帝文件
+
+- 将 4973 行的 `handlers/feishu.py` 拆分为 `handlers/feishu/` 包（10 个文件），按职责单一拆分，实际代码量均符合 ≤500 行约束
+- 模块划分：`__init__.py`（事件路由门面）、`utils.py`（工具）、`forward.py`（请求转发）、`message.py`（消息发送）、`card_session.py` / `card_action.py`（卡片构建与交互）、`command.py` / `mute.py` / `notify.py`（命令处理）、`group.py`（群聊管理）
+- 外部 import 路径不变（`from handlers.feishu import ...` 继续可用），公开 API 通过 `__init__.py` re-export 并以 `__all__` 声明
+- 纯结构重构，不改变任何业务逻辑
+
 ### Added - 2026-06-14
 
 #### 环境变量续聊透传

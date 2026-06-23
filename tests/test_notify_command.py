@@ -8,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src', 'server'))
 sys.path.insert(0, os.path.join(ROOT, 'src', 'shared'))
 
-from handlers.feishu import _parse_notify_args  # noqa: E402
+from handlers.feishu.notify import _parse_notify_args  # noqa: E402
 
 
 class TestParseNotifyArgs(unittest.TestCase):

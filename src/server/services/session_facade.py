@@ -106,7 +106,7 @@ class SessionFacade:
         owner_id = binding.get('_owner_id', '') if binding else ''
         if not owner_id:
             return {}
-        from services.group_session_store import GroupSessionStore
+        from stores.group_session_store import GroupSessionStore
         local = GroupSessionStore.get_instance()
         if not local:
             return {}
@@ -173,7 +173,7 @@ class SessionFacade:
                 'project_dir': str,
             }
         """
-        from services.message_session_store import MessageSessionStore
+        from stores.message_session_store import MessageSessionStore
 
         event = data.get('event', {})
         message = event.get('message', {})

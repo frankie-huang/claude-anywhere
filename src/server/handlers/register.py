@@ -30,10 +30,12 @@ import json
 import logging
 import socket
 import urllib.error
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, Optional
 
-from services.auth_token_store import AuthTokenStore
-from handlers.utils import run_in_background as _run_in_background, post_json as _post_json
+from stores.auth_token_store import AuthTokenStore
+from utils.concurrency import run_in_background
+from utils.http_client import post_json
+from utils.ws_protocol import ws_send_text
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +153,7 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
                 owner_id, callback_url, client_ip, binding_params.get('session_mode'), binding_params.get('claude_commands'), binding_params.get('default_chat_dir'))
 
     # 在后台线程中处理注册逻辑（异步）
-    _run_in_background(_process_registration, (callback_url, owner_id, client_ip, binding_params))
+    run_in_background(_process_registration, (callback_url, owner_id, client_ip, binding_params))
 
     # 立即返回成功
     return True, {
@@ -211,7 +213,7 @@ def handle_register_callback(data: dict) -> Tuple[bool, dict]:
     token_store = AuthTokenStore.get_instance()
     if token_store:
         if token_store.save(owner_id, auth_token, bot_open_id=bot_open_id):
-            logger.info(f"[cb/register] Auth token stored successfully")
+            logger.info("[cb/register] Auth token stored successfully")
             return True, {
                 'success': True,
                 'message': 'Registration successful'
@@ -253,7 +255,7 @@ def handle_check_owner_id(data: dict) -> Tuple[bool, dict]:
     is_owner = bool(request_owner_id and request_owner_id == config_owner_id)
 
     if is_owner:
-        logger.info(f"[cb/check-owner] Verification passed")
+        logger.info("[cb/check-owner] Verification passed")
     else:
         logger.warning(
             f"[cb/check-owner] Verification failed: request={request_owner_id}, config={config_owner_id}"
@@ -288,7 +290,7 @@ def _process_registration(
     """
     if binding_params is None:
         binding_params = {}
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
     from services.auth_token import generate_auth_token
     from config import FEISHU_APP_SECRET
 
@@ -310,7 +312,7 @@ def _process_registration(
         bound_callback_url = binding.get('callback_url', '')
         if bound_callback_url == callback_url:
             # callback_url 一致：直接更新 token（无需用户确认）
-            logger.info(f"[register] Existing binding with same callback_url, updating token")
+            logger.info("[register] Existing binding with same callback_url, updating token")
             auth_token = generate_auth_token(FEISHU_APP_SECRET, owner_id)
             _notify_callback(callback_url, owner_id, auth_token, client_ip)
             store.upsert(owner_id, callback_url, auth_token, client_ip,
@@ -327,7 +329,7 @@ def _process_registration(
                                     binding_params=binding_params)
     else:
         # 未绑定：先验证 callback_url 是否属于该 owner_id
-        logger.info(f"[register] No existing binding, verifying callback_url ownership")
+        logger.info("[register] No existing binding, verifying callback_url ownership")
         if not _check_owner_id(callback_url, owner_id):
             logger.warning(
                 f"[register] Owner verification failed: callback_url={callback_url}, owner_id={owner_id}. "
@@ -361,7 +363,7 @@ def _check_owner_id(callback_url: str, owner_id: str) -> bool:
     logger.info(f"[register] Checking owner_id: {api_url}")
 
     try:
-        response_data = _post_json(api_url, request_data, timeout=HTTP_TIMEOUT)
+        response_data = post_json(api_url, request_data, timeout=HTTP_TIMEOUT)
         is_owner = response_data.get('is_owner', False)
         logger.info(f"[register] Owner check result: {is_owner}")
         return is_owner
@@ -405,7 +407,7 @@ def _notify_callback(callback_url: str, owner_id: str, auth_token: str, client_i
     logger.info(f"[register] Calling {api_url}")
 
     try:
-        response_data = _post_json(api_url, request_data, auth_token=auth_token, timeout=HTTP_TIMEOUT)
+        response_data = post_json(api_url, request_data, headers={'X-Auth-Token': auth_token}, timeout=HTTP_TIMEOUT)
         logger.info(f"[register] Callback response: {response_data}")
 
     except urllib.error.HTTPError as e:
@@ -736,7 +738,7 @@ def handle_authorization_decision(
     """
     if binding_params is None:
         binding_params = {}
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
     from services.auth_token import generate_auth_token
     from config import FEISHU_APP_SECRET
 
@@ -753,7 +755,7 @@ def handle_authorization_decision(
 
         # 实时生成 auth_token
         auth_token = generate_auth_token(FEISHU_APP_SECRET, owner_id)
-        logger.info(f"[register] Authorization approved, generated auth_token")
+        logger.info("[register] Authorization approved, generated auth_token")
 
         # 用户允许：通知 Callback 后端并创建绑定
         store = BindingStore.get_instance()
@@ -829,7 +831,7 @@ def handle_register_unbind(callback_url: str, owner_id: str) -> Dict[str, Any]:
     Returns:
         飞书响应（包含 toast 和更新的卡片）
     """
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
 
     # 删除绑定记录
     store = BindingStore.get_instance()
@@ -1000,7 +1002,6 @@ def ws_send_auth_ok(sock: 'socket.socket', auth_token: str) -> None:
 
     WS 模式首次授权和续期重连共用此函数，确保 auth_ok 消息格式一致。
     """
-    from services.ws_protocol import ws_send_text
     auth_ok_data = {
         'type': 'auth_ok',
         'auth_token': auth_token
@@ -1034,7 +1035,6 @@ def handle_ws_authorization_approved(owner_id: str, request_id: str,
             'toast': {'type': 'error', 'content': '请求参数异常'},
         }
 
-    from services.binding_store import BindingStore
     from services.auth_token import generate_auth_token
     from services.ws_registry import WebSocketRegistry
     from config import FEISHU_APP_SECRET
@@ -1188,7 +1188,6 @@ def handle_ws_authorization_denied(owner_id: str, request_id: str) -> Dict[str, 
         pending_conn = registry.get_pending(owner_id, request_id)
         if pending_conn:
             try:
-                from services.ws_protocol import ws_send_text
                 msg = json.dumps({
                     'type': 'auth_error',
                     'action': 'stop',
@@ -1231,7 +1230,7 @@ def handle_ws_register_unbind(owner_id: str) -> Dict[str, Any]:
     Returns:
         飞书响应（包含 toast 和更新的卡片）
     """
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
     from services.ws_registry import WebSocketRegistry
 
     # 关闭 WebSocket 连接
@@ -1243,7 +1242,6 @@ def handle_ws_register_unbind(owner_id: str) -> Dict[str, Any]:
         ws_conn = registry.get(owner_id)
         if ws_conn:
             try:
-                from services.ws_protocol import ws_send_text
                 msg = json.dumps({'type': 'unbind', 'action': 'stop', 'message': 'user unbind'})
                 ws_send_text(ws_conn, msg)
             except Exception as e:

@@ -22,18 +22,16 @@ owner 下可能有不同活跃 session（用户共享群 + /attach 场景），�
 不直接访问此 Store。
 """
 
-import json
 import logging
-import os
-import tempfile
-import threading
 import time
 from typing import Any, Dict, Optional, Tuple
+
+from stores.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
 
-class GroupSessionStore:
+class GroupSessionStore(JsonStore):
     """管理 (owner_id, chat_id) -> 当前活跃 session 信息的映射
 
     数据结构（嵌套 owner → chat）:
@@ -72,15 +70,10 @@ class GroupSessionStore:
         对 dict 单次操作的原子性
     """
 
-    _instance: Optional['GroupSessionStore'] = None
-    _lock = threading.Lock()
+    STORE_NAME = 'group_sessions'
+    LOG_TAG = 'group-session-store'
 
-    def __init__(self, data_dir: str):
-        self._data_dir = data_dir
-        self._file_path = os.path.join(data_dir, 'group_sessions.json')
-        self._file_lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
-
+    def _post_init(self):
         # 反向索引：(owner_id, session_id) → chat_id（启动时重建，写路径同步更新）
         self._owner_session_to_chat: Dict[Tuple[str, str], str] = {}
         # 反向索引：chat_id → owner_id（协作者模式用，启动时重建，写路径同步更新）
@@ -88,21 +81,6 @@ class GroupSessionStore:
         # touch() 不同步此索引，运行期与重启后的 owner 选择可能不一致，可接受。
         self._chat_to_owner: Dict[str, str] = {}
         self._rebuild_index()
-
-        logger.info("[group-session-store] Initialized with data_dir=%s", data_dir)
-
-    @classmethod
-    def initialize(cls, data_dir: str) -> 'GroupSessionStore':
-        """初始化单例实例"""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls(data_dir)
-            return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> Optional['GroupSessionStore']:
-        """获取单例实例；未初始化返回 None"""
-        return cls._instance
 
     # =========================================================================
     # 读
@@ -322,28 +300,3 @@ class GroupSessionStore:
                                 len(self._owner_session_to_chat))
             except Exception as e:
                 logger.error("[group-session-store] Failed to rebuild index: %s", e)
-
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self._file_path):
-            return {}
-        try:
-            with open(self._file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("[group-session-store] Invalid JSON in %s, starting fresh",
-                           self._file_path)
-            return {}
-        except IOError as e:
-            logger.error("[group-session-store] Failed to load: %s", e)
-            return {}
-
-    def _save(self, data: Dict[str, Any]) -> bool:
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self._data_dir, suffix='.tmp')
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._file_path)
-            return True
-        except (IOError, OSError) as e:
-            logger.error("[group-session-store] Failed to save: %s", e)
-            return False

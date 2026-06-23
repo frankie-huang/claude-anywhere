@@ -13,12 +13,12 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from services.ws_protocol import (
+from utils.ws_protocol import (
     ws_client_connect, ws_send_text, ws_recv, ws_send_ping,
     ws_send_pong, ws_send_close, ws_close, cleanup_socket_state,
     OPCODE_TEXT, OPCODE_PING, OPCODE_CLOSE
 )
-from services.auth_token_store import AuthTokenStore
+from stores.auth_token_store import AuthTokenStore
 
 logger = logging.getLogger(__name__)
 

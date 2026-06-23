@@ -152,7 +152,7 @@ curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.loa
 
 1. 检查 `.env` 中 `FEISHU_WEBHOOK_URL` 是否正确
 2. 确认网络：`curl -s https://open.feishu.cn`
-3. 查看日志：`cat log/hook/$(date +%Y-%m-%d).log`
+3. 查看日志：`cat log/hook/$(date +%Y-%m)/$(date +%Y-%m-%d).log`
 
 **按钮点击没反应？**
 

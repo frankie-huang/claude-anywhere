@@ -277,7 +277,7 @@ def prepend_env_overrides(session_id: str, cmd_str: str,
     Returns:
         带前缀的命令串；无 env_overrides 且无黑名单时原样返回
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
     store = SessionChatStore.get_instance()
     env = store.get_env_overrides(session_id) if store else {}
 
@@ -426,7 +426,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
     Returns:
         (success, response): 成功时 response 包含 session_id（Codex 路径可能已 rename 为真实 ID）
     """
-    from handlers.utils import build_shell_cmd, run_in_background
+    from utils.shell import build_shell_cmd
 
     agent_type = adapter.agent_type
     log_prefix = '[%s-%s]' % (agent_type, 'new' if session_mode == 'new' else 'continue')
@@ -599,7 +599,7 @@ def _rename_session_in_store(old_id: str, new_id: str,
         最终使用的 session ID（rename 成功返回 new_id，失败返回 old_id）
     """
     try:
-        from services.session_chat_store import SessionChatStore
+        from stores.session_chat_store import SessionChatStore
         store = SessionChatStore.get_instance()
         if store and store.rename_session(old_id, new_id):
             logger.info("%s Session ID renamed: %s -> %s",
@@ -637,7 +637,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
     Returns:
         (success, response): 成功时 response 包含 session_id
     """
-    from handlers.utils import run_in_background
+    from utils.concurrency import run_in_background
     log_prefix = '[%s]' % agent_type
 
     # 等待进程退出或超时
@@ -676,11 +676,9 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
                       'agent_type': agent_type,
                       'output': (stdout or '')[:MAX_LOG_LENGTH * 2]}
     else:
-        error_msg = (stderr or '').strip() or (stdout or '').strip()
-        if not error_msg:
-            error_msg = f"命令执行失败，退出码: {returncode}"
+        error_msg = _build_error_msg(agent_type, returncode, stdout, stderr)
         logger.warning("%s Command failed with exit code %s: %s",
-                       log_prefix, returncode, error_msg)
+                       log_prefix, returncode, error_msg[:MAX_LOG_LENGTH])
         if chat_id and on_error:
             run_in_background(on_error,
                               (agent_type, chat_id, message_id, session_id, error_msg))
@@ -724,13 +722,11 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
                 on_complete(agent_type, chat_id, message_id, session_id,
                             stdout or '')
         else:
-            error_summary = (stderr.strip()[:MAX_LOG_LENGTH]
-                             if stderr.strip() else '(无错误输出)')
+            error_msg = _build_error_msg(agent_type, proc.returncode, stdout, stderr)
             logger.warning(
                 "%s Command failed with exit code %s, session: %s, error: %s",
-                log_prefix, proc.returncode, session_id, error_summary)
+                log_prefix, proc.returncode, session_id, error_msg[:MAX_LOG_LENGTH])
             if chat_id and on_error:
-                error_msg = stderr.strip() or f"{agent_type} 进程异常退出 (code={proc.returncode})"
                 on_error(agent_type, chat_id, message_id, session_id, error_msg)
     except subprocess.TimeoutExpired:
         logger.info(
@@ -803,13 +799,11 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
             # Claude Code 会以 exit code=1 + "Execution error" 退出，也会走到这里。
             # 这属于用户主动中断的预期行为，但当前无法与真正的执行错误区分，
             # 因此统一作为错误通知。如需区分可在 resolve interrupt 时标记 session 状态。
-            error_output = stderr_tail or stdout_tail
+            error_msg = _build_error_msg(agent_type, returncode, stdout_tail, stderr_tail)
             logger.warning(
                 "%s Detached process failed (code=%s), session: %s, output: %s",
-                log_prefix, returncode, session_id,
-                error_output[:MAX_LOG_LENGTH])
+                log_prefix, returncode, session_id, error_msg[:MAX_LOG_LENGTH])
             if chat_id and on_error:
-                error_msg = error_output or f"{agent_type} 进程异常退出 (code={returncode})"
                 on_error(agent_type, chat_id, message_id, session_id, error_msg)
     except Exception as e:
         logger.error("%s Error waiting for detached process: %s, session: %s",
@@ -821,6 +815,17 @@ def _monitor_detached(proc: subprocess.Popen, agent_type: str,
 # =============================================
 # 内部工具
 # =============================================
+
+
+def _build_error_msg(agent_type: str, returncode: int,
+                     stdout: Optional[str], stderr: Optional[str]) -> str:
+    """统一构建子进程失败时的错误信息
+
+    claude -p 等 CLI 失败时常把错误打到 stdout 而非 stderr，
+    故优先取 stderr，其次 stdout，两者都为空时用兜底文案。
+    """
+    error_output = (stderr or '').strip() or (stdout or '').strip()
+    return error_output or f"{agent_type} 进程异常退出 (code={returncode})"
 
 
 def _drain_pipe(pipe: Any, tail_lines: int = 20) -> str:

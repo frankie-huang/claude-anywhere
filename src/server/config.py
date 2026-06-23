@@ -43,7 +43,7 @@ def _load_env_file() -> dict:
     server_dir = os.path.dirname(os.path.abspath(__file__))
     src_dir = os.path.dirname(server_dir)
     project_root = os.path.dirname(src_dir)
-    env_path = os.path.join(project_root, '.env')
+    env_path = os.environ.get('CODE_ANYWHERE_ENV_FILE') or os.path.join(project_root, '.env')
 
     if not os.path.exists(env_path):
         return _env_file_cache

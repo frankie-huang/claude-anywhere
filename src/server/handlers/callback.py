@@ -48,7 +48,8 @@ from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
 from handlers.agent import handle_continue_session, handle_new_session
-from handlers.utils import send_json, send_html_response, create_feishu_group
+from handlers.responses import send_json, send_html_response
+from handlers.outbound import create_feishu_group
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,7 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     如果命中 mute 目录，自动创建 muted session 记录并返回 muted: true，
     使终端发起的会话自动继承目录的 mute 状态。
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/get-chat-id'):
         return 401, {'error': 'Unauthorized'}
@@ -223,7 +224,7 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     if not chat_id and not muted and store.get_session(session_id, include_dissolved=True) is None:
         project_dir = data.get('project_dir', '').strip()
         if project_dir:
-            from services.directory_store import DirectoryStore
+            from stores.directory_store import DirectoryStore
             dir_store = DirectoryStore.get_instance()
             if dir_store and dir_store.is_dir_muted(project_dir):
                 # 创建 muted session 记录（只写 project_dir + agent_type + muted，无 chat_id）
@@ -243,7 +244,7 @@ def handle_get_chat_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
 
 def handle_get_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """根据 session_id 获取对应的 last_message_id（客户端调用）"""
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/get-last-message-id'):
         return 401, {'error': 'Unauthorized'}
@@ -262,7 +263,7 @@ def handle_get_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) ->
 
 def handle_set_last_message_id(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
     """设置 session 的 last_message_id（飞书网关调用）"""
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/set-last-message-id'):
         return 401, {'error': 'Unauthorized'}
@@ -292,7 +293,7 @@ def handle_set_env_overrides(data: Dict[str, Any], headers: Dict[str, str]) -> T
     hook 进程继承了启动 agent 的 shell 实际 env，白名单过滤后上报。
     续聊时 AgentAdapter 取出作为 K=V 前缀注入，覆盖登录 shell 全局 env。
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/set-env'):
         return 401, {'error': 'Unauthorized'}
@@ -323,7 +324,7 @@ def handle_record_dir_usage(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
     if not project_dir:
         return 400, {'error': 'Missing project_dir'}
 
-    from services.directory_store import DirectoryStore
+    from stores.directory_store import DirectoryStore
     store = DirectoryStore.get_instance()
     if store:
         store.record_usage(project_dir)
@@ -337,7 +338,7 @@ def handle_check_skip_user_prompt(data: Dict[str, Any], headers: Dict[str, str])
     UserPromptSubmit hook 调用此接口判断是否应跳过该 prompt 的飞书通知。
     飞书发起的会话在启动时会设置此标志，避免重复发送用户已在飞书输入的 prompt。
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/check-skip-user-prompt'):
         return 401, {'error': 'Unauthorized'}
@@ -543,7 +544,7 @@ def handle_recent_dirs(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[i
     except (TypeError, ValueError):
         limit = 5
 
-    from services.directory_store import DirectoryStore
+    from stores.directory_store import DirectoryStore
     store = DirectoryStore.get_instance()
     recent_dirs = store.get_recent_dirs(limit) if store else []
 
@@ -645,7 +646,7 @@ def do_ensure_chat(agent_type: str, session_id: str, project_dir: str) -> Tuple[
     Returns:
         (ok, chat_id_or_error)
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
     from config import FEISHU_SESSION_MODE
 
     session_store = SessionChatStore.get_instance()
@@ -740,7 +741,7 @@ def handle_session_attach(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
             'project_dir': str,            # session 的工作目录（供 gateway 本地路由表写入）
         }
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/attach'):
         return 401, {'error': 'Unauthorized'}
@@ -805,7 +806,7 @@ def handle_session_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[
         query  -> {ok: True, muted: bool}
         list   -> {ok: True, sessions: [{session_id, project_dir, chat_id}, ...]}
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/mute'):
         return 401, {'error': 'Unauthorized'}
@@ -855,7 +856,7 @@ def handle_directory_mute(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
         query  -> {ok: True, muted: bool}
         list   -> {ok: True, dirs: [{project_dir, status, ...}, ...]}
     """
-    from services.directory_store import DirectoryStore
+    from stores.directory_store import DirectoryStore
 
     if not check_global_auth_token(headers, '/cb/directory/mute'):
         return 401, {'error': 'Unauthorized'}
@@ -912,7 +913,7 @@ def handle_notify_config(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple
     响应:
         统一格式 {ok, config: {at_user, at_start?, at_end?}}
     """
-    from services.notify_config_store import NotifyConfigStore
+    from stores.notify_config_store import NotifyConfigStore
 
     if not check_global_auth_token(headers, '/cb/notify/config'):
         return 401, {'error': 'Unauthorized'}
@@ -993,7 +994,7 @@ def handle_invalidate_chats(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
     响应:
         {ok: True, invalidated: int}  invalidated 是被标记 dissolved 的 session 总数
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/invalidate-chats'):
         return 401, {'error': 'Unauthorized'}
@@ -1027,7 +1028,7 @@ def handle_get_session_info(data: Dict[str, Any], headers: Dict[str, str]) -> Tu
         {project_dir: str, command: str, agent_type: str, chat_id: str, dissolved: bool}
         session 不存在或已过期返回全空（非错误）
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/get-info'):
         return 401, {'error': 'Unauthorized'}
@@ -1071,7 +1072,7 @@ def handle_session_clone(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple
         {ok: true, project_dir: str}
         旧 session 不存在时仍创建新记录（继承属性为空）
     """
-    from services.session_chat_store import SessionChatStore
+    from stores.session_chat_store import SessionChatStore
 
     if not check_global_auth_token(headers, '/cb/session/clone'):
         return 401, {'error': 'Unauthorized'}

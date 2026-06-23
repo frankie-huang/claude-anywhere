@@ -209,13 +209,13 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | 权限处理 | `src/hooks/permission.sh` | 构建并发送飞书卡片 |
 | 卡片模板 | `src/templates/feishu/buttons-openapi.json` | OpenAPI 模式卡片模板 |
 | 回调服务 | `src/server/main.py` | ThreadedHTTPServer，处理飞书事件回调 |
-| 飞书事件处理器 | `src/server/handlers/feishu.py` | 处理飞书事件（网关功能） |
+| 飞书事件处理器 | `src/server/handlers/feishu/` | 处理飞书事件（网关功能） |
 | 会话继续 | `src/server/handlers/agent.py` | 处理新建/回复继续会话 |
-| Message-Session Store | `src/server/services/message_session_store.py` | 消息 ID 与会话映射 |
-| Session-Chat Store | `src/server/services/session_chat_store.py` | 会话 ID 与群聊映射 |
-| Auth Token Store | `src/server/services/auth_token_store.py` | 网关注册令牌存储 |
-| Binding Store | `src/server/services/binding_store.py` | 网关注册绑定存储（owner_id → callback_url） |
-| Directory Store | `src/server/services/directory_store.py` | 目录使用历史 |
+| Message-Session Store | `src/server/stores/message_session_store.py` | 消息 ID 与会话映射 |
+| Session-Chat Store | `src/server/stores/session_chat_store.py` | 会话 ID 与群聊映射 |
+| Auth Token Store | `src/server/stores/auth_token_store.py` | 网关注册令牌存储 |
+| Binding Store | `src/server/stores/binding_store.py` | 网关注册绑定存储（owner_id → callback_url） |
+| Directory Store | `src/server/stores/directory_store.py` | 目录使用历史 |
 | 飞书 API 服务 | `src/server/services/feishu_api.py` | 飞书 OpenAPI 封装 |
 | 飞书长连接 | `src/server/services/feishu_longpoll.py` | 飞书 WebSocket 长连接事件接收 |
 | 自动注册 | `src/server/services/auto_register.py` | Callback 向网关注册 |
@@ -803,7 +803,7 @@ CODEX_COMMAND=[codex, codex --model gpt-5]
 1. 是否安装了 `lark-oapi` SDK：`pip install lark-oapi`
 2. Python 版本是否 >= 3.8（longpoll 模式要求）
 3. 飞书应用事件订阅是否选择了「WebSocket 长连接」方式
-4. 检查日志 `log/feishu_longpoll/*.log` 中是否有连接成功信息
+4. 检查日志 `log/feishu_longpoll/*/*.log`（按月份归档）中是否有连接成功信息
 5. `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` 是否正确
 
 ### Q: 回复消息继续会话不生效？

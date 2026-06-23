@@ -14,14 +14,16 @@ from typing import Any, Optional
 # 默认配置
 DEFAULT_CONFIG = {
     "log_dir_relative": "log",
+    "month_format": "%Y-%m",
     "date_format": "%Y-%m-%d",
     "datetime_format": "%Y-%m-%d %H:%M:%S",
     "file_patterns": {
-        "hook": "hook/{date}.log",
-        "server": "callback/{date}.log",
-        "socket_client": "socket_client/{date}.log",
-        "feishu_message": "feishu_message/{date}.log",
-        "feishu_longpoll": "feishu_longpoll/{date}.log"
+        "hook": "hook/{month}/{date}.log",
+        "server": "callback/{month}/{date}.log",
+        "socket_client": "socket_client/{month}/{date}.log",
+        "feishu_message": "feishu_message/{month}/{date}.log",
+        "feishu_longpoll": "feishu_longpoll/{month}/{date}.log",
+        "permission_mcp": "permission_mcp/{month}/{date}.log"
     },
     "formats": {
         "python": "[%(process)d] %(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
@@ -71,28 +73,40 @@ class DailyRotatingFileHandler(logging.FileHandler):
     适用于长期运行的服务进程。
     """
 
-    def __init__(self, log_dir, filename_pattern, date_format="%Y-%m-%d", **kwargs):
-        # type: (str, str, str, **Any) -> None
+    def __init__(self, log_dir: str, filename_pattern: str, month_format: str = "%Y-%m",
+                 date_format: str = "%Y-%m-%d", **kwargs: Any) -> None:
         """初始化按天轮转处理器
 
         Args:
             log_dir: 日志目录路径
-            filename_pattern: 文件名模式，包含 {date} 占位符
+            filename_pattern: 文件名模式，包含 {month}/{date} 占位符
+            month_format: 月份目录格式，默认 %Y-%m
             date_format: 日期格式，默认 %Y-%m-%d
             **kwargs: 传递给 FileHandler 的其他参数
         """
         self._log_dir = log_dir
         self._filename_pattern = filename_pattern
+        self._month_format = month_format
         self._date_format = date_format
-        self._current_date = time.strftime(date_format)
-        filename = filename_pattern.replace("{date}", self._current_date)
-        filepath = os.path.join(log_dir, filename)
+        now = time.localtime()
+        self._current_date = time.strftime(date_format, now)
+        filepath = os.path.join(log_dir, self._resolve_filename(now))
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         super(DailyRotatingFileHandler, self).__init__(filepath, **kwargs)
 
+    def _resolve_filename(self, now: time.struct_time) -> str:
+        """将模式中的 {month}/{date} 占位符替换为该时刻的实际值
+
+        month 与 date 同源于 now 快照，避免月末午夜临界 month/date 错配
+        """
+        month_str = time.strftime(self._month_format, now)
+        date_str = time.strftime(self._date_format, now)
+        return self._filename_pattern.replace("{month}", month_str).replace("{date}", date_str)
+
     def emit(self, record):
-        """写入日志前检查日期是否变化，如需要则切换文件"""
-        today = time.strftime(self._date_format)
+        """写入日志前检查日期是否变化，如需要则切换文件（跨月时月份目录一并切换）"""
+        now = time.localtime()
+        today = time.strftime(self._date_format, now)
         if today != self._current_date:
             self.acquire()
             try:
@@ -103,9 +117,8 @@ class DailyRotatingFileHandler(logging.FileHandler):
                     if self.stream:
                         self.stream.close()
                         self.stream = None  # type: ignore[assignment]
-                    # 切换到新文件
-                    filename = self._filename_pattern.replace("{date}", today)
-                    self.baseFilename = os.path.join(self._log_dir, filename)
+                    # 切换到新文件（month/date 同源 now，避免跨月午夜错配）
+                    self.baseFilename = os.path.join(self._log_dir, self._resolve_filename(now))
                     os.makedirs(os.path.dirname(self.baseFilename), exist_ok=True)
                     self.stream = self._open()
             finally:
@@ -113,9 +126,9 @@ class DailyRotatingFileHandler(logging.FileHandler):
         super(DailyRotatingFileHandler, self).emit(record)
 
 
-def setup_logging(component, logger=None, console=True, propagate=True, encoding=None,
-                  configure_root=False):
-    # type: (str, Optional[logging.Logger], bool, bool, Optional[str], bool) -> logging.Logger
+def setup_logging(component: str, logger: Optional[logging.Logger] = None, console: bool = True,
+                  propagate: bool = True, encoding: Optional[str] = None,
+                  configure_root: bool = False) -> logging.Logger:
     """设置日志记录器
 
     根据 logging.json / DEFAULT_CONFIG 中的配置，为指定组件创建带按天轮转的 logger。
@@ -158,9 +171,10 @@ def setup_logging(component, logger=None, console=True, propagate=True, encoding
     log_dir = os.path.join(project_root, config.get("log_dir_relative", "log"))
     os.makedirs(log_dir, exist_ok=True)
     file_patterns = config.get("file_patterns", {})
-    pattern = file_patterns.get(component, "{component}/{{date}}.log".format(component=component))
+    pattern = file_patterns.get(component, "{component}/{{month}}/{{date}}.log".format(component=component))
     file_handler = DailyRotatingFileHandler(
         log_dir, pattern,
+        month_format=config.get("month_format", "%Y-%m"),
         date_format=config.get("date_format", "%Y-%m-%d"),
         encoding=encoding
     )

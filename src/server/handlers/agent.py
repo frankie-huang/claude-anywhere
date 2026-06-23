@@ -13,7 +13,7 @@ import uuid
 from typing import Callable, Optional, Tuple, Dict, Any
 
 from agents import AgentAdapter, launch_agent, get_agent_adapter
-from services.session_chat_store import SessionChatStore
+from stores.session_chat_store import SessionChatStore
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +317,7 @@ def _send_error_notification(agent_type: str, chat_id: str, message_id: str,
         session_id: 会话 ID（用于更新 session 状态）
         error_msg: 错误消息
     """
-    from handlers.utils import remove_feishu_typing, reply_feishu_text
+    from handlers.outbound import remove_feishu_typing, reply_feishu_text
 
     try:
         adapter = get_agent_adapter(agent_type or None)
@@ -362,7 +362,7 @@ def _send_complete_notification(agent_type: str, chat_id: str, message_id: str,
         session_id: 会话 ID（用于更新 last_message_id）
         output: 命令输出内容（有内容时直接展示，为空时发送通用完成文案）
     """
-    from handlers.utils import remove_feishu_typing, reply_feishu_text, reply_feishu_markdown
+    from handlers.outbound import remove_feishu_typing, reply_feishu_text, reply_feishu_markdown
 
     try:
         adapter = get_agent_adapter(agent_type or None)
@@ -412,7 +412,7 @@ def _send_unmute_notification(chat_id: str, session_id: str, message_id: str = '
         session_id: 会话 ID
         message_id: 要回复的消息 ID（可选）
     """
-    from handlers.utils import reply_feishu_text
+    from handlers.outbound import reply_feishu_text
 
     sid_tag = session_id[:8]
     text = f"已自动解除 session `{sid_tag}` 的静音。"

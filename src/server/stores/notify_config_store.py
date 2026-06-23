@@ -9,18 +9,16 @@
 飞书网关不应直接调用此 Store，应通过 Callback 后端的 HTTP 接口间接访问。
 """
 
-import json
-import os
-import tempfile
-import threading
 import time
 import logging
-from typing import Optional, Dict, Any
+from typing import Dict, Any
+
+from stores.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
 
-class NotifyConfigStore:
+class NotifyConfigStore(JsonStore):
     """管理运行时通知配置覆盖（单例 + 文件持久化）
 
     存储格式 (notify_config.json):
@@ -38,27 +36,11 @@ class NotifyConfigStore:
     - 文件不存在时等同于全部默认
     """
 
-    _instance: Optional['NotifyConfigStore'] = None
-    _lock = threading.Lock()
+    STORE_NAME = 'notify_config'
+    LOG_TAG = 'notify-config-store'
 
-    def __init__(self, data_dir: str):
-        self._data_dir = data_dir
-        self._file_path = os.path.join(data_dir, 'notify_config.json')
-        self._file_lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
+    def _post_init(self):
         self._migrate_permission_delay()
-        logger.info("[notify-config-store] Initialized with data_dir=%s", data_dir)
-
-    @classmethod
-    def initialize(cls, data_dir: str) -> 'NotifyConfigStore':
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls(data_dir)
-            return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> Optional['NotifyConfigStore']:
-        return cls._instance
 
     def get_config(self) -> Dict[str, Any]:
         """读取完整配置。文件不存在或解析失败返回 {}。"""
@@ -172,32 +154,3 @@ class NotifyConfigStore:
             logger.info("[notify-config-store] Migrated PERMISSION_NOTIFY_DELAY=%d", delay)
         else:
             logger.warning("[notify-config-store] Failed to migrate PERMISSION_NOTIFY_DELAY")
-
-    # =========================================================================
-    # 内部 I/O
-    # =========================================================================
-
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self._file_path):
-            return {}
-        try:
-            with open(self._file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("[notify-config-store] Invalid JSON in %s, starting fresh",
-                           self._file_path)
-            return {}
-        except IOError as e:
-            logger.error("[notify-config-store] Failed to load %s: %s", self._file_path, e)
-            return {}
-
-    def _save(self, data: Dict[str, Any]) -> bool:
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self._data_dir, suffix='.tmp')
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._file_path)
-            return True
-        except (IOError, OSError) as e:
-            logger.error("[notify-config-store] Failed to save %s: %s", self._file_path, e)
-            return False

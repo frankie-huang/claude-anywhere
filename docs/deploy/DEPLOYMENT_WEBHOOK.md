@@ -287,7 +287,7 @@ CALLBACK_SERVER_URL=http://127.0.0.1:8080
 **A:** 检查以下几点：
 1. `FEISHU_WEBHOOK_URL` 是否正确
 2. 网络是否能访问飞书服务器
-3. 查看 `log/hook/*.log` 日志文件
+3. 查看 `log/hook/` 下按月份归档的日志文件（如 `log/hook/YYYY-MM/YYYY-MM-DD.log`）
 
 ### Q: 如何配置 VSCode 自动跳转？
 

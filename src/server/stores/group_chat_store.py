@@ -7,18 +7,16 @@
 用户自建群聊不在此 store 中。
 """
 
-import json
 import logging
-import os
-import tempfile
-import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from stores.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
 
-class GroupChatStore:
+class GroupChatStore(JsonStore):
     """群聊归属 + seq 统一存储
 
     只记录由网关侧通过飞书 API 创建的群聊，用户自建群聊不在此 store 中。
@@ -60,38 +58,15 @@ class GroupChatStore:
     - get_chat_by_seq / get_chats_by_owner / get_all 需要遍历 data，走 _file_lock 保护
     """
 
-    _instance: Optional['GroupChatStore'] = None
-    _lock = threading.Lock()
+    STORE_NAME = 'group_chats'
+    LOG_TAG = 'group-chat-store'
 
-    def __init__(self, data_dir: str):
-        self._data_dir = data_dir
-        self._file_path = os.path.join(data_dir, 'group_chats.json')
-        self._file_lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
-
+    def _post_init(self):
         # 内存索引：chat_id → (owner_id, seq)
         self._chat_index: Dict[str, Tuple[str, int]] = {}
         # 每个 owner 的当前最大 seq（用于 allocate 时单调递增）
         self._max_seq: Dict[str, int] = {}
-
         self._rebuild_index()
-
-        logger.info("[group-chat-store] Initialized with data_dir=%s", data_dir)
-
-    # =========================================================================
-    # 单例
-    # =========================================================================
-
-    @classmethod
-    def initialize(cls, data_dir: str) -> 'GroupChatStore':
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls(data_dir)
-            return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> Optional['GroupChatStore']:
-        return cls._instance
 
     # =========================================================================
     # 写接口
@@ -318,31 +293,3 @@ class GroupChatStore:
                                 len(self._max_seq), len(self._chat_index))
             except Exception as e:
                 logger.error("[group-chat-store] Failed to rebuild index: %s", e)
-
-    # =========================================================================
-    # 底层 I/O（内部）
-    # =========================================================================
-
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self._file_path):
-            return {}
-        try:
-            with open(self._file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("[group-chat-store] Invalid JSON, starting fresh")
-            return {}
-        except IOError as e:
-            logger.error("[group-chat-store] Failed to load: %s", e)
-            return {}
-
-    def _save(self, data: Dict[str, Any]) -> bool:
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self._data_dir, suffix='.tmp')
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._file_path)
-            return True
-        except (IOError, OSError) as e:
-            logger.error("[group-chat-store] Failed to save: %s", e)
-            return False

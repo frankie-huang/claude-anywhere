@@ -12,7 +12,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src', 'server'))
 
-from services.directory_store import DirectoryStore  # noqa: E402
+from stores.directory_store import DirectoryStore  # noqa: E402
 
 
 class _BaseTest(unittest.TestCase):

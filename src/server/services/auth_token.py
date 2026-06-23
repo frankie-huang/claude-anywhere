@@ -152,7 +152,7 @@ def check_global_auth_token(headers: Any, endpoint_name: str) -> bool:
     Returns:
         True 表示验证通过，False 表示验证失败
     """
-    from services.auth_token_store import AuthTokenStore
+    from stores.auth_token_store import AuthTokenStore
 
     client_token = headers.get('X-Auth-Token', '') if headers else ''
     stored_token = ''
@@ -185,7 +185,7 @@ def verify_owner_based_auth_token(
     Returns:
         binding: 验证成功返回 binding 字典，失败返回 None（已发送响应）
     """
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
 
     # 从请求 body 中获取 owner_id
     owner_id = data.get('owner_id', '')

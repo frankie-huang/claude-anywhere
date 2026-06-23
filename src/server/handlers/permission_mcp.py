@@ -79,14 +79,14 @@ import argparse
 from typing import Dict, Any, Tuple, Optional
 
 # 加入模块搜索路径（本文件作为独立进程运行，需手动设置）
-# 本文件位于 src/server/handlers/，向上两级到 src/server（用于 from handlers.utils）
+# 本文件位于 src/server/handlers/，向上两级到 src/server（用于 from utils.shell）
 # 再向上一级到 src（用于 from shared.logging_config）
 _server_dir = os.path.dirname(os.path.dirname(__file__))
 _src_dir = os.path.dirname(_server_dir)
 sys.path.insert(0, _server_dir)
 sys.path.insert(0, _src_dir)
 
-from handlers.utils import build_shell_cmd  # noqa: E402
+from utils.shell import build_shell_cmd  # noqa: E402
 
 try:
     from shared.logging_config import setup_logging  # noqa: E402

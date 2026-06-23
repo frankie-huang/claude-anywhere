@@ -83,7 +83,7 @@ lsof -i :8080
 查看日志：
 ```bash
 # 检查脚本日志
-tail -20 log/hook/$(date +%Y-%m-%d).log
+tail -20 log/hook/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 
 # 预期看到类似输出：
 # [timestamp] Callback service not available
@@ -142,7 +142,7 @@ curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.loa
 
 ```bash
 # 查看回调服务日志
-tail -30 log/callback/$(date +%Y-%m-%d).log
+tail -30 log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 
 # 预期看到类似输出：
 # [timestamp] [socket] New connection, fileno=X
@@ -179,7 +179,7 @@ export PERMISSION_REQUEST_TIMEOUT=300
 
 ```bash
 # 查看日志确认操作时间
-grep "Request.*resolved" log/callback/$(date +%Y-%m-%d).log
+grep "Request.*resolved" log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 
 # 输出示例：
 # 2025-01-17 10:05:00.123 [INFO] [socket] Request 123-abc registered, waiting for user response...
@@ -222,7 +222,7 @@ export PERMISSION_REQUEST_TIMEOUT=60
 
 ```bash
 # 查看回调服务日志
-tail -50 log/callback/$(date +%Y-%m-%d).log | grep -A 5 "fallback"
+tail -50 log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log | grep -A 5 "fallback"
 
 # 预期看到类似输出：
 # 2025-01-17 10:05:00.123 [INFO] [socket] Request 123-abc registered, waiting for user response...
@@ -296,7 +296,7 @@ export PERMISSION_REQUEST_TIMEOUT=300
 
 ```bash
 # 查看清理线程日志
-grep "Cleaned up dead connection" log/callback/$(date +%Y-%m-%d).log
+grep "Cleaned up dead connection" log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 
 # 预期看到类似输出：
 # Cleaned up dead connection: 123-abc (age=30s)  # 远小于服务端超时
@@ -403,7 +403,7 @@ cat .claude/settings.local.json
 }
 
 # 查看服务日志
-grep "Added always-allow rule" log/callback/$(date +%Y-%m-%d).log
+grep "Added always-allow rule" log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 ```
 
 - ✅ 后续相同操作自动允许，不再询问
@@ -429,7 +429,7 @@ grep "Added always-allow rule" log/callback/$(date +%Y-%m-%d).log
 
 ```bash
 # 查看服务日志
-grep -A 2 "Already resolved" log/callback/$(date +%Y-%m-%d).log
+grep -A 2 "Already resolved" log/callback/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 ```
 
 ---
@@ -490,7 +490,7 @@ export FEISHU_WEBHOOK_URL="https://invalid-url.example.com/hook"
 
 ```bash
 # 查看脚本日志
-grep "Failed to send Feishu card" log/hook/$(date +%Y-%m-%d).log
+grep "Failed to send Feishu card" log/hook/$(date +%Y-%m)/$(date +%Y-%m-%d).log
 ```
 
 ---
@@ -644,7 +644,7 @@ touch "/tmp/test file with spaces.txt"
 #### 正常流程
 
 ```
-# 脚本日志 (log/hook/YYYY-MM-DD.log)
+# 脚本日志 (log/hook/YYYY-MM/YYYY-MM-DD.log)
 [timestamp] Tool: Bash, Project: /path/to/project
 [timestamp] Request ID: 123-abc
 [timestamp] Running in interactive mode
@@ -656,7 +656,7 @@ touch "/tmp/test file with spaces.txt"
 [timestamp] Outputting decision: behavior=allow, ...
 [timestamp] Decision output complete
 
-# 服务日志 (log/callback/YYYY-MM-DD.log)
+# 服务日志 (log/callback/YYYY-MM/YYYY-MM-DD.log)
 [timestamp] [socket] New connection, fileno=X
 [timestamp] [socket] Request ID: 123-abc
 [timestamp] [socket] Request 123-abc registered, waiting for user response...
@@ -695,7 +695,7 @@ touch "/tmp/test file with spaces.txt"
 |------|--------|----------|
 | 收不到飞书通知 | `FEISHU_WEBHOOK_URL` 是否设置 | 检查环境变量 |
 | 收不到飞书通知 | Webhook URL 是否正确 | 测试 Webhook URL |
-| 收不到飞书通知 | 脚本日志是否有错误 | 查看 `log/hook/*.log` |
+| 收不到飞书通知 | 脚本日志是否有错误 | 查看 `log/hook/*/*.log` |
 | 按钮点击无响应 | 回调服务是否运行 | `lsof -i :8080` |
 | 按钮点击无响应 | Socket 文件是否存在 | `ls -l /tmp/claude-permission.sock` |
 | 按钮点击无响应 | `CALLBACK_SERVER_URL` 是否正确 | 检查配置 |

@@ -28,8 +28,8 @@ LOG_DIR="${PROJECT_ROOT}/log"
 # 引入配置模块 (优先级: .env > 环境变量 > 默认值)
 source "${SCRIPT_DIR}/lib/core.sh"
 
-# 确保目录存在
-mkdir -p "$LOG_DIR/callback"
+# 确保目录存在（log/ 供 startup_error.log 重定向使用）
+mkdir -p "$LOG_DIR"
 mkdir -p "$RUNTIME_DIR"
 
 # =============================================================================
@@ -176,7 +176,9 @@ start_service() {
     fi
 
     # 后台启动服务：stdout 丢弃（由 Python 内部 FileHandler 直接写日志文件），stderr 捕获到错误文件
-    local log_file="$LOG_DIR/callback/$(date +%Y-%m-%d).log"
+    local date_part
+    date_part=$(date +%Y-%m-%d)
+    local log_file="$LOG_DIR/callback/${date_part%-*}/${date_part}.log"
     local error_file="$LOG_DIR/startup_error.log"
     nohup "$PYTHON3" "${SERVER_DIR}/main.py" >/dev/null 2>"$error_file" &
     local pid=$!

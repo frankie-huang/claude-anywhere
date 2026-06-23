@@ -10,13 +10,12 @@
 飞书网关不应直接调用此 Store，应通过 Callback 后端的 HTTP 接口间接访问。
 """
 
-import json
 import os
-import tempfile
-import threading
 import time
 import logging
 from typing import Optional, List, Dict, Any, Tuple
+
+from stores.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ S_UNMUTED_RECURSIVE = 'unmuted_recursive'  # {U,R} 自身+子孙加白
 RECURSIVE_SUFFIX = '/**'
 
 
-class DirectoryStore:
+class DirectoryStore(JsonStore):
     """管理工作目录使用历史和静音状态
 
     单文件存储 (directories.json)，每条记录的字段独立存在：
@@ -196,27 +195,11 @@ class DirectoryStore:
     └─────────────────────────────────────────────────────────────────┘
     """
 
-    _instance: Optional['DirectoryStore'] = None
-    _lock = threading.Lock()
+    STORE_NAME = 'directories'
+    LOG_TAG = 'directory-store'
 
-    def __init__(self, data_dir: str):
-        self._data_dir = data_dir
-        self._file_path = os.path.join(data_dir, 'directories.json')
-        self._file_lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
-        self._migrate_legacy_file(data_dir)  # 旧数据迁移，待旧版本再无流量后可删去
-        logger.info("[directory-store] Initialized with data_dir=%s", data_dir)
-
-    @classmethod
-    def initialize(cls, data_dir: str) -> 'DirectoryStore':
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls(data_dir)
-            return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> Optional['DirectoryStore']:
-        return cls._instance
+    def _post_init(self):
+        self._migrate_legacy_file()  # 旧数据迁移，待旧版本再无流量后可删去
 
     # =========================================================================
     # 使用历史
@@ -623,34 +606,9 @@ class DirectoryStore:
         elif path in data:
             del data[path]
 
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self._file_path):
-            return {}
-        try:
-            with open(self._file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("[directory-store] Invalid JSON in %s, starting fresh",
-                           self._file_path)
-            return {}
-        except IOError as e:
-            logger.error("[directory-store] Failed to load %s: %s", self._file_path, e)
-            return {}
-
-    def _save(self, data: Dict[str, Any]) -> bool:
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self._data_dir, suffix='.tmp')
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._file_path)
-            return True
-        except (IOError, OSError) as e:
-            logger.error("[directory-store] Failed to save %s: %s", self._file_path, e)
-            return False
-
-    def _migrate_legacy_file(self, data_dir: str) -> None:
+    def _migrate_legacy_file(self) -> None:
         """将旧版 dir_history.json 迁移为 directories.json（一次性）"""
-        legacy_path = os.path.join(data_dir, 'dir_history.json')
+        legacy_path = os.path.join(self._data_dir, 'dir_history.json')
         if os.path.exists(legacy_path) and not os.path.exists(self._file_path):
             try:
                 os.rename(legacy_path, self._file_path)

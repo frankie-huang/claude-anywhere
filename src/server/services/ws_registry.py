@@ -16,7 +16,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from services.ws_protocol import ws_send_text, ws_close
+from utils.ws_protocol import ws_send_text, ws_close
 
 logger = logging.getLogger(__name__)
 

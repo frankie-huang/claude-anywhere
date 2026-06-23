@@ -241,7 +241,7 @@ _ENV_FILE_LOADED="false"
 _load_env_cache() {
     [ "$_ENV_FILE_LOADED" = "true" ] && return
 
-    local env_file="${PROJECT_ROOT}/.env"
+    local env_file="${CODE_ANYWHERE_ENV_FILE:-${PROJECT_ROOT}/.env}"
     if [ -f "$env_file" ]; then
         _ENV_FILE_CACHE=$(cat "$env_file")
     fi
@@ -339,9 +339,11 @@ env_reload() {
 : "${LOG_FILE:=}"
 
 # 日志配置
+_LOG_MONTH_FORMAT="%Y-%m"
 _LOG_DATE_FORMAT="%Y-%m-%d"
 _LOG_DATETIME_FORMAT="%Y-%m-%d %H:%M:%S"
-_LOG_FILE_PATTERN="hook/{date}.log"
+_LOG_HOOK_PATTERN="hook/{month}/{date}.log"
+_LOG_COMMAND_PATTERN="command/{month}/{date}_{session}.log"
 
 # -----------------------------------------------------------------------------
 # 加载日志配置
@@ -350,17 +352,24 @@ _load_log_config() {
     local config_file="${SHARED_DIR}/logging.json"
 
     if [ -f "$config_file" ]; then
+        # 一次性读出 5 个字段（每行一个），避免多次启动子进程；读取失败则保留顶部默认值
+        local _cfg_out=""
         # 尝试使用 jq 读取配置
         if command -v jq &> /dev/null; then
-            _LOG_DATE_FORMAT=$(jq -r '.date_format // "%Y-%m-%d"' "$config_file" 2>/dev/null || echo "%Y-%m-%d")
-            _LOG_DATETIME_FORMAT=$(jq -r '.datetime_format // "%Y-%m-%d %H:%M:%S"' "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
-            _LOG_FILE_PATTERN=$(jq -r '.file_patterns.hook // "hook/{date}.log"' "$config_file" 2>/dev/null || echo "hook/{date}.log")
-        # 尝试使用 python3 读取配置
+            _cfg_out=$(jq -r '.month_format // "%Y-%m", .date_format // "%Y-%m-%d", .datetime_format // "%Y-%m-%d %H:%M:%S", .file_patterns.hook // "hook/{month}/{date}.log", .file_patterns.command // "command/{month}/{date}_{session}.log"' "$config_file" 2>/dev/null)
+        # 尝试使用 python3 读取配置（chr(10) 即换行，使其保持单行可缩进且无需转义）
         elif [ -n "$PYTHON3" ]; then
-            _LOG_DATE_FORMAT=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('date_format', '%Y-%m-%d'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d")
-            _LOG_DATETIME_FORMAT=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('datetime_format', '%Y-%m-%d %H:%M:%S'))" "$config_file" 2>/dev/null || echo "%Y-%m-%d %H:%M:%S")
-            _LOG_FILE_PATTERN=$("$PYTHON3" -c "import sys, json; print(json.load(open(sys.argv[1])).get('file_patterns', {}).get('hook', 'hook/{date}.log'))" "$config_file" 2>/dev/null || echo "hook/{date}.log")
+            local _py='import sys, json; c = json.load(open(sys.argv[1])); p = c.get("file_patterns", {}); print(chr(10).join([c.get("month_format", "%Y-%m"), c.get("date_format", "%Y-%m-%d"), c.get("datetime_format", "%Y-%m-%d %H:%M:%S"), p.get("hook", "hook/{month}/{date}.log"), p.get("command", "command/{month}/{date}_{session}.log")]))'
+            _cfg_out=$("$PYTHON3" -c "$_py" "$config_file" 2>/dev/null)
         fi
+
+        if [ -n "$_cfg_out" ]; then
+            IFS= read -r _LOG_MONTH_FORMAT
+            IFS= read -r _LOG_DATE_FORMAT
+            IFS= read -r _LOG_DATETIME_FORMAT
+            IFS= read -r _LOG_HOOK_PATTERN
+            IFS= read -r _LOG_COMMAND_PATTERN
+        fi <<< "$_cfg_out"
     fi
 }
 
@@ -381,10 +390,15 @@ log_init() {
     if [ -n "$log_file" ]; then
         LOG_FILE="$log_file"
     else
-        local log_date
-        log_date=$(date "+${_LOG_DATE_FORMAT}")
+        # date 一次输出两行（%n 为换行符）：第一行月份、第二行日期。同一时刻取值，
+        # 避免两次 date 调用在午夜临界产生月/日错配（如 2026-05/2026-06-01）
+        local log_month log_date
+        {
+            IFS= read -r log_month
+            IFS= read -r log_date
+        } <<< "$(date "+${_LOG_MONTH_FORMAT}%n${_LOG_DATE_FORMAT}")"
         local log_filename
-        log_filename=$(echo "$_LOG_FILE_PATTERN" | sed "s/{date}/${log_date}/g")
+        log_filename=$(echo "$_LOG_HOOK_PATTERN" | sed "s/{month}/${log_month}/g; s/{date}/${log_date}/g")
         LOG_FILE="${LOG_DIR}/${log_filename}"
     fi
 
@@ -481,7 +495,7 @@ log_input() {
 #   $2 - request_id       - 请求 ID（可选，默认 unknown）
 #   $3 - tool_name        - 工具名称（可选，默认 unknown）
 #   $4 - session_id       - 会话 ID（可选，默认 unknown）
-# 输出：写入日志到 ${LOG_DIR}/command/${date}_${session_id}.log
+# 输出：写入日志到 ${LOG_DIR}/command/${month}/${date}_${session_id}.log
 # 返回：0 = 成功
 # -----------------------------------------------------------------------------
 log_command() {
@@ -490,13 +504,20 @@ log_command() {
     local tool_name="${3:-unknown}"
     local session_id="${4:-unknown}"
 
-    local command_log_dir="${LOG_DIR}/command"
-    mkdir -p "$command_log_dir"
-
-    local date_part
-    date_part=$(date "+%Y-%m-%d")
-    local log_filename="${date_part}_${session_id}.log"
-    local log_file="${command_log_dir}/${log_filename}"
+    # date 一次输出两行（%n 为换行符）：第一行月份、第二行日期。同一时刻取值，
+    # 避免两次 date 调用在午夜临界产生月/日错配（如 2026-05/2026-06-01）
+    local log_month log_date
+    {
+        IFS= read -r log_month
+        IFS= read -r log_date
+    } <<< "$(date "+${_LOG_MONTH_FORMAT}%n${_LOG_DATE_FORMAT}")"
+    # session_id 来自外部输入且进入文件名，清洗为文件名安全字符，
+    # 防止 sed 替换被特殊字符（/ & \）破坏及路径穿越
+    local safe_session="${session_id//[^A-Za-z0-9._-]/_}"
+    local log_filename
+    log_filename=$(echo "$_LOG_COMMAND_PATTERN" | sed "s/{month}/${log_month}/g; s/{date}/${log_date}/g; s/{session}/${safe_session}/g")
+    local log_file="${LOG_DIR}/${log_filename}"
+    mkdir -p "$(dirname "$log_file")"
 
     {
         echo "=========================================="

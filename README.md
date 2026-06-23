@@ -27,7 +27,7 @@
 3. **权限处理脚本** (`src/hooks/permission.sh`) - PermissionRequest 事件处理
 4. **任务完成通知脚本** (`src/hooks/stop.sh`) - Stop 事件处理
 5. **回调服务** (`src/server/main.py`) - HTTP 服务接收飞书卡片操作，通过 Unix Socket 传递决策
-6. **飞书网关** (`src/server/handlers/feishu.py`) - OpenAPI 模式的飞书 API 网关
+6. **飞书网关** (`src/server/handlers/feishu/`) - OpenAPI 模式的飞书 API 网关
 7. **飞书卡片模板系统** (`src/templates/feishu/`) - 模块化的卡片模板
 8. **MCP 权限审批服务** (`src/server/handlers/permission_mcp.py`) - Headless 模式下桥接权限请求到飞书审批系统
 
@@ -67,38 +67,45 @@ code-anywhere/
 │   │   │   ├── decision_handler.py  # 决策处理器
 │   │   │   ├── codex_rule_writer.py # Codex 权限规则写入
 │   │   │   ├── session_facade.py    # 会话操作门面
+│   │   │   ├── card_cache.py        # 卡片消息缓存
+│   │   │   ├── auto_register.py     # 网关注册服务
+│   │   │   ├── auth_token.py        # 认证令牌管理
+│   │   │   ├── feishu_api.py        # 飞书 API 封装
+│   │   │   ├── feishu_longpoll.py   # 飞书 WebSocket 长连接服务
+│   │   │   ├── ws_registry.py       # WebSocket 连接注册
+│   │   │   └── ws_tunnel_client.py  # WebSocket 隧道客户端
+│   │   ├── stores/             # JSON 持久化单例 store（统一 JsonStore 基类）
+│   │   │   ├── json_store.py        # JSON 持久化单例基类（各 store 共用）
 │   │   │   ├── message_session_store.py # Message-Session 映射存储
 │   │   │   ├── session_chat_store.py   # Session-Chat 映射存储
 │   │   │   ├── binding_store.py     # 群聊绑定存储
 │   │   │   ├── group_chat_store.py  # 群聊会话存储（group 模式）
 │   │   │   ├── group_session_store.py # 群聊 Session 存储（group 模式）
 │   │   │   ├── directory_store.py   # 目录使用记录存储
-│   │   │   ├── card_cache.py        # 卡片消息缓存
-│   │   │   ├── auto_register.py     # 网关注册服务
-│   │   │   ├── auth_token.py        # 认证令牌管理
-│   │   │   ├── auth_token_store.py  # 认证令牌存储
-│   │   │   ├── feishu_api.py        # 飞书 API 封装
-│   │   │   ├── feishu_longpoll.py   # 飞书 WebSocket 长连接服务
-│   │   │   ├── ws_protocol.py       # WebSocket 协议封装
-│   │   │   ├── ws_registry.py       # WebSocket 连接注册
-│   │   │   └── ws_tunnel_client.py  # WebSocket 隧道客户端
+│   │   │   └── auth_token_store.py  # 认证令牌存储
 │   │   ├── handlers/           # HTTP 处理器
 │   │   │   ├── http_handler.py # HTTP 请求处理器（GET/POST 路由分发）
 │   │   │   ├── callback.py     # 权限回调处理器
-│   │   │   ├── feishu.py       # 飞书事件处理器（OpenAPI 网关）
+│   │   │   ├── feishu/         # 飞书事件处理器包（OpenAPI 网关）
 │   │   │   ├── agent.py        # Agent 会话处理器（新建/继续）
 │   │   │   ├── register.py     # 网关注册处理器
 │   │   │   ├── ws_handler.py   # WebSocket 连接处理器
 │   │   │   ├── permission_mcp.py # MCP 权限审批服务（headless 模式）
-│   │   │   └── utils.py        # 处理器通用工具函数
+│   │   │   ├── outbound.py     # 飞书出站门面（reply/建群/移除 typing）
+│   │   │   └── responses.py    # HTTP 响应写回（send_json/send_html）
 │   │   ├── telemetry/          # 遥测服务
 │   │   │   ├── client.py       # 遥测数据上报客户端
 │   │   │   ├── client_id.py    # 匿名客户端 ID 管理
 │   │   │   ├── handler.py      # 遥测事件处理
 │   │   │   ├── store.py        # 遥测数据存储
 │   │   │   └── utils.py        # 遥测工具函数
-│   │   └── utils/              # 通用工具
-│   │       └── ttl_cache.py    # TTL 缓存
+│   │   └── utils/              # 通用工具（stdlib-only，无领域耦合）
+│   │       ├── ttl_cache.py    # TTL 缓存
+│   │       ├── atomic_json.py  # 原子 JSON 读写工具（dict 校验 + tmp 清理）
+│   │       ├── http_client.py  # 通用出站 HTTP（post_json）
+│   │       ├── shell.py        # 子进程命令构建（build_shell_cmd）
+│   │       ├── concurrency.py  # 后台线程执行（run_in_background）
+│   │       └── ws_protocol.py  # WebSocket 帧编解码（RFC 6455）
 │   ├── config/                 # 配置文件
 │   │   └── tools.json          # 工具类型配置
 │   ├── templates/              # 飞书卡片模板
@@ -403,7 +410,7 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `src/server/main.py` | 权限回调服务（HTTP + Socket） | - |
 | `src/server/socket_client.py` | Socket 客户端（替代 socat） | - |
 | `src/server/handlers/agent.py` | Agent 会话处理器（新建/继续） | - |
-| `src/server/services/message_session_store.py` | Message-Session 映射存储服务 | - |
+| `src/server/stores/message_session_store.py` | Message-Session 映射存储服务 | - |
 
 ## Shell 函数库说明
 
@@ -433,15 +440,25 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 | `request_manager.py` | 请求管理器（注册、查询、超时处理） |
 | `decision_handler.py` | 决策处理器（通过 Socket 返回决策） |
 | `codex_rule_writer.py` | Codex 权限规则写入器（`prefix_rule`） |
+| `auto_register.py` | 网关注册服务（Callback 自动向网关注册） |
+| `auth_token.py` | 认证令牌管理（生成、验证、刷新） |
+| `feishu_api.py` | 飞书 API 封装（发送消息、上传图片等） |
+| `feishu_longpoll.py` | 飞书 WebSocket 长连接服务（lark-oapi SDK） |
+
+### Store 持久化 (`src/server/stores/`)
+
+均继承 `JsonStore` 基类（JSON 文件持久化单例，统一 `_load`/`_save`/单例机制）。
+
+| Store | 功能 |
+|-------|------|
+| `json_store.py` | JSON 文件持久化单例基类（各 store 共用） |
 | `message_session_store.py` | Message-Session 映射存储（message_id → session） |
 | `session_chat_store.py` | Session-Chat 映射存储（session_id → chat_id） |
 | `binding_store.py` | 网关注册绑定存储（owner_id → callback_url + auth_token） |
+| `group_chat_store.py` | 群聊会话存储（owner_id → 群聊序号 + chat_id，group 模式） |
+| `group_session_store.py` | 群聊 Session 存储（(owner_id, chat_id) → session，group 模式） |
 | `directory_store.py` | 目录使用记录存储（常用工作目录推荐） |
-| `auto_register.py` | 网关注册服务（Callback 自动向网关注册） |
-| `auth_token.py` | 认证令牌管理（生成、验证、刷新） |
 | `auth_token_store.py` | 认证令牌存储（网关注册返回的 token） |
-| `feishu_api.py` | 飞书 API 封装（发送消息、上传图片等） |
-| `feishu_longpoll.py` | 飞书 WebSocket 长连接服务（lark-oapi SDK） |
 
 ### HTTP 处理器 (`src/server/handlers/`)
 
@@ -449,11 +466,12 @@ Callback 通过 WebSocket 长连接主动接入网关，无需公网 IP，适合
 |--------|------|------|
 | `http_handler.py` | HTTP 请求处理器（GET/POST 路由分发入口） | 全部 |
 | `callback.py` | 权限回调处理器（接收按钮操作） | `/cb/*` |
-| `feishu.py` | 飞书事件处理器（OpenAPI 网关） | `/gw/feishu/*` |
+| `feishu/` | 飞书事件处理器包（OpenAPI 网关） | `/gw/feishu/*` |
 | `agent.py` | Agent 会话处理器 | `/cb/agent/new`, `/cb/agent/continue` |
 | `register.py` | 网关注册处理器 | `/gw/register` |
 | `permission_mcp.py` | MCP 权限审批服务（headless 模式） | MCP stdio |
-| `utils.py` | 处理器通用工具函数 | - |
+| `outbound.py` | 飞书出站门面（reply 文本/卡片、移除 typing、建群） | - |
+| `responses.py` | HTTP 响应写回（send_json / send_html_response） | - |
 
 ## VSCode SSH 远程开发代理
 
@@ -934,17 +952,17 @@ brew install python3 curl jq socat
 
 ## 日志
 
-日志文件位于 `log/` 目录，按组件分子目录存放，按天自动轮转：
+日志文件位于 `log/` 目录，按组件分子目录、再按月份归档，按天自动轮转：
 
 | 文件模式 | 说明 |
 |----------|------|
-| `hook/YYYY-MM-DD.log` | Hook 脚本日志 |
-| `callback/YYYY-MM-DD.log` | 回调服务日志 |
-| `socket_client/YYYY-MM-DD.log` | Socket 客户端日志 |
-| `feishu_message/YYYY-MM-DD.log` | 飞书消息日志 |
-| `feishu_longpoll/YYYY-MM-DD.log` | 飞书长连接日志 |
-| `permission_mcp/YYYY-MM-DD.log` | MCP 权限审批日志 |
-| `command/YYYY-MM-DD_{session}.log` | 命令日志（按 session 分文件） |
+| `hook/YYYY-MM/YYYY-MM-DD.log` | Hook 脚本日志 |
+| `callback/YYYY-MM/YYYY-MM-DD.log` | 回调服务日志 |
+| `socket_client/YYYY-MM/YYYY-MM-DD.log` | Socket 客户端日志 |
+| `feishu_message/YYYY-MM/YYYY-MM-DD.log` | 飞书消息日志 |
+| `feishu_longpoll/YYYY-MM/YYYY-MM-DD.log` | 飞书长连接日志 |
+| `permission_mcp/YYYY-MM/YYYY-MM-DD.log` | MCP 权限审批日志 |
+| `command/YYYY-MM/YYYY-MM-DD_{session}.log` | 命令日志（按 session 分文件） |
 
 日志配置统一定义在 `shared/logging.json`。
 

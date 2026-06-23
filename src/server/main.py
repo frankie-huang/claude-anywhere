@@ -45,18 +45,21 @@ from config import (
     FEISHU_GATEWAY_MODE, DEFAULT_CHAT_DIR,
     FEISHU_EVENT_MODE, IS_CALLBACK_BACKEND
 )
-from services.request_manager import RequestManager
 from services.card_cache import CardCache
 from services.feishu_api import FeishuAPIService
-from services.message_session_store import MessageSessionStore
-from services.group_session_store import GroupSessionStore
-from services.directory_store import DirectoryStore
-from services.binding_store import BindingStore
-from handlers.http_handler import HttpRequestHandler
-from services.auth_token_store import AuthTokenStore
-from services.session_chat_store import SessionChatStore
-from services.group_chat_store import GroupChatStore
+from services.request_manager import RequestManager
 from services.ws_registry import WebSocketRegistry
+
+from stores.auth_token_store import AuthTokenStore
+from stores.binding_store import BindingStore
+from stores.directory_store import DirectoryStore
+from stores.group_chat_store import GroupChatStore
+from stores.group_session_store import GroupSessionStore
+from stores.message_session_store import MessageSessionStore
+from stores.notify_config_store import NotifyConfigStore
+from stores.session_chat_store import SessionChatStore
+
+from handlers.http_handler import HttpRequestHandler
 
 # =============================================================================
 # 配置 (优先级: .env > 环境变量 > 默认值)
@@ -317,7 +320,7 @@ def _cleanup_group_chats():
       - 否则按该值判断空闲
     """
     try:
-        from handlers.feishu import batch_dissolve_groups
+        from handlers.feishu import batch_dissolve_groups, find_idle_group_chats
 
         group_store = GroupChatStore.get_instance()
         gs_store = GroupSessionStore.get_instance()
@@ -325,13 +328,13 @@ def _cleanup_group_chats():
         if not group_store or not gs_store or not binding_store:
             return
 
-        now = time.time()
+        now = int(time.time())
 
         all_groups = group_store.get_all()
         if not all_groups:
             return
 
-        # 按 owner 遍历：每个 owner 只读一次 binding + 一次 session 数据
+        # 复用 get_all 已加载的 bucket，避免 find_idle_group_chats 内部重复读 group_chat 文件
         idle_by_owner: Dict[str, List[str]] = {}
         for owner_id, owner_bucket in all_groups.items():
             binding = binding_store.get(owner_id)
@@ -340,15 +343,11 @@ def _cleanup_group_chats():
             dissolve_days = binding.get('group_dissolve_days', 0) or 0
             if dissolve_days <= 0:
                 continue
-            sessions = gs_store.get_by_owner(owner_id)
-            for item in owner_bucket.values():
-                chat_id = item.get('chat_id', '')
-                if not chat_id:
-                    continue
-                gs_item = sessions.get(chat_id) or {}
-                last_active = gs_item.get('last_active_at', item.get('created_at', 0))
-                if now - last_active >= dissolve_days * 86400:
-                    idle_by_owner.setdefault(owner_id, []).append(chat_id)
+            idle_chats = find_idle_group_chats(
+                owner_id, owner_chats=list(owner_bucket.values()),
+                now=now, idle_days=dissolve_days)
+            if idle_chats:
+                idle_by_owner[owner_id] = idle_chats
 
         if not idle_by_owner:
             return
@@ -478,8 +477,10 @@ def main():
     # 初始化 CardCache（用于卡片回调后更新状态）
     CardCache.initialize()
 
+    # 运行时状态目录（以下所有 store 共用）；支持 RUNTIME_DIR 外置，默认项目根 runtime/
+    runtime_dir = get_config('RUNTIME_DIR', os.path.join(project_root, 'runtime'))
+
     # 初始化 MessageSessionStore（用于继续会话功能）
-    runtime_dir = os.path.join(project_root, 'runtime')
     MessageSessionStore.initialize(runtime_dir)
     logger.info(f"MessageSessionStore initialized with runtime_dir={runtime_dir}")
 
@@ -492,7 +493,6 @@ def main():
     logger.info(f"DirectoryStore initialized with runtime_dir={runtime_dir}")
 
     # 初始化 NotifyConfigStore（运行时通知配置覆盖）
-    from services.notify_config_store import NotifyConfigStore
     NotifyConfigStore.initialize(runtime_dir)
     logger.info(f"NotifyConfigStore initialized with runtime_dir={runtime_dir}")
 
@@ -639,7 +639,7 @@ def main():
 
 def _shutdown_ws_connections():
     """优雅关闭 WebSocket 连接"""
-    from services.ws_protocol import ws_send_text
+    from utils.ws_protocol import ws_send_text
 
     registry = WebSocketRegistry.get_instance()
     if not registry:

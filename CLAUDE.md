@@ -21,6 +21,17 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 
 <!-- OPENSPEC:END -->
 
+## 架构参考
+
+项目架构约束与开发规范详见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**，包含：
+- 系统全景与数据流
+- 分层架构与模块职责
+- 部署模式
+- **开发约束（文件/函数大小、依赖方向、配置管理等）**
+- **Code Review Checklist**
+
+重构路线图详见 **[docs/REFACTORING_ROADMAP.md](docs/REFACTORING_ROADMAP.md)**。
+
 ## 项目概述
 
 code-anywhere 是一个飞书(Lark)通知与交互系统，为 Claude Code 和 Codex 等 AI 编程 Agent 提供：
@@ -43,7 +54,7 @@ Agent 触发 Hook 事件 → src/hook-router.sh（统一入口）
   └─ Stop             → src/hooks/stop.sh          （任务完成通知）
 ```
 
-共享库在 `src/lib/`：`core.sh`（路径/配置/日志）、`json.sh`（JSON 解析，jq>python3>grep 降级）、`feishu.sh`（卡片构建与发送）、`socket.sh`（Unix Socket 通信，4 字节长度前缀协议）、`tool.sh`/`tool-config.sh`（工具详情格式化）。
+共享库在 `src/lib/`：`core.sh`（路径/配置/日志）、`json.sh`（JSON 解析，jq>python3>grep 降级）、`feishu.sh`（卡片构建与发送）、`socket.sh`（Unix Socket 通信，4 字节长度前缀协议）、`tool.sh`/`tool-config.sh`（工具详情格式化）、`vscode-proxy.sh`（VSCode SSH 代理）。
 
 ### Python Server 层（回调服务）
 
@@ -59,8 +70,10 @@ Agent 触发 Hook 事件 → src/hook-router.sh（统一入口）
 - `request_manager.py` — 待处理权限请求注册表（request_id → socket 连接）
 - `feishu_api.py` — 飞书 API 封装（token 管理、消息发送、敏感信息脱敏）
 - `session_facade.py` — 会话操作网关
-- `binding_store.py` — owner_id → callback_url 映射（网关侧）
 - `ws_tunnel_client.py` — WS 隧道客户端（callback 主动连网关）
+
+**核心存储**（`stores/` 下单例，统一继承 `JsonStore` 基类）：
+- `binding_store.py` — owner_id → callback_url 映射（网关侧）
 
 ### Agent 适配层（策略模式）
 
@@ -89,7 +102,7 @@ Agent 触发 Hook 事件 → src/hook-router.sh（统一入口）
 
 ```
 1. 用户在飞书回复完成通知消息
-2. im.message.receive_v1 事件 → feishu.py → MessageSessionStore 查找 session_id
+2. im.message.receive_v1 事件 → feishu 包 → MessageSessionStore 查找 session_id
 3. 路由到 agent.py → 使用 AgentAdapter 构建 `claude --resume SESSION_ID` 命令
 4. 后台监控 Agent 完成 → 发送新的完成通知
 ```
@@ -150,7 +163,7 @@ python3 -m unittest tests.test_directory_store_recursive -v
 
 ### 日志与调试
 
-日志目录 `log/`，按组件分类，每日自动轮转：
+日志目录 `log/`，按组件分类、再按月份（`YYYY-MM/`）归档，每日自动轮转（如 `log/hook/2026-06/2026-06-20.log`）：
 
 | 目录/文件 | 内容 |
 |-----------|------|
@@ -245,7 +258,7 @@ per-user 配置的完整链路（以 `group_allow_cowork` 为例），新增只�
 2. `binding_store.py:upsert()` — 存储到 binding
 3. `config.py` — 定义全局默认值（callback 端注册时使用）
 
-注册时 `main.py` / `auto_register.py` 组装 `binding_params` dict 传给网关，网关侧 `register.py` 和 `ws_handler.py` 通过 `extract_binding_params()` 统一提取，`binding_store.upsert()` 统一存储。读取时 `feishu.py` 从 `binding.get('xxx')` 读取（而非全局 config）。
+注册时 `main.py` / `auto_register.py` 组装 `binding_params` dict 传给网关，网关侧 `register.py` 和 `ws_handler.py` 通过 `extract_binding_params()` 统一提取，`binding_store.upsert()` 统一存储。读取时 `feishu` 包从 `binding.get('xxx')` 读取（而非全局 config）。
 
 ### 网关侧接口鉴权
 

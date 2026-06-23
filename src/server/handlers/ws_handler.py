@@ -41,7 +41,12 @@ import logging
 import socket
 from typing import Any, Dict, List
 
-from handlers.utils import send_json
+from handlers.responses import send_json
+from utils.ws_protocol import (
+    ws_server_handshake, cleanup_socket_state,
+    ws_recv, ws_send_text, ws_send_pong, ws_send_close,
+    OPCODE_TEXT, OPCODE_PING, OPCODE_CLOSE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +65,6 @@ def handle_ws_tunnel(handler: Any, params: Dict[str, List[str]]) -> None:
        - 有绑定 + token 不匹配：新终端换绑，发飞书授权卡片
        - 无绑定：首次注册，发飞书授权卡片
     """
-    from services.ws_protocol import ws_server_handshake, cleanup_socket_state
     from services.ws_registry import WebSocketRegistry
 
     owner_id = params.get('owner_id', [None])[0]
@@ -131,9 +135,8 @@ def _process_tunnel_connection(sock: socket.socket, handler: Any, owner_id: str,
         owner_id: 飞书用户 ID
         registry: WebSocketRegistry 实例
     """
-    from services.ws_protocol import ws_recv, ws_send_close, OPCODE_TEXT
     from config import FEISHU_APP_SECRET
-    from services.binding_store import BindingStore
+    from stores.binding_store import BindingStore
 
     client_ip = handler.get_client_ip()
     logger.info("[ws/tunnel] Connection established: owner_id=%s, ip=%s", owner_id, client_ip)
@@ -283,8 +286,6 @@ def _ws_message_loop(sock: socket.socket, owner_id: str, registry: Any, is_pendi
         is_pending: 是否处于 pending 状态
         request_id: 请求 ID（pending 状态时用于更新活动时间）
     """
-    from services.ws_protocol import ws_recv, ws_send_pong, ws_send_close, OPCODE_TEXT, OPCODE_PING, OPCODE_CLOSE
-
     sock.settimeout(WS_READ_TIMEOUT)
     logger.debug("[ws/tunnel] Message loop started for %s, timeout=%ds, pending=%s, request_id=%s", owner_id, WS_READ_TIMEOUT, is_pending, request_id)
 
@@ -387,7 +388,7 @@ def _handle_ws_message(sock: socket.socket, owner_id: str, msg: Dict[str, Any], 
             # 更新 BindingStore（如果有暂存的绑定参数）
             binding_params = registry.get_pending_binding_params(owner_id, request_id)
             if binding_params:
-                from services.binding_store import BindingStore
+                from stores.binding_store import BindingStore
                 store = BindingStore.get_instance()
                 if store:
                     store.upsert(
@@ -406,7 +407,6 @@ def _handle_ws_message(sock: socket.socket, owner_id: str, msg: Dict[str, Any], 
 
     elif msg_type == 'ping':
         # 应用层 ping（通常用 WS 原生 ping，但保留应用层支持）
-        from services.ws_protocol import ws_send_text
         ws_send_text(sock, json.dumps({'type': 'pong'}))
 
     else:

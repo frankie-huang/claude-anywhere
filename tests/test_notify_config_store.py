@@ -12,7 +12,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'src', 'server'))
 
-from services.notify_config_store import NotifyConfigStore  # noqa: E402
+from stores.notify_config_store import NotifyConfigStore  # noqa: E402
 
 
 class TestNotifyConfigStore(unittest.TestCase):

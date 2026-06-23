@@ -25,7 +25,7 @@ from services.auth_token import verify_owner_based_auth_token
 from handlers.feishu import (handle_feishu_request, handle_send_message,
                              handle_create_group, handle_remove_reaction)
 from handlers.register import handle_register_request
-from handlers.utils import send_json, send_html_response
+from handlers.responses import send_json, send_html_response
 from handlers.ws_handler import handle_ws_tunnel
 from handlers.callback import (
     handle_status,

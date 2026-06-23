@@ -26,18 +26,16 @@ gateway 转发 /cb/agent/continue 时 callback 校验 session 是否存在，
 已过期则返回错误，gateway 告知用户 /new。
 """
 
-import json
 import logging
-import os
-import tempfile
-import threading
 import time
 from typing import Any, Dict, List, Optional
+
+from stores.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 
 
-class SessionChatStore:
+class SessionChatStore(JsonStore):
     """管理 session_id -> session 语义数据的存储（归属端: Callback 后端）
 
     数据结构:
@@ -62,18 +60,11 @@ class SessionChatStore:
 
     """
 
-    _instance: Optional['SessionChatStore'] = None
-    _lock = threading.Lock()
+    STORE_NAME = 'session_chats'
+    LOG_TAG = 'session-chat-store'
 
     # 默认过期时间（秒），由 config.SESSION_EXPIRE_DAYS 覆盖
     _expire_seconds: int = 30 * 24 * 3600
-
-    def __init__(self, data_dir: str):
-        self._data_dir = data_dir
-        self._file_path = os.path.join(data_dir, 'session_chats.json')
-        self._file_lock = threading.Lock()
-        os.makedirs(data_dir, exist_ok=True)
-        logger.info("[session-chat-store] Initialized with data_dir=%s", data_dir)
 
     @classmethod
     def initialize(cls, data_dir: str, expire_seconds: Optional[int] = None) -> 'SessionChatStore':
@@ -83,10 +74,6 @@ class SessionChatStore:
             if expire_seconds is not None:
                 cls._instance._expire_seconds = expire_seconds
             return cls._instance
-
-    @classmethod
-    def get_instance(cls) -> Optional['SessionChatStore']:
-        return cls._instance
 
     def backfill_agent_type(self, default: str = 'claude') -> int:
         """为缺少 agent_type 的旧 session 记录补写默认值
@@ -643,31 +630,3 @@ class SessionChatStore:
                 logger.error("[session-chat-store] Failed to cleanup: %s", e)
                 return 0
 
-    # =========================================================================
-    # 底层 I/O
-    # =========================================================================
-
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self._file_path):
-            return {}
-        try:
-            with open(self._file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("[session-chat-store] Invalid JSON in %s, starting fresh",
-                           self._file_path)
-            return {}
-        except IOError as e:
-            logger.error("[session-chat-store] Failed to load: %s", e)
-            return {}
-
-    def _save(self, data: Dict[str, Any]) -> bool:
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=self._data_dir, suffix='.tmp')
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._file_path)
-            return True
-        except (IOError, OSError) as e:
-            logger.error("[session-chat-store] Failed to save: %s", e)
-            return False

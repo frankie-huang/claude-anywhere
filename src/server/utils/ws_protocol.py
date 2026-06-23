@@ -17,7 +17,7 @@
 
     # 客户端
     sock = ws_client_connect(url)
-    ws_send_text(sock, json.dumps({"type": "register", "owner_id": "ou_xxx"}))
+    ws_send_text(sock, json.dumps({"type": "hello"}))
     opcode, payload = ws_recv(sock)
 """
 
@@ -75,7 +75,7 @@ def _compute_accept_key(key: str) -> str:
 def _mask_data(data: bytes, mask_key: bytes) -> bytes:
     """使用 mask key 对数据进行 XOR 掩码
 
-    注：逐字节 XOR 对本隧道场景足够（payload 均为 KB 级 JSON），
+    注：逐字节 XOR 对中小 payload 场景足够（KB 级），
     无需 batch XOR 优化（int.from_bytes 按 4 字节块处理）。
     """
     result = bytearray(len(data))
@@ -152,13 +152,15 @@ def ws_server_handshake(handler: Any) -> socket.socket:
 # 客户端握手
 # =============================================================================
 
-def ws_client_connect(url: str, extra_headers: Optional[Dict[str, str]] = None) -> socket.socket:
+def ws_client_connect(url: str, user_agent: str = "Python-WS-Client/1.0",
+                      extra_headers: Optional[Dict[str, str]] = None) -> socket.socket:
     """客户端 WebSocket 握手
 
     发送 HTTP Upgrade 请求，验证响应，返回连接 socket。
 
     Args:
         url: WebSocket URL，格式 ws://host:port/path?query
+        user_agent: User-Agent 请求头的值（调用方可传入自己的标识）
         extra_headers: 额外的 HTTP 请求头
 
     Returns:
@@ -210,7 +212,7 @@ def ws_client_connect(url: str, extra_headers: Optional[Dict[str, str]] = None) 
         "Connection: Upgrade",
         f"Sec-WebSocket-Key: {ws_key}",
         "Sec-WebSocket-Version: 13",
-        "User-Agent: Claude-Hooks-WS-Tunnel/1.0",
+        f"User-Agent: {user_agent}",
     ]
 
     # 添加额外头
@@ -455,7 +457,7 @@ def ws_recv(sock: socket.socket, timeout: Optional[float] = None) -> Tuple[int, 
 def _recv_exact(sock: socket.socket, length: int) -> bytes:
     """精确接收指定字节数
 
-    注：bytes 拼接对本隧道场景足够（payload 均为 KB 级 JSON，通常 1-2 次 recv），
+    注：bytes 拼接对中小 payload 场景足够（KB 级，通常 1-2 次 recv），
     无需 bytearray + memoryview 优化。
     """
     data = b''
