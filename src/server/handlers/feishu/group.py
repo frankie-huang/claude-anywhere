@@ -552,6 +552,39 @@ def handle_remove_reaction(binding: Dict[str, Any], data: dict) -> Tuple[bool, d
         return True, {'success': False, 'error': 'remove_reaction failed'}
 
 
+def handle_add_reaction(binding: Dict[str, Any], data: dict) -> Tuple[bool, dict]:
+    """处理 /gw/feishu/add-reaction 请求，给消息添加表情回应
+
+    Args:
+        binding: 绑定信息（由调用方鉴权后传入）
+        data: 请求 JSON 数据
+            - message_id: 消息 ID（必需）
+            - emoji_type: 表情类型，如 "Typing"（必需）
+
+    Returns:
+        (handled, response): handled 始终为 True，response 包含结果
+    """
+    from services.feishu_api import FeishuAPIService
+
+    message_id = data.get('message_id', '') or ''
+    emoji_type = data.get('emoji_type', '') or ''
+
+    if not message_id:
+        return True, {'success': False, 'error': 'Missing message_id'}
+    if not emoji_type:
+        return True, {'success': False, 'error': 'Missing emoji_type'}
+
+    service = FeishuAPIService.get_instance()
+    if service is None or not service.enabled:
+        return True, {'success': False, 'error': 'Feishu API service not enabled'}
+
+    success, _ = service.add_reaction(message_id, emoji_type)
+    if success:
+        return True, {'success': True}
+    else:
+        return True, {'success': False, 'error': 'add_reaction failed'}
+
+
 def _send_groups_card(binding: Dict[str, Any], chat_id: str, message_id: str) -> None:
     """构建并发送群聊列表卡片（数据全来自 gateway 本地 store，零 RPC）"""
     from services.feishu_api import FeishuAPIService

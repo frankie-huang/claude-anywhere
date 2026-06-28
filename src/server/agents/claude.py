@@ -40,9 +40,10 @@ class ClaudeAdapter(AgentAdapter):
 
         已测试的命令分类（--print 模式）：
         - 支持且已注册：/compact, /context, /review, /simplify, /init
-        - 不适用：/cost（费用统计为 per-process，headless 下始终为 0）
+        - 不适用（per-process 统计，headless 下始终为 0）：/cost, /usage, /stats
         - 不支持（Unknown skill）：/model, /memory, /config, /doctor,
           /bug, /login, /status, /commit, /pr-comments
+        - 不支持（not available in this environment）：/fork, /branch
         """
         return {
             'init': SlashCommandInfo(

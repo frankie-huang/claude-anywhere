@@ -28,6 +28,7 @@ POST 路由:
 - /cb/session/invalidate-chats: 标记所有引用该 chat_id 的记录为 dissolved 状态（gateway 解散群后调用）
 - /cb/agent/new: 新建会话
 - /cb/agent/continue: 继续会话
+- /cb/agent/stop: 停止会话中正在执行的 Agent 进程
 - /cb/directory/record-usage: 记录目录使用
 - /cb/directory/recent-dirs: 获取近期工作目录
 - /cb/directory/browse-dirs: 浏览子目录
@@ -47,7 +48,7 @@ from services.request_manager import RequestManager
 from services.decision_handler import handle_decision
 from config import VSCODE_URI_PREFIX, PERMISSION_REQUEST_TIMEOUT
 from handlers.register import handle_register_callback, handle_check_owner_id
-from handlers.agent import handle_continue_session, handle_new_session
+from handlers.agent import handle_continue_session, handle_new_session, handle_stop_session
 from handlers.responses import send_json, send_html_response
 from handlers.outbound import create_feishu_group
 
@@ -192,6 +193,16 @@ def handle_agent_continue(data: Dict[str, Any], headers: Dict[str, str]) -> Tupl
         return 401, {'error': 'Unauthorized'}
 
     success, response = handle_continue_session(data)
+    status = 200 if success else 400
+    return status, response
+
+
+def handle_agent_stop(data: Dict[str, Any], headers: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    """停止会话中正在执行的 Agent 进程（飞书网关调用）"""
+    if not check_global_auth_token(headers, '/cb/agent/stop'):
+        return 401, {'error': 'Unauthorized'}
+
+    success, response = handle_stop_session(data)
     status = 200 if success else 400
     return status, response
 
@@ -1137,6 +1148,7 @@ BACKEND_ROUTES: Dict[str, PostRouteHandler] = {
     '/cb/session/invalidate-chats': handle_invalidate_chats,
     '/cb/agent/new': handle_agent_new,
     '/cb/agent/continue': handle_agent_continue,
+    '/cb/agent/stop': handle_agent_stop,
     '/cb/directory/record-usage': handle_record_dir_usage,
     '/cb/directory/recent-dirs': handle_recent_dirs,
     '/cb/directory/browse-dirs': handle_browse_dirs,

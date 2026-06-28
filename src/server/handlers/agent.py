@@ -9,17 +9,29 @@ agent 协议层（命令构建、进程启动/监控）已迁移至 agents/ 模�
 
 import logging
 import os
+import signal
+import threading
+import time
 import uuid
 from typing import Callable, Optional, Tuple, Dict, Any
 
 from agents import AgentAdapter, launch_agent, get_agent_adapter
 from stores.session_chat_store import SessionChatStore
+from utils.concurrency import run_in_background
 
 logger = logging.getLogger(__name__)
 
 # 通知消息最大长度
 MAX_ERROR_NOTIFICATION_LENGTH = 500
 MAX_COMPLETE_OUTPUT_LENGTH = 10000  # 完成通知输出最大长度（/compact、/context 等）
+
+# 指令队列最大容量
+_QUEUE_MAX_SIZE = 5
+
+# 启动锁：防止同一 session 并发启动多个 Agent 进程（TOCTOU 竞态保护）
+# 锁序约束：_launching_lock → SessionChatStore._file_lock，不可反向获取
+_launching_lock = threading.Lock()
+_launching_sessions = set()
 
 
 class Response:
@@ -60,7 +72,8 @@ class Response:
 # =============================================
 
 
-def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+def handle_continue_session(data: Dict[str, Any],
+                            from_queue: bool = False) -> Tuple[bool, Dict[str, Any]]:
     """处理继续会话的请求
 
     同步等待一小段时间判断命令是否能正常启动，然后返回结果。
@@ -74,6 +87,7 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
             - message_id: 用户消息 ID (可选，用于回复式通知)
             - command: 指定使用的命令 (可选)
             - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 读取)
+        from_queue: 队列触发时为 True，跳过队列排队检查
 
     Returns:
         (success, response):
@@ -135,29 +149,65 @@ def handle_continue_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]
     logger.info("[%s-continue] Session: %s, Dir: %s, Cmd: %s, Prompt: %s...",
                 adapter.agent_type, session_id, project_dir, actual_cmd, prompt[:50])
 
-    # 更新 session 映射：刷新 command 和 chat_id
-    # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
-    # chat_id 来自飞书消息事件（P2P / 群聊均必定非空），非空 chat_id 自动清除 dissolved
-    session_store.save(session_id, chat_id, command=actual_cmd,
-                       agent_type=adapter.agent_type)
-    # 用户发送了新消息，自动解除静音
-    if session_store.unmute_session(session_id) is True and chat_id:
-        _send_unmute_notification(chat_id, session_id, message_id)
-    # 飞书发起的 prompt 已在飞书展示，标记跳过
-    session_store.set_skip_next_user_prompt(session_id)
+    # ── 忙碌检查：会话有运行中的进程、正在启动、或队列有排队指令时，入队 ──
+    with _launching_lock:
+        busy, has_pending = session_store.get_session_queue_status(session_id)
+        if session_id in _launching_sessions or busy or (not from_queue and has_pending):
+            ok, position = session_store.enqueue_prompt(session_id, data,
+                                                        max_size=_QUEUE_MAX_SIZE)
+            if not ok:
+                return Response.error(
+                    '指令队列已满（最多 %d 条），请稍后重试' % _QUEUE_MAX_SIZE,
+                    session_id=session_id, agent_type=adapter.agent_type)
+            logger.info("[%s-continue] Prompt queued at position %d: %s",
+                        adapter.agent_type, position, session_id)
+            return True, {'status': 'queued', 'queue_position': position,
+                          'session_id': session_id, 'agent_type': adapter.agent_type}
+        _launching_sessions.add(session_id)
 
-    # 通过 agent 适配层启动进程
-    result = launch_agent(
-        adapter, session_id, project_dir, prompt,
-        chat_id, message_id, session_mode='resume',
-        command_name=actual_cmd,
-        on_complete=on_complete,
-        on_error=_send_error_notification)
-    return result
+    try:
+        # 更新 session 映射：刷新 command 和 chat_id
+        # chat_id 可能变化（如用户在不同聊天中通过默认工作目录继续同一 session）
+        # chat_id 来自飞书消息事件（P2P / 群聊均必定非空），非空 chat_id 自动清除 dissolved
+        session_store.save(session_id, chat_id, command=actual_cmd,
+                           agent_type=adapter.agent_type)
+        # 用户发送了新消息，自动解除静音
+        if session_store.unmute_session(session_id) is True and chat_id:
+            _send_unmute_notification(chat_id, session_id, message_id)
+        # 飞书发起的 prompt 已在飞书展示，标记跳过
+        session_store.set_skip_next_user_prompt(session_id)
+
+        # ── 包装回调：完成后清 PID + 执行队列下一条 ──
+        wrapped_complete = _wrap_with_queue_drain(on_complete)
+        wrapped_error = _wrap_with_queue_drain(_send_error_notification)
+
+        # 通过 agent 适配层启动进程
+        success, pid, response = launch_agent(
+            adapter, session_id, project_dir, prompt,
+            chat_id, message_id, session_mode='resume',
+            command_name=actual_cmd,
+            on_complete=wrapped_complete,
+            on_error=wrapped_error)
+
+        # 启动成功且进程仍在运行时，记录 PID
+        if success and pid:
+            session_store.set_running_pid(session_id, pid)
+
+        return success, response
+    finally:
+        with _launching_lock:
+            _launching_sessions.discard(session_id)
+        # NOTE: pid=0 快速完成时 callback 也会 drain，形成双重 drain。
+        # 后者被 _launching_sessions 拦截（同步回调）或各 dequeue 一条后
+        # 第二条被 _launching_sessions 拦截并 re-enqueue（异步回调）。
+        # 代价仅 FIFO 偶尔翻转，可接受；无法从外部区分 callback 是否已调度。
+        _process_next_in_queue(session_id)
 
 
 def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """处理新建会话的请求
+    NOTE: 无 _launching_sessions 保护，因为 /new 每次生成新 uuid，
+    并发 /new 同 session_id 概率极低，不值得增加复杂度。
 
     Args:
         data: 请求数据
@@ -259,14 +309,23 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     if skip_user_prompt:
         session_store.set_skip_next_user_prompt(session_id)
 
+    # ── 包装回调：完成后清 PID + 执行队列下一条 ──
+    wrapped_complete = _wrap_with_queue_drain(on_complete)
+    wrapped_error = _wrap_with_queue_drain(_send_error_notification)
+
     # 通过 agent 适配层启动进程
-    result = launch_agent(
+    success, pid, response = launch_agent(
         adapter, session_id, project_dir, prompt,
         chat_id, message_id, session_mode='new',
         command_name=actual_cmd,
-        on_complete=on_complete,
-        on_error=_send_error_notification)
-    return result
+        on_complete=wrapped_complete,
+        on_error=wrapped_error)
+
+    # 启动成功且进程仍在运行时，记录 PID
+    if success and pid:
+        session_store.set_running_pid(session_id, pid)
+
+    return success, response
 
 
 # =============================================
@@ -421,3 +480,164 @@ def _send_unmute_notification(chat_id: str, session_id: str, message_id: str = '
         logger.info("Sent unmute notification to %s", chat_id)
     else:
         logger.error("Failed to send unmute notification: %s", result)
+
+
+# =============================================
+# 指令队列
+# =============================================
+
+
+def _wrap_with_queue_drain(original_callback: Optional[Callable]) -> Callable:
+    """包装回调：完成后清 PID + 检查 stopped 标志 + 执行队列下一条"""
+
+    def wrapper(agent_type: str, chat_id: str, message_id: str,
+                session_id: str, output_or_error: str):
+        store = SessionChatStore.get_instance()
+
+        # /stop 触发的终止：跳过原始回调（不发错误通知），只做清理，不 drain 队列
+        stopped = store and store.check_and_clear_stopped_flag(session_id)
+        if stopped:
+            logger.info("[queue] Stopped flag detected, skipping notification: %s",
+                        session_id)
+            store.check_and_clear_skip_user_prompt(session_id)
+            from handlers.outbound import remove_feishu_typing  # 延迟导入避免循环依赖
+            remove_feishu_typing(message_id)
+        elif original_callback:
+            original_callback(agent_type, chat_id, message_id, session_id, output_or_error)
+
+        # 清除 running_pid
+        if store:
+            store.clear_running_pid(session_id)
+
+        # stopped 时不 drain 队列（/stop 已清空队列）
+        if not stopped:
+            _process_next_in_queue(session_id)
+
+    return wrapper
+
+
+def _process_next_in_queue(session_id: str):
+    """从队列弹出下一条指令并执行
+
+    前置检查防止误 drain：
+    - _launching_sessions：启动流程未结束时跳过
+    - is_session_busy：进程仍在运行时跳过
+    """
+    with _launching_lock:
+        if session_id in _launching_sessions:
+            return
+    store = SessionChatStore.get_instance()
+    if not store:
+        return
+    if store.is_session_busy(session_id):
+        return
+    next_item = store.dequeue_prompt(session_id)
+    if next_item is None:
+        return
+    logger.info("[queue] Processing next queued prompt: %s", session_id)
+    run_in_background(_execute_queued_prompt, (session_id, next_item))
+
+
+def _execute_queued_prompt(session_id: str, data: Dict[str, Any]):
+    """执行队列中的指令，失败时通知用户并继续 drain
+
+    handle_continue_session 在参数校验阶段失败时（session 过期、目录不存在等），
+    会在进入 try/finally 之前提前 return，此时 finally 不会执行，队列不会继续 drain。
+    本函数捕获这类失败，发送错误通知并手动触发队列 drain。
+    """
+    store = SessionChatStore.get_instance()
+    if not store:
+        logger.warning("[queue] SessionChatStore not initialized, aborting queued prompt: %s",
+                       session_id)
+        return
+
+    if store.check_and_clear_stopped_flag(session_id):
+        logger.info("[queue] Stopped flag detected, discarding queued prompt: %s",
+                    session_id)
+        return
+
+    # 给用户原始消息加 Typing，并将 last_message_id 切到该消息，
+    # 让完成通知能正确回复到这条消息（而非上一条已完成的通知）
+    message_id = data.get('message_id', '') or ''
+    if message_id:
+        from handlers.outbound import add_feishu_typing
+        add_feishu_typing(message_id)
+        store.set_last_message_id(session_id, message_id)
+
+    success, response = handle_continue_session(data, from_queue=True)
+    if not success:
+        chat_id = data.get('chat_id', '') or ''
+        agent_type = data.get('agent_type', '') or ''
+        error_msg = response.get('error', '排队指令执行失败')
+        if chat_id:
+            _send_error_notification(
+                agent_type, chat_id, message_id, session_id, error_msg)
+        _process_next_in_queue(session_id)
+
+
+# =============================================
+# /stop 处理
+# =============================================
+
+
+def handle_stop_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """停止会话中正在运行的 Agent 进程并清空队列
+
+    Args:
+        data: 请求数据
+            - session_id: 会话 ID (必需)
+
+    Returns:
+        (success, response):
+            - stopped: 是否终止了进程
+            - queue_cleared: 清空的排队指令数量
+    """
+    session_id = data.get('session_id', '')
+    if not session_id:
+        return False, {'error': 'Missing session_id'}
+
+    session_store = SessionChatStore.get_instance()
+    if not session_store:
+        return False, {'error': 'Session store not initialized'}
+
+    # 无论有无运行进程，都先设置 stopped 标志：
+    # 防止并发的 wrapper drain 在 clear_pending_prompts 之前 dequeue 出指令后仍然执行
+    session_store.set_stopped_flag(session_id)
+
+    pid = session_store.get_running_pid(session_id)
+    stopped = False
+    if pid:
+        stopped = _kill_process(pid)
+        session_store.clear_running_pid(session_id)
+        logger.info("[stop] Terminated process PID=%d for session %s: %s",
+                    pid, session_id, 'success' if stopped else 'already dead')
+
+    queue_cleared = session_store.clear_pending_prompts(session_id)
+
+    return True, {'stopped': stopped, 'queue_cleared': queue_cleared,
+                  'session_id': session_id}
+
+
+def _kill_process(pid: int) -> bool:
+    """终止进程组：SIGTERM → 等 5s → SIGKILL
+
+    用 os.killpg（依赖 Popen 的 start_new_session=True）杀整个进程组，
+    否则 SIGTERM 只杀 wrapper shell，agent 子进程变孤儿。
+
+    NOTE: 同步阻塞最多 5s，在飞书 10s 网关超时内，且提供即时反馈。
+    """
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    for _ in range(50):
+        time.sleep(0.1)
+        try:
+            os.killpg(pid, 0)
+        except OSError:
+            return True
+    try:
+        os.killpg(pid, signal.SIGKILL)
+        return True
+    except OSError:
+        return True

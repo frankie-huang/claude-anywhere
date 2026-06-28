@@ -4,12 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-06-29
+
+#### /stop 终止进程组 + 监控线程重构
+
+- **修复 /stop 残留错误通知**：原 `os.kill(pid, SIGTERM)` 仅杀 wrapper shell（如 `bash -lc "claude ..."`），agent 子进程变孤儿继续运行，导致监控线程 drain 阻塞在 pipe 上 + 孤儿进程后续触发 Stop hook 产生 `code=-15` 错误通知。`Popen` 改用 `start_new_session=True`（子进程为新进程组 leader，PID == PGID），`_kill_process` 改用 `os.killpg` 杀整个进程组
+- **`_is_pid_alive` 配套升级为 `os.killpg(pid, 0)`**：避免 wrapper shell 意外退出但 agent 子进程仍在跑时误判会话空闲，导致并发启动新 agent 引发写入冲突
+- **修复 `_check_and_monitor` 的 pipe 数据丢失**：原 `proc.communicate(timeout=...)` 超时时会丢失已消费的 pipe 数据，改用 `proc.wait(timeout=...)` + 手动读取，超时后 pipe 数据完整保留给 `_monitor_startup` 的 drain 线程
+- **合并 `_monitor_startup` 与 `_monitor_detached`**：消除"启动阶段无 drain、detached 阶段才启动"的职责割裂，drain 启动时机统一；变量名从 `*_tail` 改为 `*_content`（语义更准确，已非仅"尾部"）
+
+### Added - 2026-06-24
+
+#### Agent 指令队列机制 + `/stop` 命令
+
+- 新增指令队列：同一会话有 Agent 进程运行时，后续指令自动排队（最多 5 条），当前任务完成后按序执行，避免并发写入同一 agent 会话
+- 新增 `/stop` 命令：终止当前会话中正在运行的 Agent 进程并清空排队指令，协作者也可使用
+- 排队通知：指令入队时通知用户队列位置（"⏳ 指令已排队（第 N 位），前序任务结束后自动执行"），且不更新 `last_message_id`，避免前序任务完成通知错误回复到排队通知上
+- 队列 drain 出队执行时，给用户原始消息补 Typing 表情，并将 `last_message_id` 切换到该消息，确保完成通知回复到正确的用户问题
+- 基于 `SessionChatStore` 扩展实现，新增 `running_pid`、`pending_prompts`、`stopped` 字段，PID 存活检测自愈死进程
+- 新增 `/cb/agent/stop` Callback 路由与 `/gw/feishu/add-reaction` 网关路由（用于 callback 端给消息加 Typing 表情，兼容单机/分离部署）
+- 服务重启时自动清理残留的运行时状态（`running_pid`、`pending_prompts`、`stopped`），避免队列死锁
+
 ### Changed - 2026-06-24
 
 #### 飞书消息内容解析重构与 @提及 修复
 
 - 新增 `handlers/feishu/content.py`，将消息内容解析（text/post）和 @提及 解析从 `__init__.py` 中拆出，统一入口 `extract_message_text()` + `build_mention_resolution()`
-- **修复 @提及 处理 bug**：旧代码 `_AT_USER_PATTERN` 无脑删除 `@_user_1`，无论它是 bot 还是人。现在通过 `build_mention_resolution()` 精确识别：bot 提及删除，人员提及替换为 `@name`（如 `@Frankie`），让 agent 能识别具体是谁
+- **修复 @提及 处理 bug**：旧代码 `_AT_USER_PATTERN` 无脑删除 `@_user_1`，无论它是 bot 还是人。现在通过 `build_mention_resolution()` 精确识别：bot 提及删除，人员提及替换为 `@name(user_id)`（如 `@张三(abc123)`），让 agent 能识别具体是谁，且 user_id 与群聊协作者前缀 `[来自群成员 user_id]` 对齐
 - 增强 post 富文本解析：支持标题、超链接（转 markdown）、代码块（带语言标识）、@提及；修复代码块尾部多余换行
 - 消息日志记录从 `__init__.py` 内联逻辑迁移到 `utils._log_message_event()`，日志器懒加载逻辑内聚
 - 移除 `_is_at_bot()` 函数和 `_AT_USER_PATTERN` 常量，bot 识别逻辑合并到 `build_mention_resolution()` 中

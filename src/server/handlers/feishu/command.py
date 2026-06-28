@@ -10,6 +10,7 @@ Feishu Command - 命令处理函数
 - _dissolve_groups: 解散群聊逻辑
 - _handle_attach_command: /attach 命令处理
 - _handle_clear_command: /clear 命令处理
+- _handle_stop_command: /stop 命令处理
 - _handle_users_command: /users 命令处理
 """
 
@@ -41,6 +42,7 @@ from .forward import (
     _forward_new_request,
     _forward_new_request_for_default_dir,
     _forward_attach_request,
+    _forward_stop_request,
     _fetch_recent_dirs_from_callback,
 )
 from .card_session import _build_new_session_card
@@ -322,12 +324,12 @@ def _handle_reply_command(data: dict, args: str):
 
     if SessionFacade.RouteSource.is_parent_not_found(route_source):
         run_in_background(_send_notice_message,
-                           (chat_id, _SESSION_NOT_FOUND_HINT + "请重新发起 /new 指令。", message_id))
+                          (chat_id, _SESSION_NOT_FOUND_HINT + "请重新发起 /new 指令。", message_id))
         return
 
     if not SessionFacade.RouteSource.is_resolved(route_source):
         run_in_background(_send_notice_message,
-                           (chat_id, "无法找到对应的会话，请重新发起 /new 指令", message_id))
+                          (chat_id, "无法找到对应的会话，请重新发起 /new 指令", message_id))
         return
 
     session_id = route_info['session_id']
@@ -348,8 +350,8 @@ def _handle_reply_command(data: dict, args: str):
     # /clear 后首条消息：new_session 标志表示需要启动新 Agent 进程
     if route_info.get('new_session'):
         run_in_background(_forward_new_request,
-                           (binding, session_id, session_project_dir, prompt,
-                            chat_id, message_id, chat_type, command, agent_type))
+                          (binding, session_id, session_project_dir, prompt,
+                           chat_id, message_id, chat_type, command, agent_type))
     else:
         run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, command, agent_type))
 
@@ -413,7 +415,7 @@ def _handle_groups_command(data: dict, args: str) -> None:
                     raise ValueError
             except ValueError:
                 run_in_background(_send_notice_message,
-                                   (chat_id, "请指定正整数天数，示例：`/groups dissolve idle 7`", message_id))
+                                  (chat_id, "请指定正整数天数，示例：`/groups dissolve idle 7`", message_id))
                 return
             payload = {'idle_days': idle_days}
         elif dissolve_args and dissolve_args.startswith('/'):
@@ -427,12 +429,12 @@ def _handle_groups_command(data: dict, args: str) -> None:
                 seqs = [int(x) for x in dissolve_args.split()]
             except ValueError:
                 run_in_background(_send_notice_message,
-                                   (chat_id, "格式错误，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
+                                  (chat_id, "格式错误，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
                 return
             payload = {'seqs': seqs}
         else:
             run_in_background(_send_notice_message,
-                               (chat_id, "请指定要解散的群聊序号，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
+                              (chat_id, "请指定要解散的群聊序号，示例：`/groups dissolve 1 2 3` 或 `/groups dissolve all`", message_id))
             return
 
         run_in_background(_dissolve_groups, (binding, payload, chat_id, message_id))
@@ -544,14 +546,14 @@ def _handle_attach_command(data: dict, args: str) -> None:
 
     if chat_type != 'group':
         run_in_background(_send_notice_message,
-                           (chat_id, "`/attach` 仅支持在群聊中使用", message_id))
+                          (chat_id, "`/attach` 仅支持在群聊中使用", message_id))
         return
 
     prefix = args.strip()
     if len(prefix) < MIN_PREFIX_LEN:
         run_in_background(_send_notice_message,
-                           (chat_id, f"用法：`/attach <session_id 前缀>`（至少 {MIN_PREFIX_LEN} 字符）",
-                            message_id))
+                          (chat_id, f"用法：`/attach <session_id 前缀>`（至少 {MIN_PREFIX_LEN} 字符）",
+                           message_id))
         return
 
     binding = _get_binding_from_event(event)
@@ -572,19 +574,19 @@ def _handle_clear_command(data: dict, args: str) -> None:
 
     if chat_type != 'group':
         run_in_background(_send_notice_message,
-                           (chat_id, "`/clear` 仅支持在群聊中使用", message_id))
+                          (chat_id, "`/clear` 仅支持在群聊中使用", message_id))
         return
 
     binding = _get_binding_from_event(event)
     if not binding:
         run_in_background(_send_notice_message,
-                           (chat_id, "您尚未注册，无法使用此功能", message_id))
+                          (chat_id, "您尚未注册，无法使用此功能", message_id))
         return
 
     session_mode = binding.get('session_mode', 'message')
     if session_mode != 'group':
         run_in_background(_send_notice_message,
-                           (chat_id, "`/clear` 仅在群聊模式下可用", message_id))
+                          (chat_id, "`/clear` 仅在群聊模式下可用", message_id))
         return
 
     from stores.group_session_store import GroupSessionStore
@@ -593,20 +595,20 @@ def _handle_clear_command(data: dict, args: str) -> None:
 
     if not gs_store or not owner_id:
         run_in_background(_send_notice_message,
-                           (chat_id, "存储服务未就绪，请稍后重试", message_id))
+                          (chat_id, "存储服务未就绪，请稍后重试", message_id))
         return
 
     current = gs_store.get(owner_id, chat_id)
     if not current:
         run_in_background(_send_notice_message,
-                           (chat_id, "当前群聊没有活跃的会话", message_id))
+                          (chat_id, "当前群聊没有活跃的会话", message_id))
         return
 
     # 幂等：上次 /clear 后还没发消息，不重复 clone
     if current.get('new_session'):
         run_in_background(_send_notice_message,
-                           (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
-                            message_id))
+                          (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
+                           message_id))
         return
 
     old_session_id = current.get('session_id', '')
@@ -619,7 +621,7 @@ def _handle_clear_command(data: dict, args: str) -> None:
     if not resp or not resp.get('ok'):
         logger.error("[feishu] /clear clone returned error: %s", resp)
         run_in_background(_send_notice_message,
-                           (chat_id, "清空会话失败，请稍后重试", message_id))
+                          (chat_id, "清空会话失败，请稍后重试", message_id))
         return
 
     project_dir = resp.get('project_dir', '')
@@ -631,5 +633,34 @@ def _handle_clear_command(data: dict, args: str) -> None:
     logger.info("[feishu] /clear: owner=%s chat=%s old=%s new=%s",
                 owner_id, chat_id, old_session_id[:8], new_session_id[:8])
     run_in_background(_send_notice_message,
-                       (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
-                        message_id))
+                      (chat_id, "会话上下文已清空，下次发送消息将自动创建新会话。",
+                       message_id))
+
+
+def _handle_stop_command(data: dict, args: str) -> None:
+    """处理 /stop 命令：停止当前执行中的 Agent 进程并清空排队指令"""
+    event = data.get('event', {})
+    message = event.get('message', {})
+    chat_id = message.get('chat_id', '')
+    message_id = message.get('message_id', '')
+
+    binding = _get_binding_from_event(event)
+    if not binding:
+        run_in_background(_send_notice_message,
+                          (chat_id, "您尚未注册，无法使用此功能", message_id))
+        return
+
+    route_info = SessionFacade.resolve_from_message(data, binding)
+    route_source = route_info['source']
+
+    if not SessionFacade.RouteSource.is_resolved(route_source):
+        run_in_background(_send_notice_message,
+                          (chat_id,
+                           "无法确定要停止的会话。请在群聊中使用 /stop，或回复某条会话消息后发送。",
+                           message_id))
+        return
+
+    session_id = route_info['session_id']
+
+    run_in_background(_forward_stop_request,
+                      (binding, session_id, chat_id, message_id))

@@ -8,6 +8,7 @@ Feishu Forward - 请求转发与路由
 - _forward_new_request: 新会话转发
 - _forward_new_request_for_default_dir: 默认目录新会话转发
 - _forward_attach_request: /attach 转发
+- _forward_stop_request: /stop 转发
 - _forward_permission_request: 权限决策转发
 - _fetch_recent_dirs_from_callback: 获取常用目录
 - _fetch_browse_dirs_from_callback: 浏览子目录
@@ -429,6 +430,40 @@ def _forward_attach_request(binding: Dict[str, Any], prefix: str,
         lines.append("⚠️ 当前会话模式非 group，后续会话通知会发送到本群，"
                      "但在本群直接发送消息（非回复）不会被自动路由到该 session")
     _send_notice_message(chat_id, '\n'.join(lines), message_id)
+
+
+# =============================================================================
+# /stop 转发
+# =============================================================================
+
+def _forward_stop_request(binding: dict, session_id: str,
+                          chat_id: str, message_id: str) -> None:
+    """转发 /stop 请求到 Callback 后端"""
+    payload = {'session_id': session_id}
+    try:
+        response = _forward_via_ws_or_http(binding, '/cb/agent/stop', payload, timeout=10)
+    except Exception as e:
+        logger.error("[feishu] /stop forward failed: %s", e)
+        _send_notice_message(chat_id, "停止请求失败，请稍后重试", message_id)
+        return
+
+    if response is None:
+        _send_notice_message(chat_id, "Callback 服务不可达，请检查服务状态", message_id)
+        return
+
+    stopped = response.get('stopped', False)
+    queue_cleared = response.get('queue_cleared', 0)
+
+    if stopped and queue_cleared > 0:
+        text = "已停止当前任务，并清空 %d 条排队指令" % queue_cleared
+    elif stopped:
+        text = "已停止当前任务"
+    elif queue_cleared > 0:
+        text = "当前没有执行中的任务，已清空 %d 条排队指令" % queue_cleared
+    else:
+        text = "当前没有执行中的任务"
+
+    _send_notice_message(chat_id, text, message_id)
 
 
 # =============================================================================

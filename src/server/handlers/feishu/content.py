@@ -29,14 +29,14 @@ def build_mention_resolution(mentions: Optional[List[Dict[str, Any]]]) -> Tuple[
 
     遍历 mentions，对每个 key（如 @_user_1）：
     - bot 提及（FEISHU_APP_ID 或 bot_open_id 匹配）→ 替换为 ''（删除）
-    - 人员提及 → 替换为 '@name'（保留并显示真实姓名，让 agent 能识别具体是谁）
+    - 人员提及 → 替换为 '@name(user_id)'（姓名+ID，与协作者前缀对齐）
 
     Args:
         mentions: 飞书消息 event.message.mentions 数组（可能为 None 或空）
 
     Returns:
         (resolution, is_at_bot):
-            resolution: key → 替换文本的映射，如 {'@_user_1': '', '@_user_2': '@Frankie'}
+            resolution: key → 替换文本的映射，如 {'@_user_1': '', '@_user_2': '@张三(abc123)'}
             is_at_bot: 是否包含 @bot 提及
     """
     if not mentions:
@@ -80,9 +80,17 @@ def build_mention_resolution(mentions: Optional[List[Dict[str, Any]]]) -> Tuple[
             resolution[key] = ''
             is_at_bot = True
         else:
-            # 人员或其他 bot 提及：用 name 显示，让 agent 能识别具体是谁
+            # 人员或其他 bot 提及：用 @name(user_id) 显示
+            # name 让 agent 识别具体是谁，user_id 与协作者前缀对齐（[来自群成员 user_id]）
             name = m.get('name', '')
-            resolution[key] = '@%s' % name if name else key
+            mention_id = m.get('id', {})
+            uid = mention_id.get('user_id', '') if isinstance(mention_id, dict) else ''
+            if name and uid:
+                resolution[key] = '@%s(%s)' % (name, uid)
+            elif name:
+                resolution[key] = '@%s' % name
+            else:
+                resolution[key] = key
 
     return resolution, is_at_bot
 
@@ -99,7 +107,7 @@ def extract_message_text(message_type: str, content: str,
         message_type: 消息类型（text / post / image / ...）
         content: 消息 content 字段（JSON 字符串）
         mention_resolution: @提及 替换表（key→替换文本），由 build_mention_resolution 构建。
-            key 如 '@_user_1'，value 为替换后的文本（人员→'@name'，bot→''）。
+            key 如 '@_user_1'，value 为替换后的文本（人员→'@name(user_id)'，bot→''）。
             未传入时不做 @ 替换。
 
     Returns:

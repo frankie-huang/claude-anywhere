@@ -32,7 +32,7 @@ TOAST_ERROR = 'error'
 TOAST_INFO = 'info'
 
 # 协作者允许执行的命令白名单（其余命令仅 owner 可执行）
-_COLLABORATOR_ALLOWED_COMMANDS = {'clear'}
+_COLLABORATOR_ALLOWED_COMMANDS = {'clear', 'stop'}
 
 # 会话路由失败时的通用反馈文案（/mute /unmute / 主路由等场景共用）
 _SESSION_NOT_FOUND_HINT = "无法找到对应的会话（可能已过期、被清理或服务暂时不可用）。"

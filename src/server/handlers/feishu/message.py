@@ -119,6 +119,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
 
     success = False
     sent_message_id = ''
+    skip_last_message_id = False
 
     if status == 'processing':
         # processing 通知策略：
@@ -159,6 +160,15 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
                 success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
                                                               reply_in_thread=reply_in_thread)
 
+    elif status == 'queued':
+        position = response.get('queue_position', 0)
+        message = "⏳ 指令已排队（第 %d 位），前序任务结束后自动执行" % position
+        success, sent_message_id = _send_text_message(service, chat_id, message, reply_to=reply_to,
+                                                      reply_in_thread=reply_in_thread)
+        # 排队通知是临时状态消息，不应作为链式回复锚点，
+        # 否则正在执行的指令完成时会错误地回复到排队通知上
+        skip_last_message_id = True
+
     elif status == 'completed':
         if response.get('notification_handled'):
             # 通知已由 callback 侧的 on_complete 回调处理（如 /compact），网关无需再发
@@ -191,7 +201,7 @@ def _send_session_result_notification(chat_id: str, response: dict, project_dir:
             msg_store.save(sent_message_id, session_id, project_dir)
             logger.info(f"[feishu] Saved notification mapping: {sent_message_id} -> {session_id}")
 
-        if add_typing and binding and binding.get('callback_url') and binding.get('auth_token'):
+        if add_typing and not skip_last_message_id and binding and binding.get('callback_url') and binding.get('auth_token'):
             _set_last_message_id_to_callback(binding, session_id, sent_message_id)
 
 

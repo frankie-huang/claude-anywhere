@@ -200,6 +200,53 @@ def remove_feishu_typing(message_id: str) -> None:
         logger.warning("[remove_feishu_typing] gateway fallback failed: %s", e)
 
 
+def add_feishu_typing(message_id: str) -> None:
+    """从 Callback 侧给消息添加 Typing 表情（兼容单机和分离部署）
+
+    主要用于从队列 drain 出来执行的指令：给用户原始消息加 Typing，
+    让用户知道排队中的指令已开始处理。
+
+    Args:
+        message_id: 要添加 Typing 的消息 ID
+    """
+    if not message_id:
+        return
+    from config import IS_CALLBACK_BACKEND
+
+    if not IS_CALLBACK_BACKEND:
+        # 单机模式：直接通过 FeishuAPIService 添加
+        try:
+            from services.feishu_api import FeishuAPIService
+            service = FeishuAPIService.get_instance()
+            if service and service.enabled:
+                service.add_reaction(message_id, 'Typing')
+                return
+        except Exception as e:
+            logger.warning("[add_feishu_typing] FeishuAPIService unavailable: %s", e)
+
+    # 分离部署模式（或单机 fallback）：通过网关转发
+    try:
+        from config import FEISHU_GATEWAY_URL, FEISHU_OWNER_ID
+        from stores.auth_token_store import AuthTokenStore
+
+        if not FEISHU_GATEWAY_URL:
+            return
+
+        store = AuthTokenStore.get_instance()
+        auth_token = store.get() if store else ''
+        if not auth_token:
+            return
+
+        api_url = FEISHU_GATEWAY_URL.rstrip('/') + '/gw/feishu/add-reaction'
+        post_json(api_url, {
+            'owner_id': FEISHU_OWNER_ID,
+            'message_id': message_id,
+            'emoji_type': 'Typing',
+        }, headers={'X-Auth-Token': auth_token})
+    except Exception as e:
+        logger.warning("[add_feishu_typing] gateway fallback failed: %s", e)
+
+
 def create_feishu_group(session_id: str, project_dir: str) -> Tuple[bool, str]:
     """从 Callback 侧调用飞书网关，创建飞书群聊（兼容单机和分离部署）
 

@@ -27,8 +27,9 @@ gateway 转发 /cb/agent/continue 时 callback 校验 session 是否存在，
 """
 
 import logging
+import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from stores.json_store import JsonStore
 
@@ -54,7 +55,13 @@ class SessionChatStore(JsonStore):
                 "env_overrides": {                 # hook 快照的白名单 env（可选，续聊注入，值可为空串）
                     "ANTHROPIC_BASE_URL": "https://x.com",
                     "NO_PROXY": ""
-                }
+                },
+                "running_pid": 12345,              # 当前运行中的 Agent 进程 PID（可选，0/缺失 = 空闲）
+                "pending_prompts": [               # 排队中的指令（可选，容量由上游控制，默认 5）
+                    {"session_id": "...", "project_dir": "...", "prompt": "...",
+                     "chat_id": "...", "message_id": "...", "command": "..."}
+                ],
+                "stopped": true                    # /stop 触发标志（可选，抑制错误通知）
             }
         }
 
@@ -71,6 +78,7 @@ class SessionChatStore(JsonStore):
         with cls._lock:
             if cls._instance is None:
                 cls._instance = cls(data_dir)
+                cls._instance.cleanup_runtime_state()
             if expire_seconds is not None:
                 cls._instance._expire_seconds = expire_seconds
             return cls._instance
@@ -123,6 +131,40 @@ class SessionChatStore(JsonStore):
                 return count
             except Exception as e:
                 logger.error("[session-chat-store] Failed to migrate claude_command: %s", e)
+                return 0
+
+    def cleanup_runtime_state(self) -> int:
+        """清理进程运行时状态（running_pid / pending_prompts / stopped）
+
+        启动时调用一次。服务重启后这些字段已失效：
+        - running_pid 指向的进程已不存在
+        - pending_prompts 中的指令无人 drain，会阻塞新消息入队
+        - stopped 残留会导致下次正常完成时误吞通知
+
+        Returns:
+            清理的记录数
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                count = 0
+                for entry in data.values():
+                    if not isinstance(entry, dict):
+                        continue
+                    changed = False
+                    for key in ('running_pid', 'pending_prompts', 'stopped'):
+                        if key in entry:
+                            del entry[key]
+                            changed = True
+                    if changed:
+                        count += 1
+                if count > 0:
+                    self._save(data)
+                    logger.info("[session-chat-store] Cleaned runtime state from %d sessions",
+                                count)
+                return count
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to cleanup runtime state: %s", e)
                 return 0
 
     # =========================================================================
@@ -629,4 +671,251 @@ class SessionChatStore(JsonStore):
             except Exception as e:
                 logger.error("[session-chat-store] Failed to cleanup: %s", e)
                 return 0
+
+    # =========================================================================
+    # 进程 PID 管理
+    # =========================================================================
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """检查进程组是否存活
+
+        Popen 用 start_new_session=True，子进程为新进程组 leader（PID == PGID），
+        故用 os.killpg 检测整组而非单一 wrapper shell——否则 wrapper 崩溃但
+        agent 子进程仍在跑时会误判为空闲。
+
+        NOTE: 无法防 PID 复用，但 Agent 进程生命周期通常远长于 PID 回绕窗口，
+        且误判仅导致 is_session_busy 多等一轮，实际无影响。
+        """
+        try:
+            os.killpg(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _resolve_running_pid(self, data: dict, session_id: str) -> int:
+        """在已持有 _file_lock 的上下文中检查 PID 存活，死进程自动清除
+
+        调用方必须持有 _file_lock 且已 _load() 过 data。
+        """
+        item = data.get(session_id)
+        if not item:
+            return 0
+        pid = item.get('running_pid', 0)
+        if not pid:
+            return 0
+        if self._is_pid_alive(pid):
+            return pid
+        item.pop('running_pid', None)
+        data[session_id] = item
+        self._save(data)
+        logger.info("[session-chat-store] Auto-cleared dead PID %d: %s",
+                    pid, session_id)
+        return 0
+
+    def set_running_pid(self, session_id: str, pid: int) -> bool:
+        """记录 session 当前运行的 Agent 进程 PID"""
+        if not session_id or not pid:
+            return False
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False
+                item['running_pid'] = pid
+                item.pop('stopped', None)
+                data[session_id] = item
+                return self._save(data)
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to set_running_pid: %s", e)
+                return False
+
+    def clear_running_pid(self, session_id: str) -> bool:
+        """清除运行 PID（进程完成时调用）"""
+        if not session_id:
+            return False
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False
+                if 'running_pid' not in item:
+                    return True
+                del item['running_pid']
+                data[session_id] = item
+                return self._save(data)
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to clear_running_pid: %s", e)
+                return False
+
+    def get_running_pid(self, session_id: str) -> int:
+        """获取运行 PID，若进程已死则自动清除并返回 0"""
+        if not session_id:
+            return 0
+        with self._file_lock:
+            try:
+                data = self._load()
+                return self._resolve_running_pid(data, session_id)
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to get_running_pid: %s", e)
+                return 0
+
+    def is_session_busy(self, session_id: str) -> bool:
+        """判断 session 是否有存活的 Agent 进程"""
+        return self.get_running_pid(session_id) > 0
+
+    # =========================================================================
+    # 指令队列
+    # =========================================================================
+
+    def get_session_queue_status(self, session_id: str) -> Tuple[bool, bool]:
+        """一次读盘返回 (busy, has_pending)，减少临界区 I/O
+
+        Returns:
+            (busy, has_pending):
+                busy — 是否有存活的 Agent 进程（死进程自动清除）
+                has_pending — 是否有排队中的指令
+        """
+        if not session_id:
+            return False, False
+        with self._file_lock:
+            try:
+                data = self._load()
+                pid = self._resolve_running_pid(data, session_id)
+                item = data.get(session_id)
+                has_pending = bool(item.get('pending_prompts')) if item else False
+                return pid > 0, has_pending
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to get_session_queue_status: %s", e)
+                return False, False
+
+    def enqueue_prompt(self, session_id: str, item_data: dict,
+                       max_size: int = 5) -> Tuple[bool, int]:
+        """追加排队指令
+
+        Args:
+            session_id: 会话 ID
+            item_data: handle_continue_session 的原始请求数据
+            max_size: 队列最大容量
+
+        Returns:
+            (成功, 队列位置)。队列满时返回 (False, -1)
+        """
+        if not session_id:
+            return False, -1
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False, -1
+                queue = item.get('pending_prompts') or []
+                if len(queue) >= max_size:
+                    return False, -1
+                queue.append(item_data)
+                item['pending_prompts'] = queue
+                data[session_id] = item
+                if not self._save(data):
+                    return False, -1
+                position = len(queue)
+                logger.info("[session-chat-store] Enqueued prompt at position %d: %s",
+                            position, session_id)
+                return True, position
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to enqueue_prompt: %s", e)
+                return False, -1
+
+    def dequeue_prompt(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """弹出队首指令，无可用指令返回 None"""
+        if not session_id:
+            return None
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return None
+                queue = item.get('pending_prompts') or []
+                if not queue:
+                    return None
+                entry = queue.pop(0)
+                item['pending_prompts'] = queue
+                data[session_id] = item
+                self._save(data)
+                logger.info("[session-chat-store] Dequeued prompt: %s (remaining: %d)",
+                            session_id, len(queue))
+                return entry
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to dequeue_prompt: %s", e)
+                return None
+
+    def clear_pending_prompts(self, session_id: str) -> int:
+        """清空排队指令，返回被清除的数量"""
+        if not session_id:
+            return 0
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return 0
+                queue = item.get('pending_prompts') or []
+                count = len(queue)
+                if count == 0:
+                    return 0
+                item['pending_prompts'] = []
+                data[session_id] = item
+                self._save(data)
+                logger.info("[session-chat-store] Cleared %d pending prompts: %s",
+                            count, session_id)
+                return count
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to clear_pending_prompts: %s", e)
+                return 0
+
+    # =========================================================================
+    # Stop 标志
+    # =========================================================================
+
+    def set_stopped_flag(self, session_id: str) -> bool:
+        """设置 stopped 标志（/stop 触发时调用，抑制监控线程的错误通知）"""
+        if not session_id:
+            return False
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False
+                item['stopped'] = True
+                data[session_id] = item
+                return self._save(data)
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to set_stopped_flag: %s", e)
+                return False
+
+    def check_and_clear_stopped_flag(self, session_id: str) -> bool:
+        """原子检查并清除 stopped 标志
+
+        Returns:
+            True = 标志存在且已清除（/stop 触发的终止），False = 标志不存在
+        """
+        with self._file_lock:
+            try:
+                data = self._load()
+                item = data.get(session_id)
+                if not item:
+                    return False
+                if not item.get('stopped'):
+                    return False
+                del item['stopped']
+                data[session_id] = item
+                self._save(data)
+                logger.info("[session-chat-store] Cleared stopped flag: %s", session_id)
+                return True
+            except Exception as e:
+                logger.error("[session-chat-store] Failed to check stopped flag: %s", e)
+                return False
 

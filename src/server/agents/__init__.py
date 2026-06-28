@@ -406,7 +406,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
                  prompt: str, chat_id: str = '', message_id: str = '',
                  session_mode: str = 'resume', command_name: str = '',
                  on_complete: CompleteCallback = None,
-                 on_error: ErrorCallback = None) -> Tuple[bool, Dict[str, Any]]:
+                 on_error: ErrorCallback = None) -> Tuple[bool, int, Dict[str, Any]]:
     """构建命令、启动 agent 进程并检查初始状态
 
     通过登录 shell 执行命令，支持 shell 配置文件中的别名和环境变量。
@@ -424,7 +424,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
         on_error: 错误通知回调 (agent_type, chat_id, message_id, session_id, error_msg) -> None
 
     Returns:
-        (success, response): 成功时 response 包含 session_id（Codex 路径可能已 rename 为真实 ID）
+        (success, pid, response): 成功且进程仍在运行时 pid > 0，否则为 0
     """
     from utils.shell import build_shell_cmd
 
@@ -450,21 +450,24 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
                 log_prefix, shell, project_dir, log_cmd_str)
 
     # ── 2. 启动进程 ──
+    # start_new_session=True 使 PID == PGID，便于 /stop 用 os.killpg
+    # 杀整个进程组（含 agent 子进程），否则 SIGTERM 只杀 wrapper shell
     env = adapter.build_env(os.environ.copy())
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=project_dir,
+            env=env,
+            start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            env=env
         )
     except Exception as e:
         error_msg = str(e)
         logger.error("%s Failed to start process: %s", log_prefix, error_msg)
-        return False, {'error': error_msg, 'agent_type': agent_type}
+        return False, 0, {'error': error_msg, 'agent_type': agent_type}
 
     # ── 3. Session ID 捕获（Codex 新建会话时从 stdout 读取真实 ID）──
     did_capture = adapter.needs_output_session_id and session_mode == 'new'
@@ -476,7 +479,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
             proc.wait()
             error_msg = f"{adapter.display_name} 启动异常：未能在 {adapter.session_id_capture_timeout}s 内获取 session ID，请检查 CLI 是否正常"
             logger.error("%s %s", log_prefix, error_msg)
-            return False, {'error': error_msg, 'agent_type': agent_type}
+            return False, 0, {'error': error_msg, 'agent_type': agent_type}
         if captured_session_id != session_id:
             new_id = _rename_session_in_store(
                 session_id, captured_session_id, log_prefix)
@@ -523,7 +526,12 @@ def _capture_session_id(adapter: AgentAdapter, proc: subprocess.Popen,
     timeout = adapter.session_id_capture_timeout
     deadline = time.monotonic() + timeout
 
-    # daemon 线程逐行读取 stdout，EOF 或异常时放入 None 哨兵
+    # daemon 线程逐行读取 stdout，EOF 或异常时放入 None 哨兵。
+    # NOTE: 捕获成功后 reader 仍会残留（卡在 readline 上）直到进程退出，
+    # 与 _monitor_startup 的 drain 线程共享 proc.stdout，存在抢占 race。
+    # 只影响 codex（claude 不走本函数）；codex 普通对话走 stop hook 通知，
+    # 不依赖 drain 输出；透传命令（如 /compact）才会因 drain 残缺导致通知
+    # 内容不全——这类场景在 codex 上少见，权衡后保持 daemon。
     line_queue = Queue()
 
     def _reader():
@@ -615,7 +623,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
                        message_id: str = '',
                        startup_wait: float = 0,
                        on_complete: CompleteCallback = None,
-                       on_error: ErrorCallback = None) -> Tuple[bool, Dict[str, Any]]:
+                       on_error: ErrorCallback = None) -> Tuple[bool, int, Dict[str, Any]]:
     """检查进程状态并决定是否进入后台监控
 
     统一处理 Claude（等待 startup_wait 秒）和 Codex（session ID 捕获后
@@ -635,29 +643,31 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
         on_error: 错误通知回调
 
     Returns:
-        (success, response): 成功时 response 包含 session_id
+        (success, pid, response): 成功且进程仍在运行时 pid > 0，否则为 0
     """
     from utils.concurrency import run_in_background
     log_prefix = '[%s]' % agent_type
 
     # 等待进程退出或超时
+    # 不使用 communicate() 以避免超时时已消费的 pipe 数据丢失，
+    # 改用 wait() + 手动读取。超时后 pipe 数据完整保留给 _monitor_startup 的 drain 线程。
     try:
         if startup_wait > 0:
-            stdout, stderr = proc.communicate(timeout=startup_wait)
+            proc.wait(timeout=startup_wait)
         else:
             # 非阻塞检查：进程可能已退出（Codex 路径，已花时间读 session ID）
             if proc.poll() is None:
                 raise subprocess.TimeoutExpired(cmd='', timeout=0)
-            stdout = proc.stdout.read() if proc.stdout else ''
-            stderr = proc.stderr.read() if proc.stderr else ''
+        stdout = proc.stdout.read() if proc.stdout else ''
+        stderr = proc.stderr.read() if proc.stderr else ''
     except subprocess.TimeoutExpired:
         # 进程仍在运行，进入后台监控
         logger.info("%s Command is running in background", log_prefix)
         run_in_background(
             _monitor_startup,
             (proc, agent_type, session_id, chat_id, message_id, on_complete, on_error))
-        return True, {'status': 'processing', 'session_id': session_id,
-                      'agent_type': agent_type}
+        return True, proc.pid, {'status': 'processing', 'session_id': session_id,
+                               'agent_type': agent_type}
 
     # 进程已退出
     returncode = proc.returncode
@@ -669,12 +679,12 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
             run_in_background(on_complete,
                               (agent_type, chat_id, message_id, session_id,
                                (stdout or '')))
-            return True, {'status': 'completed', 'session_id': session_id,
-                          'agent_type': agent_type,
-                          'notification_handled': True}
-        return True, {'status': 'completed', 'session_id': session_id,
-                      'agent_type': agent_type,
-                      'output': (stdout or '')[:MAX_LOG_LENGTH * 2]}
+            return True, 0, {'status': 'completed', 'session_id': session_id,
+                            'agent_type': agent_type,
+                            'notification_handled': True}
+        return True, 0, {'status': 'completed', 'session_id': session_id,
+                         'agent_type': agent_type,
+                         'output': (stdout or '')[:MAX_LOG_LENGTH * 2]}
     else:
         error_msg = _build_error_msg(agent_type, returncode, stdout, stderr)
         logger.warning("%s Command failed with exit code %s: %s",
@@ -682,7 +692,7 @@ def _check_and_monitor(proc: subprocess.Popen, agent_type: str,
         if chat_id and on_error:
             run_in_background(on_error,
                               (agent_type, chat_id, message_id, session_id, error_msg))
-        return False, {'error': error_msg, 'agent_type': agent_type}
+        return False, 0, {'error': error_msg, 'agent_type': agent_type}
 
 
 # =============================================
@@ -695,10 +705,10 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
                      message_id: str = '',
                      on_complete: CompleteCallback = None,
                      on_error: ErrorCallback = None) -> None:
-    """后台短暂等待，捕获启动阶段的延迟失败
+    """后台监控子进程，收集完整输出，完成后通过回调通知
 
-    只等待 STARTUP_TIMEOUT_SECONDS 秒。如果进程在此期间失败，
-    通过 on_error 回调通知；如果仍在运行，交由 _monitor_detached 持续监控。
+    通过后台线程排空 stdout/stderr 防止 buffer 满阻塞，保留完整 stdout
+    用于完成通知。先等待 STARTUP_TIMEOUT_SECONDS，超时后继续等待直到退出。
 
     Args:
         proc: 子进程对象
@@ -710,103 +720,59 @@ def _monitor_startup(proc: subprocess.Popen, agent_type: str,
         on_error: 错误通知回调
     """
     log_prefix = '[%s]' % agent_type
+    stdout_content = ''
+    stderr_content = ''
+
+    def drain_stdout():
+        nonlocal stdout_content
+        stdout_content = _drain_pipe(proc.stdout, tail_lines=2000)
+
+    def drain_stderr():
+        nonlocal stderr_content
+        stderr_content = _drain_pipe(proc.stderr)
+
     try:
-        stdout, stderr = proc.communicate(timeout=STARTUP_TIMEOUT_SECONDS)
+        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            proc.wait(timeout=STARTUP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.info(
+                "%s Process still running after %ss, session: %s "
+                "— continuing to monitor",
+                log_prefix, STARTUP_TIMEOUT_SECONDS, session_id)
+            proc.wait()
+
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+
         if proc.returncode == 0:
             logger.info("%s Command completed successfully, session: %s",
                         log_prefix, session_id)
-            if stdout:
-                logger.debug("%s stdout: %s...", log_prefix,
-                             stdout[:MAX_LOG_LENGTH])
+            if stdout_content:
+                logger.debug("%s stdout: %s", log_prefix,
+                             stdout_content[:MAX_LOG_LENGTH])
             if chat_id and on_complete:
                 on_complete(agent_type, chat_id, message_id, session_id,
-                            stdout or '')
-        else:
-            error_msg = _build_error_msg(agent_type, proc.returncode, stdout, stderr)
-            logger.warning(
-                "%s Command failed with exit code %s, session: %s, error: %s",
-                log_prefix, proc.returncode, session_id, error_msg[:MAX_LOG_LENGTH])
-            if chat_id and on_error:
-                on_error(agent_type, chat_id, message_id, session_id, error_msg)
-    except subprocess.TimeoutExpired:
-        logger.info(
-            "%s Process still running after %ss, session: %s "
-            "— detaching to background monitor",
-            log_prefix, STARTUP_TIMEOUT_SECONDS, session_id)
-        threading.Thread(
-            target=_monitor_detached,
-            args=(proc, agent_type, session_id, chat_id, message_id, on_complete, on_error),
-            daemon=True
-        ).start()
-    except Exception as e:
-        logger.error("%s Execution error: %s, session: %s",
-                     log_prefix, e, session_id)
-        if chat_id and on_error:
-            on_error(agent_type, chat_id, message_id, session_id, str(e))
-
-
-def _monitor_detached(proc: subprocess.Popen, agent_type: str,
-                      session_id: str, chat_id: str = '',
-                      message_id: str = '',
-                      on_complete: CompleteCallback = None,
-                      on_error: ErrorCallback = None) -> None:
-    """后台持续读取 pipe 并等待子进程退出，失败时通过 on_error 通知
-
-    通过后台线程排空 stdout/stderr 防止 buffer 满阻塞，
-    同时保留尾部输出用于错误通知。
-
-    Args:
-        proc: 子进程对象（stdout/stderr 仍然打开）
-        agent_type: agent 类型标识
-        session_id: 会话 ID
-        chat_id: 群聊 ID（用于异常通知）
-        message_id: 用户消息 ID（用于回复式通知）
-        on_complete: 成功完成回调
-        on_error: 错误通知回调
-    """
-    log_prefix = '[%s]' % agent_type
-    stderr_tail = ''
-    stdout_tail = ''
-    try:
-        def drain_stderr():
-            nonlocal stderr_tail
-            stderr_tail = _drain_pipe(proc.stderr)
-
-        def drain_stdout():
-            nonlocal stdout_tail
-            stdout_tail = _drain_pipe(proc.stdout)
-
-        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
-        stderr_thread.start()
-        stdout_thread.start()
-
-        returncode = proc.wait()
-        stderr_thread.join(timeout=5)
-        stdout_thread.join(timeout=5)
-
-        if returncode == 0:
-            logger.info("%s Detached process completed successfully, session: %s",
-                        log_prefix, session_id)
-            if stdout_tail:
-                logger.debug("%s stdout: %s...", log_prefix,
-                             stdout_tail[:MAX_LOG_LENGTH])
-            if chat_id and on_complete:
-                on_complete(agent_type, chat_id, message_id, session_id,
-                            stdout_tail or '')
+                            stdout_content)
         else:
             # 注意：用户通过飞书点击"拒绝并中断"时，hook 返回 interrupt: true，
             # Claude Code 会以 exit code=1 + "Execution error" 退出，也会走到这里。
             # 这属于用户主动中断的预期行为，但当前无法与真正的执行错误区分，
             # 因此统一作为错误通知。如需区分可在 resolve interrupt 时标记 session 状态。
-            error_msg = _build_error_msg(agent_type, returncode, stdout_tail, stderr_tail)
+            error_msg = _build_error_msg(agent_type, proc.returncode,
+                                         stdout_content, stderr_content)
             logger.warning(
-                "%s Detached process failed (code=%s), session: %s, output: %s",
-                log_prefix, returncode, session_id, error_msg[:MAX_LOG_LENGTH])
+                "%s Command failed (code=%s), session: %s, output: %s",
+                log_prefix, proc.returncode, session_id,
+                error_msg[:MAX_LOG_LENGTH])
             if chat_id and on_error:
                 on_error(agent_type, chat_id, message_id, session_id, error_msg)
     except Exception as e:
-        logger.error("%s Error waiting for detached process: %s, session: %s",
+        logger.error("%s Error monitoring process: %s, session: %s",
                      log_prefix, e, session_id)
         if chat_id and on_error:
             on_error(agent_type, chat_id, message_id, session_id, str(e))

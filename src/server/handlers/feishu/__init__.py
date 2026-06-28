@@ -39,7 +39,8 @@ from .card_action import _handle_card_action
 from .command import (
     _handle_new_command, _handle_reply_command,
     _handle_groups_command, _handle_attach_command,
-    _handle_clear_command, _handle_users_command,
+    _handle_clear_command, _handle_stop_command,
+    _handle_users_command,
 )
 from .mute import _handle_mute_command, _handle_unmute_command
 from .notify import _handle_notify_command
@@ -47,15 +48,17 @@ from .notify import _handle_notify_command
 # 对外公开 API（外部通过 from handlers.feishu import ... 使用）
 # __all__ 同时让 pyflakes 知道这些 re-export 是有意为之
 from .group import (  # noqa: F401
-    handle_send_message, handle_create_group, handle_remove_reaction,
-    create_group_chat_and_record, batch_dissolve_groups,
+    handle_add_reaction, handle_create_group,
+    handle_remove_reaction, handle_send_message,
+    batch_dissolve_groups, create_group_chat_and_record,
     find_idle_group_chats, handle_card_action_register,
 )
 
 __all__ = [
     'handle_feishu_request',
-    'handle_send_message', 'handle_create_group', 'handle_remove_reaction',
-    'create_group_chat_and_record', 'batch_dissolve_groups',
+    'handle_add_reaction', 'handle_create_group',
+    'handle_remove_reaction', 'handle_send_message',
+    'batch_dissolve_groups', 'create_group_chat_and_record',
     'find_idle_group_chats', 'handle_card_action_register',
 ]
 
@@ -174,7 +177,7 @@ def _handle_message_event(data: dict):
     user_id = sender_id_obj.get('user_id', sender_id)
     parent_id = message.get('parent_id', '')  # 是否是回复消息
 
-    # 构建 @提及 替换表（bot→删除，人员→@name）并判断是否 @bot
+    # 构建 @提及 替换表（bot→删除，人员→@name(user_id)）并判断是否 @bot
     mention_resolution, is_at_bot = build_mention_resolution(message.get('mentions'))
 
     # 解析消息纯文本内容（@ 占位符在解析过程中按 resolution 表替换）
@@ -505,6 +508,9 @@ _COMMANDS = {
     ]),
     'clear': (_handle_clear_command, False, "【群聊模式】重置当前群聊会话", [
         ("/clear", "解绑会话，下次发消息自动创建新会话"),
+    ]),
+    'stop': (_handle_stop_command, False, "停止当前执行中的 Agent 任务", [
+        ("/stop", "停止当前正在执行的 Agent 任务并清空排队指令"),
     ]),
     'notify': (_handle_notify_command, False, "管理通知配置", [
         ("/notify status", "查看当前通知配置"),
