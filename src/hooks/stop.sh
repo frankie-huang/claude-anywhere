@@ -719,9 +719,9 @@ send_stop_notification_async() {
     CARD=$(build_stop_card "$RESPONSE_ELEMENTS" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$THINKING" 2>/dev/null)
 
     if [ -n "$CARD" ]; then
-        # 传递 session_id, project_dir, callback_url 支持回复继续会话
+        # 传递 session_id, project_dir, callback_url, reply_to 支持链式回复
         local options
-        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID")
+        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
         send_feishu_card "$CARD" "$options" >/dev/null 2>&1
     fi
 }

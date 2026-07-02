@@ -85,6 +85,7 @@ def handle_continue_session(data: Dict[str, Any],
             - prompt: 用户的问题 (必需)
             - chat_id: 飞书聊天 ID（网关调用时必传）
             - message_id: 用户消息 ID (可选，用于回复式通知)
+            - sender_id: 发送者 user_id (可选，注入子进程 env 后由 stop 卡片优先 at)
             - command: 指定使用的命令 (可选)
             - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 读取)
         from_queue: 队列触发时为 True，跳过队列排队检查
@@ -100,6 +101,7 @@ def handle_continue_session(data: Dict[str, Any],
     prompt = data.get('prompt', '')
     chat_id = data.get('chat_id', '') or ''  # 确保 None 转为空字符串
     message_id = data.get('message_id', '') or ''
+    sender_id = data.get('sender_id', '') or ''
     command = data.get('command', '') or ''
 
     # 参数验证
@@ -184,7 +186,8 @@ def handle_continue_session(data: Dict[str, Any],
         # 通过 agent 适配层启动进程
         success, pid, response = launch_agent(
             adapter, session_id, project_dir, prompt,
-            chat_id, message_id, session_mode='resume',
+            chat_id, message_id, sender_id=sender_id,
+            session_mode='resume',
             command_name=actual_cmd,
             on_complete=wrapped_complete,
             on_error=wrapped_error)
@@ -217,6 +220,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
                 仅 group 模式下从 P2P 发起 /new 时为空，
                 由本函数调 do_ensure_chat 建群后回填
             - message_id: 原始消息 ID (可选，用于飞书网关回复用户消息)
+            - sender_id: 发送者 user_id (可选，注入子进程 env 后由 stop 卡片优先 at)
             - command: 指定使用的命令 (可选)
             - agent_type: agent 类型，如 'claude'/'codex' (可选，未传时从 session store 或默认值获取)
             - skip_user_prompt: 是否跳过首条 UserPromptSubmit 通知 (默认 True)；
@@ -236,6 +240,7 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     prompt = data.get('prompt', '') or ''
     chat_id = data.get('chat_id', '') or ''
     message_id = data.get('message_id', '') or ''
+    sender_id = data.get('sender_id', '') or ''
     command = data.get('command', '') or ''
     agent_type = data.get('agent_type', '') or ''
     # session_id：优先使用调用方传入的（网关侧生成），否则自行生成
@@ -289,6 +294,9 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
             return Response.error(f'Failed to create group chat: {ensure_result}',
                                   agent_type=adapter.agent_type)
         chat_id = ensure_result
+        # message_id 来自 P2P /new，与新群跨 chat，清空避免被 hook 用作 reply_to
+        # 清空后 hook fallback 查 last_message_id（由 hook 同步的 prompt 消息回写）
+        message_id = ''
         logger.info("[%s-new] ensure-chat created group for %s: %s",
                     adapter.agent_type, session_id, chat_id)
 
@@ -316,7 +324,8 @@ def handle_new_session(data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     # 通过 agent 适配层启动进程
     success, pid, response = launch_agent(
         adapter, session_id, project_dir, prompt,
-        chat_id, message_id, session_mode='new',
+        chat_id, message_id, sender_id=sender_id,
+        session_mode='new',
         command_name=actual_cmd,
         on_complete=wrapped_complete,
         on_error=wrapped_error)
@@ -556,13 +565,12 @@ def _execute_queued_prompt(session_id: str, data: Dict[str, Any]):
                     session_id)
         return
 
-    # 给用户原始消息加 Typing，并将 last_message_id 切到该消息，
-    # 让完成通知能正确回复到这条消息（而非上一条已完成的通知）
+    # 给用户原始消息加 Typing（进度反馈）
+    # last_message_id 不必再写：reply_to 由 launch_agent 注入的 CODE_ANYWHERE_MESSAGE_ID 提供
     message_id = data.get('message_id', '') or ''
     if message_id:
         from handlers.outbound import add_feishu_typing
         add_feishu_typing(message_id)
-        store.set_last_message_id(session_id, message_id)
 
     success, response = handle_continue_session(data, from_queue=True)
     if not success:

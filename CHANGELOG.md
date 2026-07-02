@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Added - 2026-07-01
+
+#### 群聊协作模式下 stop 卡片自动 at prompt 发送者
+
+- 群内多用户协作时，stop 卡片优先 at 触发本次 prompt 的发送者（提问的人），而非 `/notify at` 配置的固定对象
+- 通过 `launch_agent` 把发送者 user_id 注入 `CODE_ANYWHERE_SENDER_ID`，`hook-router.sh` 捕获并 export 为 `SENDER_USER_ID`，`build_stop_card` 调用 `_build_at_user_tag` 时传入
+- `_build_at_user_tag` 加可选 `sender_id` 参数，新优先级：`/notify at off` > 时间窗口外 > sender > config（self/all/`<id>`） > 默认 owner
+- 权限审批卡片、AskUserQuestion 卡片**保持原状**（at owner），因为审批决策权只属于 owner（协作者点击按钮会被拒绝）
+- 终端发起的 prompt 无 sender，自动走 config/默认 fallback，行为不变
+
+### Fixed - 2026-06-30
+
+#### 修复 P2P /new + group 模式下 stop 卡片跨 chat reply
+
+- 上一轮"env 注入 message_id 作 reply_to"的修复在 P2P /new + group 模式下产生副作用——注入的 `CODE_ANYWHERE_MESSAGE_ID` 是 P2P 里的 `/new` 消息 ID，但 agent 实际跑在 callback 新建的群，stop 卡片发到新群时 reply_to 跨 chat（飞书会拒绝或忽略）
+- `handle_new_session` 在 P2P /new 建群分支清空 `message_id`，使 `launch_agent` 不注入环境变量，hook fallback 查 `last_message_id`（由 hook 同步的 prompt 消息回写），从而正确 reply 到新群内的消息
+
+#### 修复排队 drain 场景下的回复链竞态
+
+- **根因**：排队 drain 场景下，`last_message_id` 有两个并发写入者且无时序保护——stop hook（Agent 子进程，异步慢：extract transcript + 重试 + HTTP 经 `/gw/feishu/send` 回写）发完 stop 卡片后，把它改为该卡片的 ID；callback drain（监控线程，同步快）弹出队首排队指令时，把它改为该指令对应的用户消息 ID。设用户消息为 Q（Question）、stop 卡片为 A（Answer），典型时序：用户发 Q1 → Agent 跑 → 用户发 Q2（排队）→ Q1 完成触发 drain Q2 与 stop hook 发 A1 两条并发路径 → drain 先写 `last_message_id=Q2`，stop hook 的 HTTP 后到达覆盖成 A1 → Q2 完成时 stop hook 据此发 A2，回复到了 A1 下（而非 Q2）；`/gw/feishu/send` 内部的 `remove_reaction(reply_to, 'Typing')` 也跟错目标，导致 Typing 表情残留
+- **核心改动**：`launch_agent` 把 `message_id` 注入子进程环境变量 `CODE_ANYWHERE_MESSAGE_ID`；`hook-router.sh` 统一捕获并导出为 `REPLY_TO_MSG_ID`；stop hook 与 permission hook 改用此值作为卡片 `reply_to`，断开对共享 `last_message_id` 的读依赖
+- **`send_feishu_card` 通用化**：支持 `options.reply_to` 透传，优先用调用方传入值，空则 fallback 查 `last_message_id`（兼容终端发起、无飞书消息上下文的场景）
+- **drain 不再写 `last_message_id`**：`_execute_queued_prompt` 保留 `add_feishu_typing`，移除 `set_last_message_id` 调用——`last_message_id` 的读依赖已断开，此写入失去意义且会误导后人
+- **顺手补齐 permission.sh**：权限审批卡片与 stop 卡片走同一条 reply 路径，消除原代码中权限卡片回复到上一条 stop 卡片的同类竞态。同一 Agent 执行内触发多次权限审批时，多张卡片现在都回复到当前用户消息下（旧版会回复到上一张 permission 卡片，因为 last_message_id 被网关回写）
+- **保留**：网关 `/gw/feishu/send` 对 `last_message_id` 的无条件回写（仍服务 `user_prompt.sh` 终端转发场景）；网关 processing 分支把 `last_message_id` 设为当前用户消息 ID（用户发新消息即推进回复基准的正确语义）
+
 ### Fixed - 2026-06-29
 
 #### /stop 终止进程组 + 监控线程重构

@@ -434,17 +434,24 @@ _is_in_at_time_range() {
 # ----------------------------------------------------------------------------
 # _build_at_user_tag - 构建 @ 用户标签
 # ----------------------------------------------------------------------------
-# 功能: 根据运行时通知配置构建飞书 @ 用户标签
+# 功能: 根据运行时通知配置 + 可选 sender_id 构建飞书 @ 用户标签
+#
+# 参数:
+#   $1 - sender_id (可选): 本次 prompt 发送者 user_id，由 hook-router.sh 注入
 #
 # 输出:
 #   飞书 @ 用户标签字符串（含尾部空格），或空字符串
 #
 # 优先级:
-#   1. runtime/notify_config.json 中的 at_user（通过 /notify at 设置）
-#   2. FEISHU_OWNER_ID → 默认（@ 自己）
+#   1. /notify at off → 空（全局关闭）
+#   2. 不在 at 时段内 → 空（全局关闭）
+#   3. 传入的 sender_id 非空 → at sender（本次提问的人；协作模式下定位提问者）
+#   4. /notify at self/all/<user_id> → 按 config
+#   5. 默认 → @ FEISHU_OWNER_ID
 # ----------------------------------------------------------------------------
 _build_at_user_tag() {
-    local at_user_config notify_config_json
+    local sender_id="${1:-}"
+    local notify_config_json at_user_config at_start at_end
 
     # 读取运行时通知配置覆盖
     notify_config_json=$(_get_notify_config)
@@ -455,48 +462,48 @@ _build_at_user_tag() {
             vals+=("$_line")
         done <<< "$(json_get_multi "$notify_config_json" at_user at_start at_end)"
         at_user_config="${vals[0]:-}"
-        local at_start="${vals[1]:-}"
-        local at_end="${vals[2]:-}"
+        at_start="${vals[1]:-}"
+        at_end="${vals[2]:-}"
+    fi
 
-        # 有 runtime 覆盖时，检查时段
-        if [ -n "$at_user_config" ]; then
-            if [ "$at_user_config" = "off" ]; then
-                echo ""
-                return 0
-            fi
-            # 检查时段范围
-            if [ -n "$at_start" ] && [ -n "$at_end" ]; then
-                if ! _is_in_at_time_range "$at_start" "$at_end"; then
-                    echo ""
-                    return 0
-                fi
-            fi
-            if [ "$at_user_config" = "self" ]; then
-                # self → @ owner
-                local owner_id
-                owner_id=$(get_config "FEISHU_OWNER_ID" "")
-                if [ -n "$owner_id" ]; then
-                    echo "<at id=${owner_id}></at> "
-                else
-                    echo ""
-                fi
-                return 0
-            fi
-            # all 或 user_id
-            echo "<at id=${at_user_config}></at> "
+    # 优先级 1: off 全局关闭
+    if [ "$at_user_config" = "off" ]; then
+        echo ""
+        return 0
+    fi
+
+    # 优先级 2: 时间窗口外，全局关闭
+    if [ -n "$at_start" ] && [ -n "$at_end" ]; then
+        if ! _is_in_at_time_range "$at_start" "$at_end"; then
+            echo ""
             return 0
-        fi
-
-        # at_user 为空但有时段设置时，也要检查时段
-        if [ -n "$at_start" ] && [ -n "$at_end" ]; then
-            if ! _is_in_at_time_range "$at_start" "$at_end"; then
-                echo ""
-                return 0
-            fi
         fi
     fi
 
-    # 默认 @ FEISHU_OWNER_ID
+    # 优先级 3: sender_id 优先于 config（协作模式下定位提问者）
+    if [ -n "$sender_id" ]; then
+        echo "<at id=${sender_id}></at> "
+        return 0
+    fi
+
+    # 优先级 4: config self/all/<user_id>
+    if [ "$at_user_config" = "self" ]; then
+        local owner_id
+        owner_id=$(get_config "FEISHU_OWNER_ID" "")
+        if [ -n "$owner_id" ]; then
+            echo "<at id=${owner_id}></at> "
+        else
+            echo ""
+        fi
+        return 0
+    fi
+    if [ -n "$at_user_config" ]; then
+        # all 或 user_id
+        echo "<at id=${at_user_config}></at> "
+        return 0
+    fi
+
+    # 优先级 5: 默认 @ FEISHU_OWNER_ID
     local owner_id
     owner_id=$(get_config "FEISHU_OWNER_ID" "")
     if [ -n "$owner_id" ]; then
@@ -834,9 +841,9 @@ build_stop_card() {
     local session_id="${4:-}"
     local thinking_content="${5:-}"
 
-    # 获取 @ 用户配置
+    # 获取 @ 用户配置（stop 卡片优先 at prompt 发送者，由 hook-router.sh 注入）
     local at_user
-    at_user=$(_build_at_user_tag)
+    at_user=$(_build_at_user_tag "$SENDER_USER_ID")
 
     # 条件构建 thinking_element
     local thinking_element=""
@@ -1763,6 +1770,8 @@ json.dump(walk_md(data), sys.stdout, ensure_ascii=False)
 #                    - session_id   会话标识 (用于继续会话)
 #                    - project_dir  项目目录 (用于继续会话)
 #                    - callback_url 回调地址 (用于继续会话)
+#                    - chat_id      群聊 ID (openapi 模式优先使用，未传则按 session_id 解析)
+#                    - reply_to     显式指定回复目标 message_id (openapi 模式；空则 fallback 查 last_message_id)
 #
 # 返回:
 #   0 - 发送成功
@@ -1794,12 +1803,13 @@ send_feishu_card() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url chat_id)"
+    done <<< "$(json_get_multi "$options" webhook_url session_id project_dir callback_url chat_id reply_to)"
     local webhook_url="${vals[0]:-}"
     local session_id="${vals[1]:-}"
     local project_dir="${vals[2]:-}"
     local callback_url="${vals[3]:-}"
     local chat_id="${vals[4]:-}"
+    local reply_to="${vals[5]:-}"
     [ -z "$webhook_url" ] && webhook_url=$(get_config "FEISHU_WEBHOOK_URL" "")
 
     # Markdown 预处理：遍历卡片中所有 markdown 元素，转换飞书不支持的语法
@@ -1835,8 +1845,8 @@ send_feishu_card() {
 
         # 构建传递给 _send_feishu_card_http_endpoint 的 options
         local http_options=""
-        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ] || [ -n "$chat_id" ]; then
-            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url" "chat_id" "$chat_id")
+        if [ -n "$session_id" ] || [ -n "$project_dir" ] || [ -n "$callback_url" ] || [ -n "$chat_id" ] || [ -n "$reply_to" ]; then
+            http_options=$(json_build_object "session_id" "$session_id" "project_dir" "$project_dir" "callback_url" "$callback_url" "chat_id" "$chat_id" "reply_to" "$reply_to")
         fi
 
         error_msg=$(_send_feishu_card_http_endpoint "$card_json" "$target_url" "$http_options")
@@ -1909,6 +1919,8 @@ _send_feishu_card_webhook() {
 #                   - session_id   Agent 会话 ID（用于继续会话）
 #                   - project_dir  项目工作目录（用于继续会话）
 #                   - callback_url Callback 后端 URL（用于继续会话）
+#                   - chat_id      群聊 ID（优先使用；未传则按 session_id 解析）
+#                   - reply_to     显式回复目标 message_id（优先使用；空则 fallback 查 last_message_id）
 #
 # 返回:
 #   0 - 发送成功
@@ -1920,6 +1932,8 @@ _send_feishu_card_webhook() {
 # 说明:
 #   自动读取 FEISHU_OWNER_ID 配置并作为 owner_id 传递给服务端
 #   session_id/project_dir/callback_url 用于支持回复继续会话功能
+#   chat_id 优先使用调用方传入值，未传时按 session_id 自动解析
+#   reply_to 优先使用调用方传入值，为空时 fallback 查 last_message_id（终端发起场景）
 #   如果有 session_id，会自动查询对应的 chat_id，优先使用 chat_id 发送
 # ----------------------------------------------------------------------------
 _send_feishu_card_http_endpoint() {
@@ -1931,11 +1945,12 @@ _send_feishu_card_http_endpoint() {
     local -a vals=()
     while IFS= read -r _line; do
         vals+=("$_line")
-    done <<< "$(json_get_multi "$options" session_id project_dir callback_url chat_id)"
+    done <<< "$(json_get_multi "$options" session_id project_dir callback_url chat_id reply_to)"
     local session_id="${vals[0]:-}"
     local project_dir="${vals[1]:-}"
     local callback_url="${vals[2]:-}"
     local chat_id="${vals[3]:-}"
+    local reply_to="${vals[4]:-}"
 
     # 提取 card 内容
     local card_content
@@ -1963,12 +1978,12 @@ _send_feishu_card_http_endpoint() {
         return 0
     fi
 
-    # 查询 last_message_id 用于链式回复
-    local reply_to_message_id=""
-    if [ -n "$session_id" ]; then
+    # reply_to 为空时 fallback 到 last_message_id（终端发起场景）
+    local reply_to_message_id="$reply_to"
+    if [ -z "$reply_to_message_id" ] && [ -n "$session_id" ]; then
         reply_to_message_id=$(_get_last_message_id "$session_id")
         if [ -n "$reply_to_message_id" ]; then
-            log "Found last_message_id for session: $reply_to_message_id"
+            log "Fallback to last_message_id for session: $reply_to_message_id"
         fi
     fi
 

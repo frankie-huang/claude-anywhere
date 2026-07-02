@@ -265,9 +265,9 @@ def _handle_message_event(data: dict):
 
     if SessionFacade.RouteSource.is_parent_not_found(route_source):
         run_in_background(_send_notice_message,
-                           (chat_id,
-                            _SESSION_NOT_FOUND_HINT + "请稍后重试或重新发起 /new 指令。",
-                            message_id))
+                          (chat_id,
+                           _SESSION_NOT_FOUND_HINT + "请稍后重试或重新发起 /new 指令。",
+                           message_id))
         return
 
     if SessionFacade.RouteSource.is_resolved(route_source):
@@ -293,14 +293,14 @@ def _handle_message_event(data: dict):
         # agent_type 和 command 不在路由表中，由 callback 侧从 session store 读取
         if route_info.get('new_session'):
             run_in_background(_forward_new_request,
-                               (binding, route_info['session_id'],
-                                route_info['project_dir'], prompt,
-                                chat_id, message_id, chat_type))
+                              (binding, route_info['session_id'],
+                               route_info['project_dir'], prompt,
+                               chat_id, message_id, user_id, chat_type))
         else:
             run_in_background(_forward_continue_request,
-                               (binding, route_info['session_id'],
-                                route_info['project_dir'], prompt,
-                                chat_id, message_id))
+                              (binding, route_info['session_id'],
+                               route_info['project_dir'], prompt,
+                               chat_id, message_id, user_id))
         return
 
     # 协作者未路由到 session：群内无活跃 session，静默忽略
@@ -324,7 +324,7 @@ def _handle_message_event(data: dict):
            "- **指定默认目录**\n\n" \
            "在 `.env` 中配置 `DEFAULT_CHAT_DIR` 并重启服务，即可直接发消息对话"
     run_in_background(_send_help_card, (binding, chat_id, message_id,
-                                         _COMMANDS, _slash_commands_as_help_dict(), hint))
+                                        _COMMANDS, _slash_commands_as_help_dict(), hint))
 
 
 
@@ -394,7 +394,7 @@ def _handle_command(data: dict, command: str, args: str):
             else:
                 # 未注册用户：无自己的 binding，拒绝
                 run_in_background(_send_notice_message,
-                                   (chat_id, "协作者暂不支持此命令，仅会话创建者可执行管理操作。", message_id))
+                                  (chat_id, "协作者暂不支持此命令，仅会话创建者可执行管理操作。", message_id))
                 return
 
     handler_info = _COMMANDS.get(command)
@@ -431,6 +431,7 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
     chat_id = message.get('chat_id', '')
     chat_type = message.get('chat_type', '')
     message_id = message.get('message_id', '')
+    sender_id = event.get('sender', {}).get('sender_id', {}).get('user_id', '')
 
     default_chat_dir = binding.get('default_chat_dir', '')
     session_id = binding.get('default_chat_session_id', '')
@@ -441,14 +442,15 @@ def _handle_default_chat_message(data: dict, prompt: str, binding: dict) -> None
         logger.info(f"[default-chat] Continuing session {session_id} for {owner_id}, prompt={_sanitize_user_content(prompt)}")
         run_in_background(_forward_continue_request, (
             binding, session_id, default_chat_dir,
-            prompt, chat_id, message_id
+            prompt, chat_id, message_id, sender_id
         ))
     else:
         # 创建新的默认会话
         logger.info(f"[default-chat] Creating new session in {default_chat_dir} for {owner_id}, prompt={_sanitize_user_content(prompt)}")
         new_session_id = str(uuid.uuid4())
         run_in_background(_forward_new_request_for_default_dir, (
-            binding, new_session_id, default_chat_dir, prompt, chat_id, message_id, chat_type
+            binding, new_session_id, default_chat_dir, prompt,
+            chat_id, message_id, sender_id, chat_type
         ))
 
 

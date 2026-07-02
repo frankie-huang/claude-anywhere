@@ -75,6 +75,26 @@ export AGENT_TYPE
 log "Hook router received event: $HOOK_EVENT, agent: $AGENT_TYPE"
 
 # =============================================================================
+# per-prompt 回复基准 message_id
+# =============================================================================
+# callback 的 launch_agent 把 message_id 注入到子进程环境（CODE_ANYWHERE_MESSAGE_ID），
+# 此处统一捕获并导出为 REPLY_TO_MSG_ID，供 stop/permission 等 hook 作为卡片 reply_to。
+# 终端发起（无飞书消息）时为空，下游 send_feishu_card 自动 fallback 到查 last_message_id。
+REPLY_TO_MSG_ID="${CODE_ANYWHERE_MESSAGE_ID:-}"
+export REPLY_TO_MSG_ID
+log "Reply target message_id: ${REPLY_TO_MSG_ID:-<none, will fallback to last_message_id>}"
+
+# =============================================================================
+# per-prompt 发送者 user_id
+# =============================================================================
+# callback 的 launch_agent 把发送者 user_id 注入到子进程环境（CODE_ANYWHERE_SENDER_ID），
+# 此处统一捕获并导出为 SENDER_USER_ID，供 stop 卡片优先 at 这个用户（协作模式下定位提问者）。
+# 终端发起（无飞书消息）时为空，_build_at_user_tag 自动 fallback 到 /notify at 配置或默认 owner。
+SENDER_USER_ID="${CODE_ANYWHERE_SENDER_ID:-}"
+export SENDER_USER_ID
+log "Sender user_id: ${SENDER_USER_ID:-<none>}"
+
+# =============================================================================
 # 会话 env 快照
 # =============================================================================
 # hook 继承了用户 shell 实际生效的 env，路由前抓一次白名单 env 供续聊注入

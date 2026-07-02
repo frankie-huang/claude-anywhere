@@ -402,8 +402,8 @@ def get_shell() -> str:
     return os.environ.get('SHELL', '/bin/bash')
 
 
-def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
-                 prompt: str, chat_id: str = '', message_id: str = '',
+def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str, prompt: str,
+                 chat_id: str = '', message_id: str = '', sender_id: str = '',
                  session_mode: str = 'resume', command_name: str = '',
                  on_complete: CompleteCallback = None,
                  on_error: ErrorCallback = None) -> Tuple[bool, int, Dict[str, Any]]:
@@ -417,7 +417,12 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
         project_dir: 项目工作目录
         prompt: 用户的问题
         chat_id: 群聊 ID（用于异常通知）
-        message_id: 用户消息 ID（用于回复式通知）
+        message_id: 用户消息 ID（用于回复式通知）；非空时注入子进程环境变量
+                    CODE_ANYWHERE_MESSAGE_ID，由 hook-router.sh 捕获为 REPLY_TO_MSG_ID，
+                    作为 stop/permission 卡片的 reply_to，避开共享 last_message_id 的并发竞态
+        sender_id: 发送者 user_id（可选）；非空时注入子进程环境变量
+                   CODE_ANYWHERE_SENDER_ID，由 hook-router.sh 捕获为 SENDER_USER_ID，
+                   stop 卡片优先 at 这个用户（协作模式下定位提问者）
         session_mode: 会话模式，'resume' 继续会话，'new' 新建会话
         command_name: 指定使用的命令（可选，为空时使用默认）
         on_complete: 成功完成回调 (agent_type, chat_id, message_id, session_id, output) -> None
@@ -453,6 +458,13 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str,
     # start_new_session=True 使 PID == PGID，便于 /stop 用 os.killpg
     # 杀整个进程组（含 agent 子进程），否则 SIGTERM 只杀 wrapper shell
     env = adapter.build_env(os.environ.copy())
+    # hook 子进程读 CODE_ANYWHERE_MESSAGE_ID 作为卡片 reply_to
+    # 避开共享 last_message_id 在 drain/stop hook 间的并发竞态
+    if message_id:
+        env['CODE_ANYWHERE_MESSAGE_ID'] = message_id
+    # 注入 prompt 发送者 user_id：stop 卡片优先 at 这个用户（协作模式下定位提问者）
+    if sender_id:
+        env['CODE_ANYWHERE_SENDER_ID'] = sender_id
     try:
         proc = subprocess.Popen(
             cmd,

@@ -192,6 +192,9 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
     message_id = button_value.get('message_id', '')
     chat_type = button_value.get('chat_type', '')
 
+    # 提取提交者 user_id（注入子进程 env 后由 stop 卡片优先 at）
+    sender_id = event.get('operator', {}).get('user_id', '')
+
     # 从表单数据中提取字段
     recent_dir = form_values.get('recent_dir', '')  # 常用目录下拉选择的值
     custom_dir = form_values.get('custom_dir', '')  # 自定义路径输入框的值
@@ -276,7 +279,7 @@ def _handle_new_session_form(card_data: dict, form_values: dict) -> Tuple[bool, 
 
     # 在后台线程中异步执行会话创建
     new_session_id = str(uuid.uuid4())
-    run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, chat_type, command, agent_type))
+    run_in_background(_forward_new_request, (binding, new_session_id, selected_dir, prompt, chat_id, message_id, sender_id, chat_type, command, agent_type))
 
     return True, response
 

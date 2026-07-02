@@ -196,7 +196,7 @@ def _forward_agent_request(binding: Dict[str, Any], endpoint: str,
 
 def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
                               prompt: str, chat_id: str, message_id: str,
-                              command: str = '', agent_type: str = '') -> str:
+                              sender_id: str = '', command: str = '', agent_type: str = '') -> str:
     """转发继续会话请求到 Callback 后端
 
     Args:
@@ -206,6 +206,7 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         prompt: 用户回复内容
         chat_id: 群聊 ID
         message_id: 用户消息 ID（用于回复）
+        sender_id: 发送者 user_id（可选，注入子进程 env 后由 stop 卡片优先 at）
         command: 指定使用的命令（可选）
         agent_type: agent 类型（可选；handle_continue_session 从 session store 读取，此参数用于通知文案动态展示）
 
@@ -231,6 +232,8 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
         data['command'] = command
     if agent_type:
         data['agent_type'] = agent_type
+    if sender_id:
+        data['sender_id'] = sender_id
 
     return _forward_agent_request(binding, '/cb/agent/continue',
                                    data, chat_id, reply_to=message_id,
@@ -238,8 +241,8 @@ def _forward_continue_request(binding: dict, session_id: str, project_dir: str,
 
 
 def _forward_new_request(binding: dict, session_id: str, project_dir: str, prompt: str,
-                         chat_id: str, message_id: str, chat_type: str = '',
-                         command: str = '', agent_type: str = '') -> str:
+                         chat_id: str, message_id: str, sender_id: str = '',
+                         chat_type: str = '', command: str = '', agent_type: str = '') -> str:
     """转发新建会话请求到 Callback 后端
 
     Args:
@@ -249,6 +252,7 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
         prompt: 用户输入的 prompt
         chat_id: 聊天 ID（P2P 或群聊）
         message_id: 原始消息 ID（用作 reply_to）
+        sender_id: 发送者 user_id（可选，注入子进程 env 后由 stop 卡片优先 at）
         chat_type: 聊天类型（group/p2p），用于 group 模式下的 chat_id 决策
         command: 指定使用的命令（可选）
         agent_type: agent 类型（如 'claude', 'codex'），可选
@@ -297,6 +301,8 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
         data['command'] = command
     if agent_type:
         data['agent_type'] = agent_type
+    if sender_id:
+        data['sender_id'] = sender_id
 
     # 新建会话时传递 reply_to，让第一条通知回复用户的 /new 消息
     # 后续通知会通过 last_message_id 链式回复
@@ -322,8 +328,8 @@ def _forward_new_request(binding: dict, session_id: str, project_dir: str, promp
 
 def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: str,
                                          project_dir: str, prompt: str,
-                                         chat_id: str, message_id: str, chat_type: str = '',
-                                         command: str = '', agent_type: str = '') -> str:
+                                         chat_id: str, message_id: str, sender_id: str = '',
+                                         chat_type: str = '', command: str = '', agent_type: str = '') -> str:
     """转发默认聊天新建会话请求，完成后将 session_id 持久化到 BindingStore
 
     此函数在后台线程运行，是 _forward_new_request 的包装：
@@ -334,7 +340,8 @@ def _forward_new_request_for_default_dir(binding: Dict[str, Any], session_id: st
     """
     from stores.binding_store import BindingStore
 
-    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id, message_id, chat_type, command, agent_type)
+    session_id = _forward_new_request(binding, session_id, project_dir, prompt, chat_id,
+                                      message_id, sender_id, chat_type, command, agent_type)
 
     owner_id = binding.get('_owner_id', '') if binding else ''
     if session_id and owner_id:

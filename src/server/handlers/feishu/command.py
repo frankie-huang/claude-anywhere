@@ -171,6 +171,7 @@ def _handle_new_command(data: dict, args: str):
 
     message_id = message.get('message_id', '')
     chat_id = message.get('chat_id', '')
+    sender_id = event.get('sender', {}).get('sender_id', {}).get('user_id', '')
 
     # 解析指令参数（支持 --dir= 和 --cmd=）
     success, project_dir, cmd_arg, prompt = _parse_command_args(args)
@@ -265,9 +266,9 @@ def _handle_new_command(data: dict, args: str):
     # 如果使用的是默认聊天目录，同时更新活跃默认会话
     new_session_id = str(uuid.uuid4())
     if default_chat_dir and os.path.realpath(project_dir) == os.path.realpath(default_chat_dir):
-        run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, command, agent_type))
+        run_in_background(_forward_new_request_for_default_dir, (binding, new_session_id, project_dir, prompt, chat_id, message_id, sender_id, msg_chat_type, command, agent_type))
     else:
-        run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, msg_chat_type, command, agent_type))
+        run_in_background(_forward_new_request, (binding, new_session_id, project_dir, prompt, chat_id, message_id, sender_id, msg_chat_type, command, agent_type))
 
 
 def _handle_reply_command(data: dict, args: str):
@@ -285,6 +286,7 @@ def _handle_reply_command(data: dict, args: str):
     message_id = message.get('message_id', '')
     chat_id = message.get('chat_id', '')
     parent_id = message.get('parent_id', '')
+    sender_id = event.get('sender', {}).get('sender_id', {}).get('user_id', '')
     chat_type = message.get('chat_type', '')
 
     # /reply 需要回复消息或在 group 模式群聊中使用
@@ -351,9 +353,9 @@ def _handle_reply_command(data: dict, args: str):
     if route_info.get('new_session'):
         run_in_background(_forward_new_request,
                           (binding, session_id, session_project_dir, prompt,
-                           chat_id, message_id, chat_type, command, agent_type))
+                           chat_id, message_id, sender_id, chat_type, command, agent_type))
     else:
-        run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, command, agent_type))
+        run_in_background(_forward_continue_request, (binding, session_id, session_project_dir, prompt, chat_id, message_id, sender_id, command, agent_type))
 
 
 def _handle_users_command(data: dict, args: str):
