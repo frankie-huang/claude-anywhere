@@ -980,7 +980,11 @@ class DependencyChecker:
             timeout: 超时秒数
 
         Returns:
-            subprocess.CompletedProcess 或 None（执行失败时）
+            subprocess.CompletedProcess，非超时的执行失败返回 None
+
+        Raises:
+            subprocess.TimeoutExpired: 超时表示命令已启动并在执行中，与
+                "命令不存在"性质不同，交由调用方按语义处理
         """
         user_shell = os.environ.get('SHELL', '/bin/bash')
         shell_name = os.path.basename(user_shell)
@@ -999,6 +1003,9 @@ class DependencyChecker:
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True, timeout=timeout,
                 start_new_session=True)
+        except subprocess.TimeoutExpired:
+            # 显式向上抛，不与下面的失败一起静默成 None
+            raise
         except Exception:
             return None
 
@@ -1010,13 +1017,21 @@ class DependencyChecker:
         }
         for agent_type in enabled_agents:
             cmd, url = agents.get(agent_type, (agent_type, ''))
-            result = self.run_in_user_shell(f'command -v {cmd}')
-            if result is None:
+            try:
+                result = self.run_in_user_shell(f'command -v {cmd}')
+            except subprocess.TimeoutExpired:
                 TerminalUI.print_warning(f"{cmd}: 检测超时")
+                continue
+            if result is None:
+                TerminalUI.print_warning(f"{cmd}: 检测失败（用户 shell 无法执行）")
                 continue
             cmd_path = result.stdout.strip().split('\n')[-1] if result.returncode == 0 else ''
             if cmd_path:
-                ver_result = self.run_in_user_shell(f'{cmd} --version')
+                # 取版本号失败不影响可用性判定，退化为只显示路径
+                try:
+                    ver_result = self.run_in_user_shell(f'{cmd} --version')
+                except subprocess.TimeoutExpired:
+                    ver_result = None
                 version = ver_result.stdout.strip().split('\n')[-1] if ver_result and ver_result.returncode == 0 else ''
                 TerminalUI.print_success(f"{cmd}: {version or cmd_path}")
             else:
@@ -1031,6 +1046,7 @@ class DependencyChecker:
         根据错误信息判断：
         - stderr 含 "unknown option" 等关键词 → 不支持
         - exit code 127 → 命令未找到
+        - 超时 → --print 已被接受并进入实际执行，返回 True
         - 其他非零退出（如缺少参数）→ --print 被识别，返回 True
 
         Args:
@@ -1039,7 +1055,13 @@ class DependencyChecker:
         Returns:
             True 表示支持 --print 参数，False 表示不支持或检测失败
         """
-        result = self.run_in_user_shell(cmd + ' --print')
+        try:
+            # 5 秒足够：不认识 --print 的 CLI 毫秒级就报错退出
+            result = self.run_in_user_shell(cmd + ' --print', timeout=5)
+        except subprocess.TimeoutExpired:
+            # 跑满超时说明 --print 已被接受并进入实际执行，是"支持"的正向证据
+            TerminalUI.print_dim(f"{cmd}: 检测超时，按支持 --print 处理")
+            return True
         if result is None:
             return False
         stderr_lower = (result.stderr or '').lower()
@@ -1055,6 +1077,7 @@ class DependencyChecker:
         """检测命令是否支持 exec 子命令（Codex 非交互模式）
 
         通过用户 shell 执行 `cmd exec --help`，检查退出码和输出。
+        超时同 check_supports_print_flag，按"支持"处理。
 
         Args:
             cmd: 要检测的命令
@@ -1062,7 +1085,11 @@ class DependencyChecker:
         Returns:
             True 表示支持 exec 子命令，False 表示不支持或检测失败
         """
-        result = self.run_in_user_shell(cmd + ' exec --help')
+        try:
+            result = self.run_in_user_shell(cmd + ' exec --help', timeout=5)
+        except subprocess.TimeoutExpired:
+            TerminalUI.print_dim(f"{cmd}: 检测超时，按支持 exec 处理")
+            return True
         if result is None:
             return False
         if result.returncode == 127:

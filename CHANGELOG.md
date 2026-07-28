@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-07-29
+
+#### setup.sh init 检测超时被误判为"命令不支持 --print"
+
+- **现象**：配置自定义 agent 命令时，若 `cmd --print` 迟迟不返回（shell 初始化重、CLI 冷启动慢、包装脚本先做鉴权），会被判定为不支持 `--print`，进而被推进模板配置流程
+- **根因**：`run_in_user_shell` 用 `except Exception` 把 `TimeoutExpired` 和"shell 起不来"一并吞成 `None`，调用方见 `None` 即返回 False。方向恰好反了——不认识 `--print` 的 CLI 毫秒级就报错退出，跑满超时反而说明参数已被接受
+- **修复**：`TimeoutExpired` 改为向上抛，由调用方按语义处理——两个参数探测按"支持"处理并提示用户，`_check_agent_commands` 取版本号超时则退化为只显示路径；探测超时同时从 10 秒收到 5 秒
+
 ### Fixed - 2026-07-28
 
 #### 用户 ~/.bashrc 有 echo 时，MCP 权限审批的 allow 被反转成 deny
