@@ -409,7 +409,7 @@ def launch_agent(adapter: AgentAdapter, session_id: str, project_dir: str, promp
                  on_error: ErrorCallback = None) -> Tuple[bool, int, Dict[str, Any]]:
     """构建命令、启动 agent 进程并检查初始状态
 
-    通过登录 shell 执行命令，支持 shell 配置文件中的别名和环境变量。
+    通过用户 shell 执行命令，支持 shell 配置文件中的别名和环境变量。
 
     Args:
         adapter: agent 适配器实例
@@ -799,11 +799,15 @@ def _build_error_msg(agent_type: str, returncode: int,
                      stdout: Optional[str], stderr: Optional[str]) -> str:
     """统一构建子进程失败时的错误信息
 
-    claude -p 等 CLI 失败时常把错误打到 stdout 而非 stderr，
-    故优先取 stderr，其次 stdout，两者都为空时用兜底文案。
+    claude -p 等 CLI 的输出分散在两个流：真实失败原因（API Error 等）走 stdout，
+    启动/环境诊断走 stderr。若按"stderr 优先、否则 stdout"二选一，只要 stderr
+    有一行常态输出（如 agent CLI 每次必打的启动警告）就会整体丢弃 stdout、
+    掩盖真实原因。故两者合并，正确性不再依赖噪音过滤清单的完备性。
     """
-    error_output = (stderr or '').strip() or (stdout or '').strip()
-    return error_output or f"{agent_type} 进程异常退出 (code={returncode})"
+    from utils.shell import strip_shell_noise
+    # stdout 在前（执行结果最关键），去噪后的 stderr 在后（诊断作为上下文）
+    parts = [p for p in ((stdout or '').strip(), strip_shell_noise(stderr)) if p]
+    return '\n'.join(parts) if parts else f"{agent_type} 进程异常退出 (code={returncode})"
 
 
 def _drain_pipe(pipe: Any, tail_lines: int = 20) -> str:

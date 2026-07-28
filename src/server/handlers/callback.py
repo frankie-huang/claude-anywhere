@@ -302,7 +302,7 @@ def handle_set_env_overrides(data: Dict[str, Any], headers: Dict[str, str]) -> T
     """记录 session 启动时的白名单 env 快照（hook 调用）
 
     hook 进程继承了启动 agent 的 shell 实际 env，白名单过滤后上报。
-    续聊时 AgentAdapter 取出作为 K=V 前缀注入，覆盖登录 shell 全局 env。
+    续聊时 AgentAdapter 取出作为 K=V 前缀注入，覆盖用户 shell 全局 env。
     """
     from stores.session_chat_store import SessionChatStore
 
@@ -636,17 +636,21 @@ _ensure_chat_global_lock = threading.Lock()
 
 
 def do_ensure_chat(agent_type: str, session_id: str, project_dir: str) -> Tuple[bool, str]:
-    """确保 session 有对应的 chat_id（group 模式下创建群聊）
+    """确保 session 存在且有对应的 chat_id（group 模式下创建群聊）
 
     调用方（各自负责鉴权）:
     - handle_ensure_chat (HTTP /cb/session/ensure-chat): Shell 脚本启动时调用，返回空则 fallback 到 FEISHU_CHAT_ID
     - handle_new_session (agent.py): P2P /new（group 模式无 chat_id）时调用，失败则整个 /new 失败
 
-    流程：先调网关建群，成功后才 save session 记录。失败则不写入任何记录，
-    接受网关侧可能已建群的孤儿群（用户可通过 /groups dissolve 清理，
-    自动解散也会兜底回收）。
+    行为按 session_mode 分支：
+    - 非 group 模式（message/thread）：session 不存在则 save 创建（chat_id 空，
+      写入 project_dir/agent_type），避免后续 set_last_message_id 被动创建时
+      字段缺失。session 已存在则直接返回。
+    - group 模式：session 不存在或 dissolved → 调网关建群，成功后 save 写完整
+      记录。失败则不写入，接受网关侧可能已建群的孤儿群（用户可通过
+      /groups dissolve 清理，自动解散也会兜底回收）。
 
-    dissolved 的 session：get_session 过滤返回 None，走建群路径；
+    dissolved 的 session（group 模式）：get_session 过滤返回 None，走建群路径；
     成功后 save(chat_id) 自动清除 dissolved（复活）。
 
     Args:
@@ -668,12 +672,20 @@ def do_ensure_chat(agent_type: str, session_id: str, project_dir: str) -> Tuple[
     chat_id = session_store.get_active_chat_id(session_id)
     if chat_id:
         return True, chat_id
-    # 2. session 存在但无 chat_id（P2P 正常态）或非 group 模式 → 无需建群
-    # 3. session 不存在或 dissolved → 仅 group 模式才建群
+
     session_data = session_store.get_session(session_id)
-    if session_data or FEISHU_SESSION_MODE != 'group':
+
+    # 2. 非 group 模式：session 不存在则创建（chat_id 空，写字段），无需建群。
+    #    避免后续 set_last_message_id 被动创建时字段缺失（project_dir/agent_type）。
+    if FEISHU_SESSION_MODE != 'group':
+        if not session_data:
+            session_store.save(session_id, '', project_dir=project_dir,
+                               agent_type=agent_type)
+            logger.info("[ensure-chat] Created session (non-group): session=%s, dir=%s",
+                        session_id, project_dir)
         return True, ''
 
+    # 3. group 模式：session 不存在或 dissolved → 建群 + 写完整 session 记录
     # per-session 锁防止并发创建
     with _ensure_chat_global_lock:
         if session_id not in _ensure_chat_locks:

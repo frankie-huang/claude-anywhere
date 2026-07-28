@@ -28,7 +28,7 @@ TBD - created by archiving change add-codex-support. Update Purpose after archiv
 - **GIVEN** 调用方传入 `AgentAdapter` 实例和会话参数
 - **WHEN** 调用 `launch_agent(adapter, session_id, project_dir, prompt, ...)`
 - **THEN** 系统通过 adapter 构建命令和环境
-- **AND** 通过登录 shell 启动子进程
+- **AND** 通过用户 shell 启动子进程
 - **AND** 执行启动检查（2 秒内快速完成 / 后台运行）
 - **AND** 后台线程监控进程生命周期
 - **AND** 失败时通过 `on_error` 回调通知

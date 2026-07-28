@@ -1166,18 +1166,16 @@ _resolve_chat_id() {
         fi
     fi
 
-    # 调用 ensure-chat（group 模式下由 backend 懒创建群聊）
-    # 仅 group 模式下调用，非 group 模式跳过避免无用 HTTP 请求
+    # 调用 ensure-chat：
+    # - group 模式：懒创建群聊，返回 chat_id
+    # - 非 group 模式：确保 session 记录存在（写入 project_dir/agent_type），
+    #   避免后续 set_last_message_id 被动创建时字段缺失
     if [ -n "$session_id" ]; then
-        local session_mode
-        session_mode=$(get_config "FEISHU_SESSION_MODE" "message")
-        if [ "$session_mode" = "group" ]; then
-            chat_id=$(_ensure_chat "$session_id" "$project_dir")
-            if [ -n "$chat_id" ]; then
-                log "Ensured chat for session: $chat_id"
-                echo "$chat_id"
-                return 0
-            fi
+        chat_id=$(_ensure_chat "$session_id" "$project_dir")
+        if [ -n "$chat_id" ]; then
+            log "Ensured chat for session: $chat_id"
+            echo "$chat_id"
+            return 0
         fi
     fi
 

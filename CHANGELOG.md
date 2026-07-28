@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Fixed - 2026-07-28
+
+#### 用户 ~/.bashrc 有 echo 时，MCP 权限审批的 allow 被反转成 deny
+
+- **现象**：飞书卡片点"允许"后，终端里工具调用却显示 `Error: Invalid JSON: Expecting value: line 1 column 1 (char 0)`，命令并未执行。链路上决策已正确回传，只在最后一步解析时丢失
+- **根因**：`parse_hook_output` 直接对整段 stdout 做 `json.loads`，假设其中只有 hook 的 JSON。而 `-ic` 会完整加载 `~/.bashrc`，其中无条件的 `echo`（欢迎语、conda/nvm 提示等）会打在 JSON 前面，解析必然失败并返回 deny。`-lc` 时代不读 `.bashrc` 故不触发，改用 `-ic` 后暴露；zsh 用户一直走 `-ic`，一直存在此风险
+- **修复**：改用 `JSONDecoder.raw_decode` 从每个 `{` 处试探解析，取第一个带 decision 的对象。raw_decode 只取一个完整 JSON 值、忽略其后内容，故前缀污染、尾部污染（rc 的 `trap EXIT`）、与 JSON 挤在同一行的污染（`echo -n`）均可兼容，也不依赖"污染是整行的"这一假设；`updatedInput` 分支的多行 pretty JSON 同样适用
+
+### Fixed - 2026-07-27
+
+#### agent 失败通知丢失 stdout 里的真实错误
+
+- **根因**：`_build_error_msg` 按"stderr 优先、否则 stdout"二选一取值，而 claude -p 等 CLI 把 API Error 等真实失败原因打到 stdout、把启动诊断打到 stderr（如设 `ANTHROPIC_AUTH_TOKEN` 时每次必打的 `claude.ai connectors are disabled`）。只要 stderr 有任何一行常态输出，stdout 就被整体丢弃；上一版的 `strip_shell_noise` 只覆盖 shell 自身噪音，治不了 agent CLI 的常态警告
+- **修复**：改为两者合并——stdout 在前（执行结果最关键），去噪后的 stderr 在后（诊断作为上下文），都为空时用兜底文案。正确性不再依赖噪音过滤清单的完备性，新增 agent 打什么警告都不会再掩盖 stdout
+
+### Fixed - 2026-07-26
+
+#### bash 用户 ~/.bashrc 函数/别名在子进程不生效（claude 包装函数被误判为不支持 --print）
+
+- **根因**：bash 走 `-lc`（非交互 login shell），`~/.bashrc` 的非交互早退保护（`case $- in *i*) ;; *) return;; esac`）直接 `return`，用户自定义函数/别名（如把 `claude` 包装成函数）不加载，子进程里命令找不到（exit 127），依赖检测误判为"不支持 --print"。zsh 一直用 `-ic` 无此问题
+- **修复**：`build_shell_cmd`、`DependencyChecker.run_in_user_shell` 与 `install.sh` 的 `_check_claude_command` 统一把 bash 从 `-lc` 改为 `-ic`，`~/.bashrc` 完整加载（此前 `install.sh --check` 对 bash 用户同样会误报 "claude: 未找到"）
+- **配套 start_new_session**：`-ic` 会抢占终端前台组挂起父进程（SIGTTIN/SIGTTOU），`setup_init.py`、`permission_mcp.py` 的子进程调用补 `start_new_session=True`（`agents/__init__.py` 本就有）
+- **取舍**：`-ic` 不再加载 login profile（`~/.bash_profile` / `~/.profile`）。子进程继承服务进程的环境变量，`build_shell_cmd` 侧另有 PATH 显式注入，正常从终端启动服务不受影响；若改由 systemd 等非终端方式拉起服务，只写在 profile 里的变量需自行注入
+
+#### 子进程错误信息被 -ic 无 tty 诊断噪音掩盖
+
+- **根因**：`-ic` 经 subprocess 启动（无控制终端）时 `tcsetpgrp` 失败，shell 向 stderr 输出 `cannot set terminal process group` / `no job control in this shell` 两行无害诊断。这些噪音占据 stderr，`_build_error_msg` 与 permission deny 回执按"stderr 优先"取值时掩盖了真实失败原因（常在 stdout）。用户自己在终端执行同样命令不会出现——其 shell 早已完成 job control 初始化；给子进程分配 pty 可从源头消除，但与 `start_new_session` 脱离控制终端的诉求互斥，故只能事后过滤
+- **修复**：`utils/shell.py` 新增 `strip_shell_noise` 过滤上述无害 stderr 行（仅限 shell 自身产生的通用噪音，不含各 agent CLI 特有警告）；两处错误信息取值前先去噪——`_build_error_msg` 去噪后为空则 fallback 到 stdout 的真实错误，permission deny 回执去噪后为空则回落到兜底文案（不再把噪音当 deny 原因）
+
+### Fixed - 2026-07-20
+
+#### 修复非 group 模式下 session 缺失 project_dir/agent_type 字段
+
+- **根因**：`_resolve_chat_id` 在非 group 模式下跳过 `_ensure_chat` 调用（"避免无用 HTTP 请求"），导致 session 从未被主动创建；后续 `set_last_message_id` 被动创建的记录只有 `last_message_id` + `updated_at`，缺失 `project_dir`/`agent_type`
+- **Shell 侧**：`_resolve_chat_id` 去掉 `if [ "$session_mode" = "group" ]` 守卫，所有模式均调用 `_ensure_chat`，确保 session 在发卡片前已创建
+- **Python 侧**：`do_ensure_chat` 新增非 group 分支——session 不存在时 `save` 创建带 `project_dir`/`agent_type` 的记录（chat_id 为空），session 已存在则直接返回
+
 ### Added - 2026-07-01
 
 #### 群聊协作模式下 stop 卡片自动 at prompt 发送者

@@ -113,7 +113,7 @@ Callback 后端 SHALL 提供 `/cb/agent/continue` 端点，接收并处理继续
 - **WHEN** 执行 agent 命令
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用确定的 `command`（按优先级：请求指定 > session 记录 > 默认）
-- **AND** 通过登录 shell（`bash -lc`）执行，支持 shell 配置文件中的别名和环境变量
+- **AND** 通过用户 shell（`bash -ic`）执行，支持 shell 配置文件中的别名和环境变量
 - **AND** 拼接 `--print {prompt} --resume {session_id}` 参数
 - **AND** 捕获输出用于日志
 
@@ -124,7 +124,7 @@ Callback 后端 SHALL 提供 `/cb/agent/continue` 端点，接收并处理继续
 - **WHEN** 执行 agent 命令
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用确定的 codex command
-- **AND** 通过登录 shell 执行
+- **AND** 通过用户 shell 执行
 - **AND** 拼接 `exec resume --json {session_id} {prompt}` 参数（不含 `--cd`，工作目录由原始会话决定）
 - **AND** 捕获输出用于日志
 

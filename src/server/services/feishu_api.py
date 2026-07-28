@@ -71,7 +71,9 @@ _SANITIZE_PATTERNS: List[Tuple[Pattern[str], str]] = [
     (re.compile(r'(?<!\d)(0\d{2,3})-\d{3,4}(\d{4})(?!\d)'),
      r'\1-****\2'),
     # 邮箱地址：@ 替换为 [at]，避免被飞书识别为敏感信息
-    (re.compile(r'([a-zA-Z0-9._%+\-]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})'),
+    # 本地部分字符集包含 /=，覆盖邮件系统加密字段（如 encrypt_to: base64==@domain.com）
+    # 否则这类非标准邮箱会漏脱敏，导致飞书 DLP 拦截 (code=230028)
+    (re.compile(r'([a-zA-Z0-9._%+\-/=]+)@([a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})'),
      r'\1[at]\2'),
 ]
 

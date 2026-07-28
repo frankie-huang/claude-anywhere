@@ -82,7 +82,7 @@ Callback 后端 SHALL 提供 `/cb/agent/new` 端点，接收并处理新建会�
 - **WHEN** 执行 agent 命令
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用指定的 `command`（或默认命令）
-- **AND** 通过登录 shell（`bash -lc`）执行
+- **AND** 通过用户 shell（`bash -ic`）执行
 - **AND** 拼接 `--print {prompt} --session-id {session_id}` 参数
 - **AND** 捕获输出用于日志
 
@@ -93,7 +93,7 @@ Callback 后端 SHALL 提供 `/cb/agent/new` 端点，接收并处理新建会�
 - **WHEN** 执行 agent 命令
 - **THEN** 切换到 `project_dir` 目录
 - **AND** 使用指定的 codex command（或默认命令）
-- **AND** 通过登录 shell 执行
+- **AND** 通过用户 shell 执行
 - **AND** 拼接 `exec --json --cd {project_dir} {prompt}` 参数（Codex 不支持指定 session ID）
 - **AND** 从 stdout 首条 `thread.started` 事件捕获 session ID
 - **AND** 用捕获的真实 session ID 替换 store 中的临时 ID

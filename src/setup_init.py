@@ -31,7 +31,7 @@ class Terminal:
     """终端环境管理：初始化、前台进程组控制
 
     解决两类终端问题：
-    1. 子进程抢占前台：依赖检测通过用户的 login shell（zsh -ic / bash -lc）
+    1. 子进程抢占前台：依赖检测通过用户的 shell（zsh/bash -ic）
        检测 claude CLI，这些 shell 会启用 job control 并调用 tcsetpgrp() 抢占前台，
        退出后终端的前台进程组可能已不在本进程，导致后续 print() 触发 SIGTTOU 被挂起。
     2. 非终端环境：setup.sh 通过管道调用时 stdin/stdout 可能不是终端，
@@ -75,7 +75,7 @@ class Terminal:
     def ensure_foreground():
         """确保当前进程在前台进程组
 
-        依赖检测中通过 login shell 检测 claude CLI 时，shell 可能抢占前台进程组。
+        依赖检测中通过用户 shell 检测 claude CLI 时，shell 可能抢占前台进程组。
         每次读取按键前调用，防止 termios 操作（setraw/tcsetattr）因非前台而失败。
         """
         if not all(hasattr(os, attr) for attr in ('getpgrp', 'tcgetpgrp', 'tcsetpgrp')):
@@ -968,10 +968,12 @@ class DependencyChecker:
         return all_ok
 
     def run_in_user_shell(self, cmd, timeout=10):
-        """通过用户的 login shell 执行命令
+        """通过用户的交互式 shell 执行命令
 
-        与后端 build_shell_cmd (handlers/utils.py) 使用相同的 shell 参数：
-        zsh 用 -ic，fish 用 -c，其他用 -lc。
+        与后端 build_shell_cmd (utils/shell.py) 使用相同的 shell 参数：
+        zsh/bash 用 -ic，fish 用 -c，其他 POSIX 用 -lc。bash 用 -ic
+        （interactive）是为了绕过 ~/.bashrc 的非交互早退保护，让用户自定义
+        的函数/别名（如 claude 包装函数）能加载，须与 build_shell_cmd 同步。
 
         Args:
             cmd: 要执行的命令字符串
@@ -983,7 +985,7 @@ class DependencyChecker:
         user_shell = os.environ.get('SHELL', '/bin/bash')
         shell_name = os.path.basename(user_shell)
 
-        if shell_name == 'zsh':
+        if shell_name in ('zsh', 'bash'):
             shell_args = ['-ic']
         elif shell_name == 'fish':
             shell_args = ['-c']
@@ -991,10 +993,12 @@ class DependencyChecker:
             shell_args = ['-lc']
 
         try:
+            # start_new_session 避免 bash/zsh -ic 抢占终端前台组、挂起 setup.sh init 交互菜单（SIGTTIN/SIGTTOU）
             return subprocess.run(
                 [user_shell] + shell_args + [cmd],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, timeout=timeout)
+                universal_newlines=True, timeout=timeout,
+                start_new_session=True)
         except Exception:
             return None
 
@@ -1023,7 +1027,7 @@ class DependencyChecker:
     def check_supports_print_flag(self, cmd):
         """检测命令是否支持 --print 参数
 
-        通过 login shell 执行 `cmd --print`，确保能检测到用户的别名/函数。
+        通过用户 shell 执行 `cmd --print`，确保能检测到用户的别名/函数。
         根据错误信息判断：
         - stderr 含 "unknown option" 等关键词 → 不支持
         - exit code 127 → 命令未找到
@@ -1050,7 +1054,7 @@ class DependencyChecker:
     def check_supports_exec_subcommand(self, cmd):
         """检测命令是否支持 exec 子命令（Codex 非交互模式）
 
-        通过 login shell 执行 `cmd exec --help`，检查退出码和输出。
+        通过用户 shell 执行 `cmd exec --help`，检查退出码和输出。
 
         Args:
             cmd: 要检测的命令

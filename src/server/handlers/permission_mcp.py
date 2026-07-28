@@ -86,7 +86,7 @@ _src_dir = os.path.dirname(_server_dir)
 sys.path.insert(0, _server_dir)
 sys.path.insert(0, _src_dir)
 
-from utils.shell import build_shell_cmd  # noqa: E402
+from utils.shell import build_shell_cmd, strip_shell_noise  # noqa: E402
 
 try:
     from shared.logging_config import setup_logging  # noqa: E402
@@ -218,6 +218,7 @@ class PermissionMCPServer:
 
         try:
             # Python 3.6 兼容：使用 stdout/stderr PIPE 和 universal_newlines
+            # start_new_session 避免 bash/zsh -ic 抢占终端前台组、挂起 claude TUI（SIGTTIN/SIGTTOU）
             result = subprocess.run(
                 cmd,
                 input=json.dumps(hook_event),
@@ -226,7 +227,8 @@ class PermissionMCPServer:
                 universal_newlines=True,
                 timeout=timeout,
                 cwd=self.project_cwd,
-                env=env
+                env=env,
+                start_new_session=True
             )
 
             # 调试日志
@@ -240,7 +242,8 @@ class PermissionMCPServer:
             else:
                 # 非 0 返回码通常表示回退到终端交互
                 # 在 MCP 模式下，我们应该返回 deny
-                error_msg = result.stderr.strip() if result.stderr else "Permission request fallback"
+                # 去噪避免把 shell 噪音当成 deny 原因返回
+                error_msg = strip_shell_noise(result.stderr) or "Permission request fallback"
                 return {"behavior": "deny", "message": error_msg}
 
         except subprocess.TimeoutExpired:
@@ -379,20 +382,42 @@ class PermissionMCPServer:
             sys.stdout.flush()
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
 def parse_hook_output(output: str) -> Dict[str, Any]:
-    """Parse hook output and extract decision."""
+    """Parse hook output and extract decision.
+
+    stdout 可能混入用户 rc 文件的输出（-ic 会加载 ~/.bashrc），整段 json.loads
+    会失败并把 allow 反转成 deny。故从每个 '{' 处 raw_decode 试探——它只取一个
+    完整 JSON 值、忽略前后其余内容；解析出的对象不带 decision 就继续找下一个。
+    """
     if not output or not output.strip():
         return {"behavior": "deny", "message": "Empty hook output"}
 
-    try:
-        data = json.loads(output.strip())
-        hook_output = data.get("hookSpecificOutput", {})
-        decision = hook_output.get("decision", {})
-        if decision:
-            return decision
+    last_error = None
+    found_object = False
+    pos = output.find('{')
+    while pos != -1:
+        try:
+            data, _ = _JSON_DECODER.raw_decode(output, pos)
+        except ValueError as e:
+            last_error = e
+        else:
+            found_object = True
+            # 各层类型都要校验：畸形对象跳过后继续找，不能让它中断扫描
+            hook_output = data.get("hookSpecificOutput")
+            if isinstance(hook_output, dict):
+                decision = hook_output.get("decision")
+                if isinstance(decision, dict) and decision:
+                    return decision
+        pos = output.find('{', pos + 1)
+
+    if found_object:
         return {"behavior": "deny", "message": "Missing decision in hook output"}
-    except (json.JSONDecodeError, ValueError) as e:
-        return {"behavior": "deny", "message": "Invalid JSON: {}".format(str(e))}
+    if last_error is None:
+        return {"behavior": "deny", "message": "No JSON object in hook output"}
+    return {"behavior": "deny", "message": "Invalid JSON: {}".format(str(last_error))}
 
 
 def parse_args() -> Tuple[str, str]:

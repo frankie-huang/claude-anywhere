@@ -329,7 +329,7 @@ class SessionChatStore(JsonStore):
     def set_env_overrides(self, session_id: str, env: Dict[str, str]) -> bool:
         """记录该 session 启动时的白名单 env 快照
 
-        续聊时由 AgentAdapter 取出，以 K=V 前缀注入续聊命令，覆盖登录 shell
+        续聊时由 AgentAdapter 取出，以 K=V 前缀注入续聊命令，覆盖用户 shell
         中 .zshenv/.bashrc 全局 export 的同名变量。
 
         每次 hook 触发都会调用（幂等覆盖）。不会为不存在的 session 创建

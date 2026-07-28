@@ -289,7 +289,7 @@ check_dependencies() {
         print_info "可选依赖 (${optional_missing[*]}) 未安装，但不影响基本功能"
     fi
 
-    # 检查 claude 命令是否可用（通过用户登录 shell 检查，模拟实际执行环境）
+    # 检查 claude 命令是否可用（通过用户 shell 检查，模拟实际执行环境）
     echo ""
     _check_claude_command
 
@@ -297,20 +297,20 @@ check_dependencies() {
 }
 
 # 检查 claude 命令在用户 shell 环境中是否可用
-# 与后端 build_shell_cmd (handlers/utils.py) 使用相同的 shell 参数
+# 与后端 build_shell_cmd (src/server/utils/shell.py) 使用相同的 shell 参数
 _check_claude_command() {
     local user_shell="${SHELL:-/bin/bash}"
     local shell_name
     shell_name="$(basename "$user_shell")"
 
-    # shell 参数与后端 build_shell_cmd (handlers/utils.py) 保持一致
-    # zsh 用 -ic（交互模式）才能加载 .zshrc 中的 PATH/nvm 等配置
-    # 副作用：交互模式可能输出 .zshrc 中的 echo 等内容，用 tail -1 只取最后一行来规避
+    # zsh/bash 用 -ic：非交互 shell 会被 .bashrc 的早退保护挡掉，加载不到用户的函数/别名
+    # 副作用：交互模式可能输出 rc 文件中的 echo 等内容，用 tail -1 只取最后一行来规避
+    # 抢占隐患：-ic 会抢终端前台组，但检测命令秒退、未触发；交互 read 挂起则改用 setsid
     local shell_args
     case "$shell_name" in
-        zsh)  shell_args="-ic" ;;
-        fish) shell_args="-c" ;;
-        *)    shell_args="-lc" ;;
+        zsh|bash) shell_args="-ic" ;;
+        fish)     shell_args="-c" ;;
+        *)        shell_args="-lc" ;;
     esac
 
     # 检查 claude 是否存在（command -v 在 fish 中同样可用）

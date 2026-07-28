@@ -80,7 +80,7 @@ class ClaudeAdapter(AgentAdapter):
 
         组装参数列表，通过模板展开生成可执行的 shell 命令。
         若 session 记录了 env_overrides（启动时由 hook 快照），命令前会附加
-        K=V 前缀，覆盖登录 shell 全局 env，让续聊命中用户实际启动时的配置。
+        K=V 前缀，覆盖用户 shell 全局 env，让续聊命中用户实际启动时的配置。
         """
         from config import get_claude_args_template
 
