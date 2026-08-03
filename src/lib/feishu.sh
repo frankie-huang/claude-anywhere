@@ -59,8 +59,8 @@ DEFAULT_TEMPLATE_DIR="${TEMPLATES_DIR}/feishu"
 FEISHU_HTTP_TIMEOUT=10
 
 # 回调服务器地址（用于 OpenAPI 发送）
-CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
 CALLBACK_SERVER_PORT=$(get_config "CALLBACK_SERVER_PORT" "8080")
+CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$CALLBACK_SERVER_PORT")
 
 # =============================================================================
 # 模板验证函数

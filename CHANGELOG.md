@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Refactored - 2026-08-03
+
+#### Claude / Codex hook 配置逻辑合并到 JsonHookConfigurator 基类
+
+- **背景**：两个 configurator 的 `configure()` 各 122 行，其中 90 行逐字相同（73%），差异只有配置文件位置、界面标题和平台特有动作。拷贝已经开始分叉——查找本项目 hook 时外层循环的提前退出只有 Codex 侧有，Claude 侧漏了，导致同一事件下有多个匹配条目时一个取首个、一个取末个
+- **重构**：抽出 `JsonHookConfigurator` 基类承载共用流程（两者 hook 配置 schema 一致），子类只填三个差异点：`SECTION_TITLE`、`_before_write()`、`_after_write()`。`ClaudeHookConfigurator` 仅剩 1 行，`CodexHookConfigurator` 保留迁移清理与信任提示两个钩子
+- **顺带**：`configure()` 从 122 行降到 38 行，检测/合并/超时确认拆为 `_merge_hooks`、`_resolve_timeout` 等方法，均在项目 50 行约束内；上述行为分歧统一为「取首个匹配」
+- **等价性**：重构前后并排跑 Claude/Codex × 6 组场景（新建、追加共存、无需变更、超时确认更新、超时跳过、同事件多条目），写出的 JSON 与终端输出序列 12/12 逐字节一致
+
 ### Changed - 2026-08-02
 
 #### Codex hook 配置改用独立的 hooks.json，不再写入 config.toml

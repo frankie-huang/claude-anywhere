@@ -648,7 +648,7 @@ send_stop_notification_async() {
     local WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
     local STOP_MESSAGE_MAX_LENGTH=$(get_config "STOP_MESSAGE_MAX_LENGTH" "10000")
     local STOP_THINKING_MAX_LENGTH=$(get_config "STOP_THINKING_MAX_LENGTH" "10000")
-    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
+    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
     local INPUT_SESSION_ID=$(json_get "$INPUT" "session_id")
     local INPUT_TURN_ID=$(json_get "$INPUT" "turn_id")
     local TRANSCRIPT_PATH=$(json_get "$INPUT" "transcript_path")

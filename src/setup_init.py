@@ -1133,26 +1133,44 @@ class DependencyChecker:
 
 
 # =============================================================================
-# ClaudeHookConfigurator — settings.json Hook 配置
+# JsonHookConfigurator — JSON 格式 Hook 配置基类
 # =============================================================================
 
-class ClaudeHookConfigurator:
-    """管理 Claude Code Hook 配置"""
+class JsonHookConfigurator:
+    """Claude / Codex 共用的 JSON hook 配置写入流程
 
-    def __init__(self, hook_path, settings_file):
+    两者的 hook 配置 schema 一致（{"hooks": {EVENT: [{"hooks": [...]}]}}），
+    检测、追加、超时确认的逻辑完全相同。差异只有三处，由子类填：界面标题
+    （SECTION_TITLE）、写入前动作（_before_write）、写入后提示（_after_write）。
+
+    追加语义：事件已有其他 hook 时，把本项目 hook 追加进同一事件的数组与之共存，
+    而非整体替换丢失用户已有配置。追加与「事件不存在时直接添加」同为非破坏操作，
+    无需用户确认；只有 PermissionRequest 超时不一致才会弹确认。
+    """
+
+    SECTION_TITLE = ''  # 子类覆盖：print_section 的标题
+
+    def __init__(self, hook_path, config_file):
         self.hook_path = hook_path
-        self.settings_file = settings_file
+        self.config_file = config_file
+
+    # --- 子类可覆盖的钩子 ---
+
+    def _before_write(self):
+        """写入前的平台特有动作（如 Codex 迁移清理旧版 config.toml 残留）"""
+
+    def _after_write(self):
+        """配置实际变更后的平台特有提示（如 Codex 的 hook 信任审查）"""
+
+    # --- 主流程 ---
 
     def configure(self, server_timeout=600):
-        """写入 hook 配置到 settings.json（追加语义：保留已有 hook，不覆盖）
-
-        当事件已有其他 hook 时，把本项目 hook 追加进同一事件的数组，
-        与现有配置共存，而非整体替换丢失用户已有配置。
+        """写入 hook 配置到目标 JSON 文件
 
         Args:
             server_timeout: PERMISSION_REQUEST_TIMEOUT 的值，用于计算 hook timeout
         """
-        TerminalUI.print_section("配置 Claude Code Hook")
+        TerminalUI.print_section(self.SECTION_TITLE)
 
         if not os.path.exists(self.hook_path):
             TerminalUI.print_error(f"Hook 脚本不存在: {self.hook_path}")
@@ -1161,151 +1179,33 @@ class ClaudeHookConfigurator:
         # 确保脚本可执行
         os.chmod(self.hook_path, 0o755)
 
-        # 创建 settings 目录
-        settings_dir = os.path.dirname(self.settings_file)
-        os.makedirs(settings_dir, exist_ok=True)
+        self._before_write()
+
+        # 创建配置目录
+        os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
 
         # hook timeout = 服务端超时 + 60s
         hook_timeout = server_timeout + 60
+        desired_hooks = self._build_desired_hooks(hook_timeout)
+        config = self._load_config()
 
-        # 期望的 hooks 配置
-        desired_hooks = {
-            "UserPromptSubmit": [{
-                "hooks": [{"type": "command", "command": self.hook_path}]
-            }],
-            "PermissionRequest": [{
-                "hooks": [{"type": "command", "command": self.hook_path, "timeout": hook_timeout}]
-            }],
-            "Stop": [{
-                "hooks": [{"type": "command", "command": self.hook_path}]
-            }]
-        }
-
-        # 读取现有配置
-        config = {}
-        try:
-            with open(self.settings_file, 'r') as f:
-                config = json.load(f)
-        except Exception:
-            pass
-
-        if 'hooks' not in config:
-            config['hooks'] = {}
-
-        # 检测各事件状态：缺失则添加、已有其他 hook 则追加（均非破坏，直接处理）
-        TerminalUI.print_dim(f"配置文件: {self.settings_file}")
-        changed = False
-        status = {}     # event -> 'ok' | 'new' | 'appended' | 'timeout'
-        hook_refs = {}  # event -> 对应的 hook dict 引用（用于 timeout 原地更新）
-        real_hook_path = os.path.realpath(self.hook_path)
-        for event, desired in desired_hooks.items():
-            if event not in config['hooks']:
-                status[event] = 'new'
-                config['hooks'][event] = desired
-                changed = True
-                TerminalUI.print_success(f"{event} \u2014 已添加")
-            else:
-                existing = config['hooks'][event]
-                our_hook = None
-                for entry in existing:
-                    for hook in entry.get('hooks', []):
-                        cmd = hook.get('command', '')
-                        try:
-                            tokens = shlex.split(cmd)
-                        except ValueError:
-                            tokens = cmd.split()
-                        for token in tokens:
-                            try:
-                                if os.path.realpath(os.path.expanduser(token)) == real_hook_path:
-                                    our_hook = hook
-                                    break
-                            except Exception:
-                                pass
-                        if our_hook:
-                            break
-                if our_hook:
-                    # 已配置且指向我们的脚本，检查 PermissionRequest 的 timeout
-                    if event == 'PermissionRequest' and our_hook.get('timeout', 0) != hook_timeout:
-                        status[event] = 'timeout'
-                        hook_refs[event] = our_hook
-                        TerminalUI.print_warning(
-                            f"{event} \u2014 超时配置不一致 "
-                            f"(当前 {our_hook.get('timeout', 0)}s, 建议 {hook_timeout}s)")
-                    else:
-                        status[event] = 'ok'
-                        TerminalUI.print_success(f"{event} \u2014 无需变更")
-                else:
-                    # 检测到其他 hook：直接追加本项目 hook（非破坏，保留原有配置）
-                    config['hooks'][event].append(desired[0])
-                    status[event] = 'appended'
-                    changed = True
-                    TerminalUI.print_success(f"{event} \u2014 已追加")
-
-        # 处理 PermissionRequest 超时不一致（new/追加 已在上方直接处理）
-        for event, desired in desired_hooks.items():
-            if status[event] == 'timeout':
-                idx = TerminalUI.select_action_or_exit(
-                    f"{event} hook 超时需要更新为 {hook_timeout}s，是否更新？",
-                    hint=f"服务端超时: {server_timeout}s, Hook 超时建议: {server_timeout} + 60 = {hook_timeout}s",
-                    options=[("更新", f"设置为 {hook_timeout}s"),
-                             ("跳过", "保留当前超时配置"),
-                             ("取消", "退出初始化")])
-                if idx == 0:
-                    # 只更新 timeout，不覆盖整个 hook 配置
-                    hook_refs[event]['timeout'] = hook_timeout
-                    TerminalUI.print_success(f"已更新 {event} hook 超时为 {hook_timeout}s")
-                    changed = True
-                else:
-                    TerminalUI.print_info(f"已跳过 {event} hook 超时更新")
+        TerminalUI.print_dim(f"配置文件: {self.config_file}")
+        changed, pending_timeout = self._merge_hooks(config, desired_hooks, hook_timeout)
+        # 超时确认放在状态检测之后，先让用户看到所有事件的处理结果再决策
+        if self._resolve_timeout(pending_timeout, hook_timeout, server_timeout):
+            changed = True
 
         if changed:
-            with open(self.settings_file, 'w') as f:
+            with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
                 f.write('\n')
+            self._after_write()
 
         return True
 
-
-# =============================================================================
-# CodexHookConfigurator — hooks.json Hook 配置
-# =============================================================================
-
-class CodexHookConfigurator:
-    """管理 Codex CLI Hook 配置（hooks.json 格式）
-
-    写入独立的 ~/.codex/hooks.json，不碰 config.toml（仅迁移清理旧版残留）。
-    与 Claude settings.json schema 一致，复用同一套检测/追加/超时交互逻辑。
-    """
-
-    def __init__(self, hook_path, config_file):
-        self.hook_path = hook_path
-        self.config_file = config_file
-
-    def configure(self, server_timeout=600):
-        """写入 hook 配置到 hooks.json（追加语义：保留已有 hook，不覆盖）
-
-        首次从旧版 config.toml 迁移时，清理其中的 inline hooks 残留，避免与
-        hooks.json 重复加载（Codex 合并两者并警告）。配置变更时提示信任审查。
-        """
-        TerminalUI.print_section("配置 Codex CLI Hook")
-
-        if not os.path.exists(self.hook_path):
-            TerminalUI.print_error(f"Hook 脚本不存在: {self.hook_path}")
-            return False
-
-        os.chmod(self.hook_path, 0o755)
-
-        # 迁移：清理 config.toml 里旧版的 inline hooks 残留（改用 hooks.json 后避免重复加载）
-        config_toml = os.path.join(os.path.dirname(self.config_file), 'config.toml')
-        if self._strip_legacy_inline_hooks(config_toml, self.hook_path) is True:
-            TerminalUI.print_success("已清理 config.toml 旧版 inline hooks 残留")
-
-        config_dir = os.path.dirname(self.config_file)
-        os.makedirs(config_dir, exist_ok=True)
-
-        hook_timeout = server_timeout + 60
-
-        desired_hooks = {
+    def _build_desired_hooks(self, hook_timeout):
+        """本项目期望的 hooks 配置"""
+        return {
             "UserPromptSubmit": [{
                 "hooks": [{"type": "command", "command": self.hook_path}]
             }],
@@ -1317,91 +1217,117 @@ class CodexHookConfigurator:
             }]
         }
 
-        # 读取现有 hooks.json（整个文件即 {"hooks": {...}} 结构）
+    def _load_config(self):
+        """读取现有配置；文件缺失或内容损坏时按空配置处理"""
         config = {}
         try:
             with open(self.config_file, 'r') as f:
                 config = json.load(f)
         except Exception:
             pass
-
         if 'hooks' not in config:
             config['hooks'] = {}
+        return config
 
-        # 检测各事件状态：缺失则添加、已有其他 hook 则追加（均非破坏，直接处理）
-        TerminalUI.print_dim(f"配置文件: {self.config_file}")
-        changed = False
-        status = {}     # event -> 'ok' | 'new' | 'appended' | 'timeout'
-        hook_refs = {}  # event -> 对应的 hook dict 引用（用于 timeout 原地更新）
+    def _find_our_hook(self, entries):
+        """在某事件的 hook 条目里找出指向本项目脚本的那个，没有则返回 None"""
         real_hook_path = os.path.realpath(self.hook_path)
+        for entry in entries:
+            for hook in entry.get('hooks', []):
+                cmd = hook.get('command', '')
+                try:
+                    tokens = shlex.split(cmd)
+                except ValueError:
+                    tokens = cmd.split()
+                for token in tokens:
+                    try:
+                        if os.path.realpath(os.path.expanduser(token)) == real_hook_path:
+                            return hook
+                    except Exception:
+                        pass
+        return None
+
+    def _merge_hooks(self, config, desired_hooks, hook_timeout):
+        """合并本项目 hook，返回 (是否有变更, 待确认超时的 [(event, hook dict)])
+
+        缺失则添加、已有其他 hook 则追加，两者均非破坏操作，直接处理不询问。
+        """
+        changed = False
+        pending_timeout = []
         for event, desired in desired_hooks.items():
             if event not in config['hooks']:
-                status[event] = 'new'
                 config['hooks'][event] = desired
                 changed = True
-                TerminalUI.print_success(f"{event} \u2014 已添加")
+                TerminalUI.print_success(f"{event} — 已添加")
+                continue
+            our_hook = self._find_our_hook(config['hooks'][event])
+            if our_hook is None:
+                # 检测到其他 hook：直接追加本项目 hook（非破坏，保留原有配置）
+                config['hooks'][event].append(desired[0])
+                changed = True
+                TerminalUI.print_success(f"{event} — 已追加")
+            elif event == 'PermissionRequest' and our_hook.get('timeout', 0) != hook_timeout:
+                # 已配置且指向我们的脚本，但超时对不上，留待用户确认
+                pending_timeout.append((event, our_hook))
+                TerminalUI.print_warning(
+                    f"{event} — 超时配置不一致 "
+                    f"(当前 {our_hook.get('timeout', 0)}s, 建议 {hook_timeout}s)")
             else:
-                existing = config['hooks'][event]
-                our_hook = None
-                for entry in existing:
-                    for hook in entry.get('hooks', []):
-                        cmd = hook.get('command', '')
-                        try:
-                            tokens = shlex.split(cmd)
-                        except ValueError:
-                            tokens = cmd.split()
-                        for token in tokens:
-                            try:
-                                if os.path.realpath(os.path.expanduser(token)) == real_hook_path:
-                                    our_hook = hook
-                                    break
-                            except Exception:
-                                pass
-                        if our_hook:
-                            break
-                    if our_hook:
-                        break
-                if our_hook:
-                    if event == 'PermissionRequest' and our_hook.get('timeout', 0) != hook_timeout:
-                        status[event] = 'timeout'
-                        hook_refs[event] = our_hook
-                        TerminalUI.print_warning(
-                            f"{event} \u2014 超时配置不一致 "
-                            f"(当前 {our_hook.get('timeout', 0)}s, 建议 {hook_timeout}s)")
-                    else:
-                        status[event] = 'ok'
-                        TerminalUI.print_success(f"{event} \u2014 无需变更")
-                else:
-                    # 检测到其他 hook：直接追加本项目 hook（非破坏，保留原有配置）
-                    config['hooks'][event].append(desired[0])
-                    status[event] = 'appended'
-                    changed = True
-                    TerminalUI.print_success(f"{event} \u2014 已追加")
+                TerminalUI.print_success(f"{event} — 无需变更")
+        return changed, pending_timeout
 
-        # 处理 PermissionRequest 超时不一致（new/追加 已在上方直接处理）
-        for event, desired in desired_hooks.items():
-            if status[event] == 'timeout':
-                idx = TerminalUI.select_action_or_exit(
-                    f"{event} hook 超时需要更新为 {hook_timeout}s，是否更新？",
-                    hint=f"服务端超时: {server_timeout}s, Hook 超时建议: {server_timeout} + 60 = {hook_timeout}s",
-                    options=[("更新", f"设置为 {hook_timeout}s"),
-                             ("跳过", "保留当前超时配置"),
-                             ("取消", "退出初始化")])
-                if idx == 0:
-                    hook_refs[event]['timeout'] = hook_timeout
-                    TerminalUI.print_success(f"已更新 {event} hook 超时为 {hook_timeout}s")
-                    changed = True
-                else:
-                    TerminalUI.print_info(f"已跳过 {event} hook 超时更新")
+    def _resolve_timeout(self, pending_timeout, hook_timeout, server_timeout):
+        """逐个确认超时不一致的 hook 是否更新，返回是否有实际更新"""
+        changed = False
+        for event, our_hook in pending_timeout:
+            idx = TerminalUI.select_action_or_exit(
+                f"{event} hook 超时需要更新为 {hook_timeout}s，是否更新？",
+                hint=f"服务端超时: {server_timeout}s, Hook 超时建议: {server_timeout} + 60 = {hook_timeout}s",
+                options=[("更新", f"设置为 {hook_timeout}s"),
+                         ("跳过", "保留当前超时配置"),
+                         ("取消", "退出初始化")])
+            if idx == 0:
+                # 只更新 timeout，不覆盖整个 hook 配置
+                our_hook['timeout'] = hook_timeout
+                TerminalUI.print_success(f"已更新 {event} hook 超时为 {hook_timeout}s")
+                changed = True
+            else:
+                TerminalUI.print_info(f"已跳过 {event} hook 超时更新")
+        return changed
 
-        if changed:
-            with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-                f.write('\n')
-            # Codex 特有：hook 定义新增/变更后需用户在 /hooks 信任才会运行
-            TerminalUI.print_warning("Codex 的 hook 默认不自动运行，请重启 Codex 后在 /hooks 里信任本项目 hook")
 
-        return True
+# =============================================================================
+# ClaudeHookConfigurator — settings.json Hook 配置
+# =============================================================================
+
+class ClaudeHookConfigurator(JsonHookConfigurator):
+    """管理 Claude Code Hook 配置（~/.claude/settings.json）"""
+
+    SECTION_TITLE = "配置 Claude Code Hook"
+
+
+# =============================================================================
+# CodexHookConfigurator — hooks.json Hook 配置
+# =============================================================================
+
+class CodexHookConfigurator(JsonHookConfigurator):
+    """管理 Codex CLI Hook 配置（~/.codex/hooks.json）
+
+    schema 与 Claude settings.json 一致，主流程走基类；Codex 特有的是写入前
+    迁移清理旧版 config.toml 残留、写入后提示 hook 信任审查。
+    """
+
+    SECTION_TITLE = "配置 Codex CLI Hook"
+
+    def _before_write(self):
+        # 迁移：清理 config.toml 里旧版的 inline hooks 残留（改用 hooks.json 后避免重复加载）
+        config_toml = os.path.join(os.path.dirname(self.config_file), 'config.toml')
+        if self._strip_legacy_inline_hooks(config_toml, self.hook_path) is True:
+            TerminalUI.print_success("已清理 config.toml 旧版 inline hooks 残留")
+
+    def _after_write(self):
+        # Codex 特有：hook 定义新增/变更后需用户在 /hooks 信任才会运行
+        TerminalUI.print_warning("Codex 的 hook 默认不自动运行，请重启 Codex 后在 /hooks 里信任本项目 hook")
 
     @staticmethod
     def _strip_legacy_inline_hooks(config_toml_path, hook_path):

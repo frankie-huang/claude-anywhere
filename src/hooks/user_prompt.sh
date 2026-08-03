@@ -27,7 +27,7 @@ send_user_prompt_async() {
     # 捕获当前环境变量供后台使用
     local SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
     local WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
-    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
+    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
     local SESSION_ID=$(json_get "$INPUT" "session_id")
     local PROMPT_CONTENT=$(json_get "$INPUT" "prompt")
     local PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(json_get "$INPUT" "cwd")}"

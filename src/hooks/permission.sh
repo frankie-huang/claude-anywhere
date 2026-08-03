@@ -53,8 +53,9 @@ _get_permission_notify_delay() {
 }
 
 SOCKET_PATH=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
+SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
 WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
-CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:8080")
+CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
 NOTIFY_DELAY=$(_get_permission_notify_delay)
 OWNER_ID=$(get_config "FEISHU_OWNER_ID" "")
 
@@ -377,7 +378,8 @@ send_permission_notification() {
 run_interactive_mode() {
     log "Running in interactive mode"
 
-    if [ -z "$WEBHOOK_URL" ]; then
+    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
+    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
         log "FEISHU_WEBHOOK_URL not set, falling back to terminal interaction"
         run_fallback_mode
         return
@@ -532,7 +534,8 @@ run_interactive_mode() {
 run_fallback_mode() {
     log "Running in fallback mode (notification only)"
 
-    if [ -z "$WEBHOOK_URL" ]; then
+    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
+    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
         log "FEISHU_WEBHOOK_URL not set, skipping notification"
         exit $EXIT_FALLBACK
     fi
