@@ -415,6 +415,12 @@ FEISHU_SESSION_MODE = get_session_mode()
 FEISHU_GROUP_NAME_PREFIX = get_config('FEISHU_GROUP_NAME_PREFIX', 'Agent')
 FEISHU_GROUP_DISSOLVE_DAYS = get_config_positive_int('FEISHU_GROUP_DISSOLVE_DAYS', 0)
 
+# 群聊 prompt 前缀是否包含群 ID（仅 group 会话模式生效）
+# False (默认): 不加群 ID
+# True: prompt 前附加 [来自群 {chat_id}]
+# 与 FEISHU_GROUP_ALLOW_COWORK 组合决定完整前缀（协作模式额外附加发送者 ID）
+FEISHU_GROUP_PREFIX_CHAT_ID = get_config('FEISHU_GROUP_PREFIX_CHAT_ID', 'false').lower() in ('true', '1', 'yes')
+
 # 群聊协作模式：允许非 owner 的群成员在群内对话
 # False (默认): 仅 owner 可在群内对话
 # True: 群内所有成员（包括未注册用户）均可对话，消耗 owner 的额度

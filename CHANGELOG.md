@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Changed - 2026-08-02
+
+#### Codex hook 配置改用独立的 hooks.json，不再写入 config.toml
+
+- **背景**：原 `CodexHookConfigurator` 把 hook 以 inline `[hooks]` 写进 `~/.codex/config.toml`，且每次 init 无条件清空文件里所有 `[[hooks.*]]` 段后整体重写——用户已有的其他 hook 被静默清空，零冲突检测
+- **改为**：按官方 [Hooks guide](https://developers.openai.com/codex/hooks) 写入独立的 `~/.codex/hooks.json`，与 Claude 侧 `settings.json` 沿用同一套 JSON 检测/追加逻辑（schema 一致）；不再往 `config.toml` 写入任何 hook，用户其他 Codex 配置零风险，已有其他 hook 时追加本项目 hook 与之共存
+- **timeout**：Codex hook handler 支持 `timeout`（秒，默认 600），保留 `PermissionRequest` 的 `timeout = 服务端超时+60`；与 Claude 一致，不一致时弹确认更新
+- **旧版残留迁移**：老用户 `config.toml` 里已写入的 `[[hooks.*]]` 段若不清理，会与 `hooks.json` 同时生效导致 hook 重复触发。init 时按 `[[hooks.EVENT.hooks]]` 子条目逐个判定，只移除 `command` 指向本项目脚本的子条目——同一事件段下可并存本项目和用户自己的 hook，删除粒度必须下沉到子条目；某事件段的子条目被全部移除时才连同段头一起丢弃。其余配置段与用户自己的 hook 原样保留；无从判定归属的段（不含 `command` 行、`command` 被注释）一律保留。单括号 `[hooks.state]`（Codex 自己维护的 hook 信任状态）按普通配置段处理，不受清理影响
+- **信任审查**：Codex 非托管 hook 不会自动运行，配置变更后提示用户重启 Codex 并在 `/hooks` 里信任本项目 hook
+- **文档同步**：README、QUICKSTART、Codex 测试用例，以及 `agent-adapter`、`permission-notify` 两份 spec 中的 Codex hook 配置路径与格式示例一并更新为 `hooks.json`
+
+### Fixed - 2026-08-01
+
+#### setup.sh init 配置 Claude hook 不再覆盖用户已有的其他 hook
+
+- **背景**：`settings.json` 中同一事件（如 `PermissionRequest`）本就支持挂多个 hook 共存。但 `ClaudeHookConfigurator` 检测到事件已有其他 hook 时弹「是否覆盖」确认，用户选「覆盖」后是 `config['hooks'][event] = desired` 整体替换，会把用户已有的其他 hook 整个丢掉
+- **修复**：改为「追加」语义——保留现有 hook 条目，把本项目 `hook-router.sh` 追加进同一事件的数组与之共存。追加是**非破坏**操作（不碰用户已有配置），故无需用户确认，自动追加即可；与「事件不存在时直接添加」同等处理
+- **范围**：仅 `ClaudeHookConfigurator`（settings.json）。`CodexHookConfigurator`（config.toml）仍是无条件清空所有 `[[hooks.*]]` 段后整体重写，待后续按相同思路改造
+
+### Added - 2026-08-01
+
+#### 群聊 prompt 前缀改为按配置组合，新增 FEISHU_GROUP_PREFIX_CHAT_ID
+
+- **背景**：原前缀只加给协作者（`[来自群成员 xxx]`），owner 发言不带前缀，Agent 无法区分群内说话人；但前缀是对用户 prompt 的侵入，不该无条件添加，故拆成两个开关由用户决定
+- **新增 `FEISHU_GROUP_PREFIX_CHAT_ID`**（per-user，默认 false，仅 group 模式生效）：控制是否附加群 ID。群 ID 在会话内恒定，仅在需要 Agent 识别来源群时开启
+- **`FEISHU_GROUP_ALLOW_COWORK` 决定是否附加发送者 ID**（不区分 owner 与协作者），并在 `setup.sh init` 的选项 hint 中提示该副作用
+- **两开关组合**：仅群 ID → `[来自群 oc_xxx]`；仅协作 → `[来自群成员 ou_xxx]`；同开 → `[来自群 oc_xxx 成员 ou_xxx]`；都关则无前缀。Agent 斜杠命令始终不加前缀，避免破坏解析
+- **配置链路**：`config.py` 默认值 → `main.py`/`auto_register.py` 组装 → `extract_binding_params()` 提取 → `BindingStore.upsert()` 存储（None=保留旧值）→ `feishu` 侧按 binding 读取；`setup.sh init` 中并入"群聊配置"项
+- **顺带补全文档**：`BindingStore` 绑定结构注释补上此前遗漏的 `group_allow_cowork`，并说明运行时注入的 `_collaborator_user_id`/`_original_binding`；`handle_group_card_action` 参数列表补上 `group_allow_cowork`
+
 ### Fixed - 2026-07-29
 
 #### setup.sh init 检测超时被误判为"命令不支持 --print"

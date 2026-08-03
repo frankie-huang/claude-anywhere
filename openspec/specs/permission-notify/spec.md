@@ -106,7 +106,7 @@ TBD - created by archiving change add-permission-notify. Update Purpose after ar
 
 - **GIVEN** `ENABLED_AGENTS` 包含 `codex`
 - **WHEN** 执行 hook 配置初始化
-- **THEN** 在 `~/.codex/config.toml` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
+- **THEN** 在 `~/.codex/hooks.json` 中注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` hook
 - **AND** hook command 指向 `src/hook-router.sh`
 - **AND** `PermissionRequest` hook 的 timeout 为 `PERMISSION_REQUEST_TIMEOUT + 60` 秒
 

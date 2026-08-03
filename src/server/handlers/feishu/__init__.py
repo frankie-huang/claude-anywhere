@@ -271,12 +271,24 @@ def _handle_message_event(data: dict):
         return
 
     if SessionFacade.RouteSource.is_resolved(route_source):
-        # 协作者：添加发送者前缀（binding 已替换为 owner 的，转发天然正确）
+        # group 会话模式下按用户配置给 prompt 加前缀（对 prompt 有侵入，故由配置控制）：
+        #   仅 chat_id 开关   → [来自群 {chat_id}]
+        #   仅协作模式        → [来自群成员 {user_id}]
+        #   两者同开          → [来自群 {chat_id} 成员 {user_id}]
+        # 协作模式下 binding 已替换为 owner 的，转发天然正确；发送者不区分 owner 与协作者
         # Agent 斜杠命令不加前缀，否则 Agent 无法解析（如 /compact → "[来自群成员 xxx] /compact"）
         collaborator_user_id = binding.get('_collaborator_user_id', '')
+        if (chat_type == 'group' and binding.get('session_mode') == 'group'
+                and not is_slash_cmd):
+            with_chat = bool(binding.get('group_prefix_chat_id'))
+            with_member = bool(binding.get('group_allow_cowork'))
+            if with_chat and with_member:
+                prompt = "[来自群 %s 成员 %s] %s" % (chat_id, user_id, prompt)
+            elif with_chat:
+                prompt = "[来自群 %s] %s" % (chat_id, prompt)
+            elif with_member:
+                prompt = "[来自群成员 %s] %s" % (user_id, prompt)
         if collaborator_user_id:
-            if not is_slash_cmd:
-                prompt = "[来自群成员 %s] %s" % (collaborator_user_id, prompt)
             logger.info("[feishu] Collaborator route to session (%s): session_id=%s, collaborator=%s, prompt=%s",
                         route_source, route_info['session_id'], collaborator_user_id, _sanitize_user_content(prompt))
         else:

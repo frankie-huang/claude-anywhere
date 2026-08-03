@@ -65,15 +65,20 @@ Codex 支持与 Claude Code 相同的 hook 事件：
 | `PostToolUse` | 是 | 工具执行后 |
 | `SessionStart` | 是 | 会话启动时 |
 
-Hook 配置格式（`~/.codex/config.toml`）与 Claude Code 的 `settings.json` 结构一致，只是用 TOML 语法：
+Hook 配置格式（`~/.codex/hooks.json`）与 Claude Code 的 `settings.json` 结构一致（同 schema）：
 
-```toml
-[[hooks.PermissionRequest]]
-
-[[hooks.PermissionRequest.hooks]]
-type = "command"
-command = "/path/to/hook-router.sh"
-timeout = 660
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          { "type": "command", "command": "/path/to/hook-router.sh", "timeout": 660 }
+        ]
+      }
+    ]
+  }
+}
 ```
 
 ### 2.5 MCP 支持情况
@@ -162,7 +167,7 @@ codex exec resume --json <session_id> "prompt"
 
 ### 4.3 Hook 配置
 
-虽然 `PermissionRequest` 在 exec 模式下不触发，仍在 `~/.codex/config.toml` 中配置了三个 hook（`UserPromptSubmit`、`Stop`、`PermissionRequest`），为后续 Codex 支持 exec 模式权限请求做准备。
+虽然 `PermissionRequest` 在 exec 模式下不触发，仍在 `~/.codex/hooks.json` 中配置了三个 hook（`UserPromptSubmit`、`Stop`、`PermissionRequest`），为后续 Codex 支持 exec 模式权限请求做准备。
 
 ---
 

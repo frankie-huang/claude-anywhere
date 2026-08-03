@@ -102,7 +102,8 @@ class AutoRegister:
             FEISHU_REPLY_IN_THREAD,
             FEISHU_SESSION_MODE, DEFAULT_CHAT_DIR,
             DEFAULT_CHAT_FOLLOW_THREAD, FEISHU_GROUP_NAME_PREFIX,
-            FEISHU_GROUP_DISSOLVE_DAYS, FEISHU_GROUP_ALLOW_COWORK
+            FEISHU_GROUP_DISSOLVE_DAYS, FEISHU_GROUP_PREFIX_CHAT_ID,
+            FEISHU_GROUP_ALLOW_COWORK
         )
         from agents import get_all_agent_commands
         from config import get_default_agent
@@ -124,6 +125,7 @@ class AutoRegister:
             'default_chat_follow_thread': DEFAULT_CHAT_FOLLOW_THREAD,
             'group_name_prefix': FEISHU_GROUP_NAME_PREFIX,
             'group_dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+            'group_prefix_chat_id': FEISHU_GROUP_PREFIX_CHAT_ID,
             'group_allow_cowork': FEISHU_GROUP_ALLOW_COWORK,
         }
         success, message = self._do_register(

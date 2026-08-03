@@ -574,6 +574,7 @@ def main():
                                 FEISHU_SESSION_MODE,
                                 DEFAULT_CHAT_FOLLOW_THREAD,
                                 FEISHU_GROUP_NAME_PREFIX, FEISHU_GROUP_DISSOLVE_DAYS,
+                                FEISHU_GROUP_PREFIX_CHAT_ID,
                                 FEISHU_GROUP_ALLOW_COWORK,
                                 get_default_agent)
             from agents import get_all_agent_commands
@@ -588,6 +589,7 @@ def main():
                 'default_chat_follow_thread': DEFAULT_CHAT_FOLLOW_THREAD,
                 'group_name_prefix': FEISHU_GROUP_NAME_PREFIX,
                 'group_dissolve_days': FEISHU_GROUP_DISSOLVE_DAYS,
+                'group_prefix_chat_id': FEISHU_GROUP_PREFIX_CHAT_ID,
                 'group_allow_cowork': FEISHU_GROUP_ALLOW_COWORK,
             }
             start_ws_tunnel_client(

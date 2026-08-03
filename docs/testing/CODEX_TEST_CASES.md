@@ -7,7 +7,7 @@
 
 1. `.env` 中设置 `ENABLED_AGENTS=codex`，或 `ENABLED_AGENTS=claude,codex` 且 `DEFAULT_AGENT=codex`
 2. 执行 `./setup.sh restart` 重启后端
-3. 确认 `~/.codex/config.toml` 中 hook 已注入（`./setup.sh init`）
+3. 确认 `~/.codex/hooks.json` 中 hook 已注入（`./setup.sh init`），并在 Codex 的 `/hooks` 中信任
 4. Codex CLI 已安装且可用（`codex --version`）
 
 ---

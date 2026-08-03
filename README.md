@@ -576,28 +576,49 @@ export FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx"
 
 > **注意**：PermissionRequest hook 的 `timeout`（秒）建议配置为大于服务端 `PERMISSION_REQUEST_TIMEOUT`（默认值见 `.env.example`）的值，确保服务端超时先触发，避免 hook 被 Claude Code 强制终止。上例配置为 660 秒。
 
-**Codex**（`~/.codex/config.toml`）：
+**Codex**（`~/.codex/hooks.json`）：
 
-```toml
-[[hooks.UserPromptSubmit]]
-
-  [[hooks.UserPromptSubmit.hooks]]
-    type = "command"
-    command = "/path/to/code-anywhere/src/hook-router.sh"
-
-[[hooks.Stop]]
-
-  [[hooks.Stop.hooks]]
-    type = "command"
-    command = "/path/to/code-anywhere/src/hook-router.sh"
-
-[[hooks.PermissionRequest]]
-
-  [[hooks.PermissionRequest.hooks]]
-    type = "command"
-    command = "/path/to/code-anywhere/src/hook-router.sh"
-    timeout = 660
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/code-anywhere/src/hook-router.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/code-anywhere/src/hook-router.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/code-anywhere/src/hook-router.sh",
+            "timeout": 660
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
+
+> **注意**：Codex 的非托管 hook 默认不会自动运行，配置后需重启 Codex 并在 `/hooks` 中信任本项目 hook。
+>
+> 若使用过旧版本（hook 写在 `~/.codex/config.toml` 的 `[[hooks.*]]` 段），重跑 `./setup.sh init` 会自动清理这些残留，避免与 `hooks.json` 重复触发。清理粒度是 `[[hooks.EVENT.hooks]]` 子条目，只移除 `command` 指向本项目脚本的那条——同一事件段下你自己配置的 hook 会保留下来（该段子条目被移除干净时才连同段头一起丢弃），其他配置段不受影响。
 
 ### 环境变量
 

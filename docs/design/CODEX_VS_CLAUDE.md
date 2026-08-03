@@ -51,8 +51,8 @@
 
 | 项目 | Claude | Codex |
 |------|--------|-------|
-| 配置文件 | `~/.claude/settings.json` | `~/.codex/config.toml` |
-| 格式 | JSON | TOML（`[[hooks.EventName]]` 数组语法） |
+| 配置文件 | `~/.claude/settings.json` | `~/.codex/hooks.json` |
+| 格式 | JSON | JSON（`hooks.json`，与 Claude 同 schema） |
 | 信任机制 | 自动加载 | 首次运行需 review，hash 存入 `hooks.state` |
 | 配置工具 | `HookConfigurator` | `CodexHookConfigurator` |
 

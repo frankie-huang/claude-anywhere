@@ -62,7 +62,7 @@ cd hooks
 
 安装脚本会自动完成：
 - 检测环境依赖（不会自动安装，缺失时提示命令）
-- 将 Hook 注册到 Agent CLI 配置文件（Claude: `~/.claude/settings.json`，Codex: `~/.codex/config.toml`）
+- 将 Hook 注册到 Agent CLI 配置文件（Claude: `~/.claude/settings.json`，Codex: `~/.codex/hooks.json`）
 - 生成 `.env` 配置文件（从 .env.example 复制）
 
 > 如果安装时选择跳过 hooks 配置，可手动配置。Claude Code 合并到 `~/.claude/settings.json`：
@@ -90,7 +90,7 @@ cd hooks
 > }
 > ```
 >
-> Codex 配置到 `~/.codex/config.toml`，格式参考 [README Hook 配置](README.md#3-配置-agent-hooks)。
+> Codex 配置到 `~/.codex/hooks.json`，格式参考 [README Hook 配置](README.md#3-配置-agent-hooks)。
 >
 > 将 `/path/to/hooks` 替换为实际安装路径。
 
@@ -142,7 +142,7 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook地
 ```bash
 ./install.sh --check                                              # 检查环境
 cat ~/.claude/settings.json | python3 -m json.tool | grep hook-router  # 确认 Claude Hook 注册
-grep hook-router ~/.codex/config.toml 2>/dev/null                          # 确认 Codex Hook 注册（如已启用）
+grep hook-router ~/.codex/hooks.json 2>/dev/null                           # 确认 Codex Hook 注册（如已启用）
 curl -s --noproxy '*' -H "X-Auth-Token: $(python3 -c 'import json;print(json.load(open("runtime/auth_token.json"))["auth_token"])')" http://127.0.0.1:8080/status | python3 -m json.tool  # 确认服务运行
 ```
 

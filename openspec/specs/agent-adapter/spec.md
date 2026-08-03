@@ -161,23 +161,100 @@ TBD - created by archiving change add-codex-support. Update Purpose after archiv
 
 ### Requirement: Codex Hook 配置写入
 
-`setup_init.py` SHALL 在 `ENABLED_AGENTS` 包含 `codex` 时为 Codex 生成 `config.toml` 格式的 hook 配置。
+`setup_init.py` SHALL 在 `ENABLED_AGENTS` 包含 `codex` 时，将 hook 配置写入独立的 `~/.codex/hooks.json`，采用「追加」语义保留用户已有 hook，并清理旧版写入 `config.toml` 的残留。
 
 #### Scenario: 写入 Codex hook 配置
 
 - **GIVEN** `ENABLED_AGENTS` 包含 `codex`
+- **AND** `~/.codex/hooks.json` 不存在
 - **WHEN** 执行 `setup_init.py` 初始化
-- **THEN** 在 `~/.codex/config.toml` 中写入 `[hooks]` 段
+- **THEN** 创建 `~/.codex/hooks.json`，顶层为 `{"hooks": {...}}` 结构
 - **AND** 注册 `UserPromptSubmit`、`PermissionRequest`、`Stop` 三个 hook 事件
-- **AND** 每个 hook 的 `command` 指向 `src/hook-router.sh`
+- **AND** 每个 hook 的 `type` 为 `command`、`command` 指向 `src/hook-router.sh`
 - **AND** `PermissionRequest` hook 的 `timeout` 为 `PERMISSION_REQUEST_TIMEOUT + 60` 秒
 
-#### Scenario: 不覆盖已有非 hook 配置
+#### Scenario: 事件已有其他 hook 时追加共存
+
+- **GIVEN** `~/.codex/hooks.json` 中某事件已配置了用户自己的 hook
+- **WHEN** 写入 hook 配置
+- **THEN** 将本项目 hook 追加进该事件的数组，与已有 hook 共存
+- **AND** 不修改也不移除用户已有的 hook 条目
+- **AND** 追加是非破坏操作，无需用户确认
+
+#### Scenario: 本项目 hook 已存在且超时一致
+
+- **GIVEN** `~/.codex/hooks.json` 中某事件已配置指向本项目脚本的 hook
+- **AND** `PermissionRequest` 的 `timeout` 等于 `PERMISSION_REQUEST_TIMEOUT + 60`
+- **WHEN** 写入 hook 配置
+- **THEN** 该事件标记为「无需变更」，不重复追加
+
+#### Scenario: PermissionRequest 超时不一致时确认更新
+
+- **GIVEN** `~/.codex/hooks.json` 中 `PermissionRequest` 已指向本项目脚本
+- **AND** 其 `timeout` 与 `PERMISSION_REQUEST_TIMEOUT + 60` 不一致
+- **WHEN** 写入 hook 配置
+- **THEN** 提示当前值与建议值，让用户选择「更新 / 跳过 / 取消」
+- **AND** 选择「更新」时仅原地更新 `timeout` 字段，不覆盖整个 hook 条目
+
+#### Scenario: 不修改 config.toml 中的非 hook 配置
 
 - **GIVEN** `~/.codex/config.toml` 已存在且包含 `[mcp_servers]` 等其他段
 - **WHEN** 写入 hook 配置
-- **THEN** 仅更新 `[[hooks.*]]` 段
-- **AND** 保留其他配置段不变
+- **THEN** 不向 `config.toml` 写入任何 hook 配置
+- **AND** 保留其中所有非 hook 配置段不变
+
+#### Scenario: 清理旧版 config.toml 中的 inline hooks 残留
+
+- **GIVEN** `~/.codex/config.toml` 中存在旧版写入的 `[[hooks.*]]` 段
+- **AND** 这些段的 `command` 指向本项目 `hook-router.sh`
+- **WHEN** 执行 `setup_init.py` 初始化
+- **THEN** 按 `[[hooks.EVENT.hooks]]` 子条目逐个判定，移除命中本项目脚本的子条目
+- **AND** 某事件段的子条目被全部移除时，连同 `[[hooks.EVENT]]` 段头一起丢弃
+- **AND** 保留其余配置段
+- **AND** 提示已清理旧版残留
+- **AND** 避免 `config.toml` 与 `hooks.json` 同时定义导致 hook 重复触发
+
+#### Scenario: 同一事件段内本项目与用户 hook 并存
+
+- **GIVEN** `~/.codex/config.toml` 的同一个 `[[hooks.Stop]]` 段下挂有两个 `[[hooks.Stop.hooks]]` 子条目
+- **AND** 其一的 `command` 指向本项目脚本，另一个是用户自己的 hook
+- **WHEN** 执行 `setup_init.py` 初始化
+- **THEN** 仅移除指向本项目脚本的那个子条目
+- **AND** 保留 `[[hooks.Stop]]` 段头与用户自己的子条目
+
+#### Scenario: 残留与用户自己的 hook 分处不同事件段
+
+- **GIVEN** `~/.codex/config.toml` 中某个 `[[hooks.*]]` 段属于本项目，另一个属于用户自己
+- **WHEN** 执行 `setup_init.py` 初始化
+- **THEN** 仅移除本项目 hook 所在的段
+- **AND** 保留用户自己的 hook 段不变
+
+#### Scenario: 无从判定归属的 hook 段一律保留
+
+- **GIVEN** `~/.codex/config.toml` 中某 `[[hooks.*]]` 段不含 `command` 行（如非 `command` 类型的 hook，或 `command` 行被注释掉）
+- **WHEN** 执行 `setup_init.py` 初始化
+- **THEN** 保留该段不变
+- **AND** 不因同文件中存在本项目残留而连带移除该段
+
+#### Scenario: 保留 Codex 自身维护的 hooks 状态段
+
+- **GIVEN** `~/.codex/config.toml` 中存在 Codex 自己写入的单括号 `[hooks.state]` 段（记录 hook 信任状态的 `trusted_hash`）
+- **WHEN** 清理旧版 inline hooks 残留
+- **THEN** 保留 `[hooks.state]` 及其下所有条目
+- **AND** 不论该段位于 `[[hooks.*]]` 定义段之前、之后还是之间，结果一致
+
+#### Scenario: 识别数组写法的 command
+
+- **GIVEN** 旧版残留的 `command` 写成数组形式 `["bash", "-c", "<hook-router.sh 路径>"]`
+- **WHEN** 执行 `setup_init.py` 初始化
+- **THEN** 识别出该段指向本项目脚本并移除
+
+#### Scenario: 提示 Codex hook 信任审查
+
+- **GIVEN** 本次初始化实际写入了 `hooks.json`
+- **WHEN** 写入完成
+- **THEN** 提示用户重启 Codex 并在 `/hooks` 中信任本项目 hook
+- **AND** 说明非托管 hook 默认不会自动运行
 
 ### Requirement: Codex 权限审批路径
 

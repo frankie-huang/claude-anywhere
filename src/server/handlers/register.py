@@ -81,6 +81,7 @@ def extract_binding_params(data: Dict[str, Any]) -> Dict[str, Any]:
             default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
             group_name_prefix: 群聊名称前缀（None=未传，保留旧值）
             group_dissolve_days: 群聊自动解散天数（None=未传，保留旧值）
+            group_prefix_chat_id: 群聊 prompt 前缀是否含群 ID（None=未传，保留旧值）
             group_allow_cowork: 群聊协作者模式（None=未传，保留旧值）
     """
     # 入口转换：优先使用 session_mode，旧客户端用 reply_in_thread 映射
@@ -98,6 +99,7 @@ def extract_binding_params(data: Dict[str, Any]) -> Dict[str, Any]:
         'default_chat_follow_thread': data.get('default_chat_follow_thread', True),
         'group_name_prefix': data.get('group_name_prefix'),
         'group_dissolve_days': data.get('group_dissolve_days'),
+        'group_prefix_chat_id': data.get('group_prefix_chat_id'),
         'group_allow_cowork': data.get('group_allow_cowork'),
     }
 
@@ -131,6 +133,7 @@ def handle_register_request(data: dict, client_ip: str = '') -> Tuple[bool, dict
             - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（可选）
             - group_name_prefix: 群聊名称前缀（可选）
             - group_dissolve_days: 群聊自动解散天数（可选）
+            - group_prefix_chat_id: 群聊 prompt 前缀是否含群 ID（可选）
             - group_allow_cowork: 群聊协作者模式（可选）
         client_ip: 客户端 IP 地址
 

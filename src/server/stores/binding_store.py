@@ -35,12 +35,15 @@ class BindingStore(JsonStore):
             "default_chat_session_id": "uuid-xxx",
             "group_name_prefix": "Agent",
             "group_dissolve_days": 7,
+            "group_prefix_chat_id": false,
+            "group_allow_cowork": false,
             "updated_at": 1706745600,
             "registered_ip": "1.2.3.4"
         }
     }
 
-    注意: get() 方法返回的绑定信息会自动注入 _owner_id 字段。
+    注意: get() 方法返回的绑定信息会自动注入 _owner_id 字段；
+    协作者场景下上层还会临时注入 _collaborator_user_id / _original_binding（不持久化）。
     """
 
     STORE_NAME = 'bindings'
@@ -92,6 +95,7 @@ class BindingStore(JsonStore):
                 default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式
                 group_name_prefix: 群聊名称前缀（None=保留旧值；含 '' 显式写入）
                 group_dissolve_days: 群聊自动解散天数（None=保留旧值；含 0 显式写入）
+                group_prefix_chat_id: 群聊 prompt 前缀是否含群 ID（None=保留旧值；True/False 显式写入）
                 group_allow_cowork: 群聊协作者模式（None=保留旧值；True/False 显式写入）
 
         Returns:
@@ -108,6 +112,7 @@ class BindingStore(JsonStore):
         default_chat_follow_thread = binding_params.get('default_chat_follow_thread', True)
         group_name_prefix = binding_params.get('group_name_prefix')
         group_dissolve_days = binding_params.get('group_dissolve_days')
+        group_prefix_chat_id = binding_params.get('group_prefix_chat_id')
         group_allow_cowork = binding_params.get('group_allow_cowork')
         with self._file_lock:
             try:
@@ -164,6 +169,11 @@ class BindingStore(JsonStore):
                     binding_data['group_dissolve_days'] = group_dissolve_days
                 elif existing and 'group_dissolve_days' in existing:
                     binding_data['group_dissolve_days'] = existing['group_dissolve_days']
+                # group_prefix_chat_id：None = 调用方未传，保留旧值；True/False 显式写入
+                if group_prefix_chat_id is not None:
+                    binding_data['group_prefix_chat_id'] = bool(group_prefix_chat_id)
+                elif existing and 'group_prefix_chat_id' in existing:
+                    binding_data['group_prefix_chat_id'] = existing['group_prefix_chat_id']
                 # group_allow_cowork：None = 调用方未传，保留旧值；True/False 显式写入
                 if group_allow_cowork is not None:
                     binding_data['group_allow_cowork'] = bool(group_allow_cowork)

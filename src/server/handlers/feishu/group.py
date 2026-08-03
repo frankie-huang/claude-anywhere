@@ -52,6 +52,8 @@ def handle_card_action_register(value: dict) -> Tuple[bool, dict]:
             - default_chat_follow_thread: 默认聊天目录是否跟随全局话题模式（仅 approve_register 需要）
             - group_name_prefix: 群聊名称前缀（仅 approve_register 需要）
             - group_dissolve_days: 群聊自动解散天数（仅 approve_register 需要）
+            - group_prefix_chat_id: 群聊 prompt 前缀是否含群 ID（仅 approve_register 需要）
+            - group_allow_cowork: 群聊协作者模式（仅 approve_register 需要）
 
     Returns:
         (handled, response) - response 包含 toast 和可选的 card 更新
