@@ -40,7 +40,7 @@ EXIT_HOOK_ERROR=2
 # 从 runtime/notify_config.json 读取权限通知延迟（/notify delay 设置），默认 0
 _get_permission_notify_delay() {
     local config_json delay
-    config_json=$(_get_notify_config)
+    config_json=$(get_notify_config)
     if [ -n "$config_json" ]; then
         delay=$(json_get "$config_json" "permission_delay")
         # 非负整数才采用，否则回落到默认值 0
@@ -53,11 +53,8 @@ _get_permission_notify_delay() {
 }
 
 SOCKET_PATH=$(get_config "PERMISSION_SOCKET_PATH" "/tmp/claude-permission.sock")
-SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
-WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
-CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
 NOTIFY_DELAY=$(_get_permission_notify_delay)
-OWNER_ID=$(get_config "FEISHU_OWNER_ID" "")
+OWNER_ID=$(im_get_owner_id)
 
 # MCP 模式下跳过延迟等待（用户无法在终端操作）
 if [ "${MCP_MODE:-}" = "1" ]; then
@@ -352,35 +349,14 @@ prepare_common_vars() {
 }
 
 # =============================================================================
-# 发送飞书通知卡片
-# =============================================================================
-# 参数:
-#   $1 - buttons_json (可选，空则无按钮)
-#   $2 - footer_hint (可选，自定义底部提示)
-# =============================================================================
-send_permission_notification() {
-    local buttons="${1:-}"
-    local custom_footer_hint="${2:-}"
-
-    # 构建飞书卡片
-    local card
-    card=$(build_permission_card "$TOOL_NAME" "$PROJECT_NAME" "$TIMESTAMP" "$COMMAND_CONTENT" "$DESCRIPTION" "$TEMPLATE_COLOR" "$buttons" "$SESSION_ID" "$custom_footer_hint")
-
-    # 传递 session_id、project_dir、callback_url、chat_id、reply_to 支持链式回复
-    local options
-    options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
-    send_feishu_card "$card" "$options"
-}
-
-# =============================================================================
 # 交互模式主流程
 # =============================================================================
 run_interactive_mode() {
     log "Running in interactive mode"
 
-    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
-    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
-        log "FEISHU_WEBHOOK_URL not set, falling back to terminal interaction"
+    # 检查是否有可用的发送渠道
+    if ! im_channel_ready; then
+        log "IM channel not ready, falling back to terminal interaction"
         run_fallback_mode
         return
     fi
@@ -389,7 +365,7 @@ run_interactive_mode() {
     prepare_common_vars
 
     # 前置解析 chat_id 并检查 mute 状态，muted 时回退到终端审批
-    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    RESOLVED_CHAT_ID=$(get_chat_id "$SESSION_ID" "$PROJECT_DIR")
     if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
         log "Session muted, falling back to terminal: $SESSION_ID"
         exit $EXIT_FALLBACK
@@ -406,24 +382,21 @@ run_interactive_mode() {
         local questions_json
         questions_json=$(json_get_array "$INPUT" "tool_input.questions")
 
+        # 出错时降级为纯提示通知，不带交互按钮
+        local no_buttons=true
+
         if [ -z "$questions_json" ] || [ "$questions_json" = "[]" ]; then
             log "Error: Failed to extract questions from input"
-            send_permission_notification "" "AskUserQuestion 解析失败，请回退终端"
+            send_permission_notification "AskUserQuestion 解析失败，请回退终端" "$no_buttons"
             exit $EXIT_FALLBACK
         fi
 
-        # 构建 AskUserQuestion 卡片
-        local ask_card
-        if ! ask_card=$(build_ask_question_card "$questions_json" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$REQUEST_ID" "$OWNER_ID") || [ -z "$ask_card" ]; then
-            log "Error: Failed to build AskUserQuestion card"
-            send_permission_notification "" "AskUserQuestion 卡片构建失败，请回退终端"
+        # 发送 AskUserQuestion 表单通知
+        if ! send_ask_question_notification "$questions_json"; then
+            log "Error: Failed to build AskUserQuestion notification"
+            send_permission_notification "AskUserQuestion 卡片构建失败，请回退终端" "$no_buttons"
             exit $EXIT_FALLBACK
         fi
-
-        # 发送卡片
-        local ask_options
-        ask_options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
-        send_feishu_card "$ask_card" "$ask_options"
 
         # 构建请求 JSON（携带 raw_input_encoded + questions_encoded）
         local request_json
@@ -470,14 +443,9 @@ run_interactive_mode() {
         fi
     fi
 
-    # 非 AskUserQuestion 的其他 permission 请求：发送带交互按钮的权限卡片
-    # 构建交互按钮（根据 FEISHU_SEND_MODE 自动选择按钮类型）
-    local buttons
-    buttons=$(build_permission_buttons "$CALLBACK_SERVER_URL" "$REQUEST_ID" "$OWNER_ID")
-
-    # 发送带按钮的飞书卡片
-    log "Sending interactive Feishu card"
-    send_permission_notification "$buttons"
+    # 非 AskUserQuestion 的其他 permission 请求：发送带交互按钮的权限通知
+    log "Sending interactive permission notification"
+    send_permission_notification
 
     # 构建请求 JSON
     local request_json
@@ -534,9 +502,9 @@ run_interactive_mode() {
 run_fallback_mode() {
     log "Running in fallback mode (notification only)"
 
-    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
-    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
-        log "FEISHU_WEBHOOK_URL not set, skipping notification"
+    # 检查是否有可用的发送渠道
+    if ! im_channel_ready; then
+        log "IM channel not ready, skipping notification"
         exit $EXIT_FALLBACK
     fi
 
@@ -544,7 +512,7 @@ run_fallback_mode() {
     prepare_common_vars
 
     # 前置解析 chat_id 并检查 mute 状态，muted 时跳过通知
-    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    RESOLVED_CHAT_ID=$(get_chat_id "$SESSION_ID" "$PROJECT_DIR")
     if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
         log "Session muted, skipping fallback notification: $SESSION_ID"
         exit $EXIT_FALLBACK
@@ -555,8 +523,9 @@ run_fallback_mode() {
         exit $EXIT_FALLBACK
     fi
 
-    # 发送不带按钮的通知卡片
-    send_permission_notification ""
+    # 发送不带交互按钮的通知（降级模式）
+    local no_buttons=true
+    send_permission_notification "" "$no_buttons"
 
     log "Fallback notification sent"
     exit $EXIT_FALLBACK

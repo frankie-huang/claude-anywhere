@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Released]
 
+### Refactored - 2026-08-09
+
+#### Shell Hook 层抽象出 IM 平台中间层，飞书实现下沉
+
+- **背景**：三个 Hook 脚本直读 `FEISHU_SEND_MODE` / `FEISHU_WEBHOOK_URL` / `FEISHU_OWNER_ID`，直接调 `build_permission_card` / `build_stop_card` / `send_feishu_card` / `_resolve_chat_id`，「与后端通信」「与飞书通信」两件事完全缠在一起。接入第二个 IM 平台需要改动每个 Hook
+- **新增 `src/lib/callback.sh`**：从 `feishu.sh` 抽出与 IM 平台无关的 Callback 后端客户端——HTTP 请求（`do_curl_post` / `do_callback_post`）、凭证（`get_auth_token`）、网关地址解析（`get_gateway_url`）、会话查询与上报（`query_chat_id` / `check_skip_user_prompt` / `capture_session_env`）、Agent 展示信息，以及 `MUTED_SENTINEL` / `HTTP_TIMEOUT` / `CALLBACK_SERVER_URL` 等常量。搬移时函数体逐字节不变
+- **新增 `src/lib/im.sh`**：Hook 与平台之间的唯一接口层。读 `IM_PLATFORM`（默认 feishu）加载 `callback.sh` + 对应平台实现，对外暴露 `im_channel_ready` / `im_get_owner_id` / `get_chat_id` / `send_user_prompt_notification` / `send_permission_notification` / `send_ask_question_notification` / `send_stop_notification`。未知平台 fail-fast 并同时输出 stderr（`log_error` 只写日志文件，仅靠它会导致配置错误后所有 Hook 静默失效）
+- **飞书实现下沉**：`feishu.sh` 新增 `_feishu_send_*` 系列承接卡片构建与发送，`build_response_elements` 从 `stop.sh` 迁入。三个 Hook 不再出现任何飞书标识
+- **策略与渲染分离**：`_build_at_user_tag` 拆为 `resolve_at_target`（判定该 @ 谁，5 级优先级，平台无关）+ 飞书 at 标签渲染；`build_response_elements` 拆为 `build_response_content`（按长度截断 texts、标记 truncated）+ 卡片元素渲染。`STOP_MESSAGE_MAX_LENGTH` 随之只出现在 `stop.sh`，与 `STOP_THINKING_MAX_LENGTH` 对称
+- **命名对齐**：`callback.sh` 12 个被跨文件调用的函数去掉 `_` 前缀，符合仓内既有约定（无 `_` = 模块公开 API）；`_get_chat_id` 与 `im.sh` 的 `get_chat_id` 派发入口撞名会递归，改名为 `query_chat_id`
+- **新增平台的改动面**：新建 `src/lib/<platform>.sh` 实现 `_<platform>_*` 系列，在 `im.sh` 各 `case` 注册，Hook 脚本零改动
+- **配置**：新增 `IM_PLATFORM`（默认 feishu，当前仅支持 feishu）
+- **等价性**：逐条通路与改造前基线比对——permission 5 场景（交互/muted/降级/AskUserQuestion/questions 为空）、stop 5 场景（正常/muted/空 transcript/禁用 thinking/超长截断）、user_prompt 3 场景，落到假网关的请求序列与 payload 逐字节一致；at 判定 13 种优先级组合、截断与渲染 11 组用例 × jq/python3 双解析路径分别比对一致；全程单测 90/90、E2E 4/4
+
+### Fixed - 2026-08-09
+
+#### stop 通知的 muted 会话漏拦与卡片会话定位错误
+
+- **背景**：`SESSION_ID` 原从 `response_json` 派生（`extract_response` 的产物），与 Stop 事件自带的 session_id 冗余；transcript 提取失败时 `SESSION_ID` 为空，导致其后的 mute 检查整块被跳过
+- **修复**：`SESSION_ID` 直接取自 Stop 事件输入，与 `permission.sh` / `user_prompt.sh` 写法对齐，删除 `INPUT_SESSION_ID` 与 response_json 派生两处冗余。muted 会话现在无论 transcript 是否提取成功都被正确拦截；空响应时的兜底卡片也不再带着空 session/chat 发出（原先无法投递到正确会话）
+- **顺带**：mute 检查前移到 `extract_response` 之前，muted 时省掉 transcript 读取与 jq/python 解析
+
 ### Refactored - 2026-08-03
 
 #### Claude / Codex hook 配置逻辑合并到 JsonHookConfigurator 基类

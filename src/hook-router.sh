@@ -32,8 +32,9 @@ source "$SCRIPT_DIR/lib/core.sh"
 source "$LIB_DIR/json.sh"
 json_init
 
-# 引入飞书/通信函数库（子脚本共享，不需要重复 source）
-source "$LIB_DIR/feishu.sh"
+# 引入 IM 平台函数库（子脚本共享，不需要重复 source）
+# im.sh 按 IM_PLATFORM 加载 callback.sh + 对应平台实现
+source "$LIB_DIR/im.sh"
 
 # 初始化日志
 log_init
@@ -79,7 +80,7 @@ log "Hook router received event: $HOOK_EVENT, agent: $AGENT_TYPE"
 # =============================================================================
 # callback 的 launch_agent 把 message_id 注入到子进程环境（CODE_ANYWHERE_MESSAGE_ID），
 # 此处统一捕获并导出为 REPLY_TO_MSG_ID，供 stop/permission 等 hook 作为卡片 reply_to。
-# 终端发起（无飞书消息）时为空，下游 send_feishu_card 自动 fallback 到查 last_message_id。
+# 终端发起（无 IM 消息）时为空，下游平台实现自动 fallback 到查 last_message_id。
 REPLY_TO_MSG_ID="${CODE_ANYWHERE_MESSAGE_ID:-}"
 export REPLY_TO_MSG_ID
 log "Reply target message_id: ${REPLY_TO_MSG_ID:-<none, will fallback to last_message_id>}"
@@ -102,7 +103,7 @@ if [ "${MCP_MODE:-}" != "1" ]; then
     # 仅非 MCP 模式：MCP 下 env 来自 server 进程而非用户 shell，捕获无意义
     _session_id=$(json_get "$INPUT" "session_id")
     if [ -n "$_session_id" ] && [ "$_session_id" != "null" ]; then
-        _capture_session_env "$_session_id" >/dev/null 2>&1 &  # 后台执行，不阻塞 hook 主流程
+        capture_session_env "$_session_id" >/dev/null 2>&1 &  # 后台执行，不阻塞 hook 主流程
     fi
     unset _session_id
 fi

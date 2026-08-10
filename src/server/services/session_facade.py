@@ -16,7 +16,7 @@
       - mute_dir / unmute_dir：透传 callback 端的目录级静音指令
 
 mute 状态说明：
-    权威源与拦截点均在 callback 端（session_chat_store + hook 脚本的 _get_chat_id）。
+    权威源与拦截点均在 callback 端（session_chat_store + hook 脚本的 get_chat_id）。
     网关仅在用户执行 /mute、/unmute 命令时透传到 callback，不缓存、不拦截。
     自动解除静音由 callback 端 handle_continue_session 处理。
     目录级 mute 存储在 DirectoryStore，终端发起的新会话自动继承目录 mute 状态。

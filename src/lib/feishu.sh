@@ -7,6 +7,9 @@
 #   提供飞书卡片消息的构建、渲染和发送功能
 #   支持模板化渲染,提供子模板组合能力
 #
+# 依赖:
+#   callback.sh - 平台无关的 Callback 后端客户端（HTTP 请求、凭证、session 查询）
+#
 # 主要函数:
 #   render_template()         - 渲染模板文件(变量替换)
 #   render_sub_template()     - 渲染子模板元素
@@ -46,21 +49,17 @@ if ! type json_init &> /dev/null; then
     source "${BASH_SOURCE[0]%/*}/json.sh"
 fi
 
-# muted session 哨兵值：_get_chat_id / _resolve_chat_id 返回此值表示 session 已静音，调用方应跳过发送
-readonly MUTED_SENTINEL="__MUTED__"
+# 引入通用 callback 客户端（如果尚未引入）
+# 提供 MUTED_SENTINEL / CALLBACK_SERVER_URL / do_callback_post / get_auth_token 等
+if ! type do_callback_post &> /dev/null; then
+    source "${BASH_SOURCE[0]%/*}/callback.sh"
+fi
 
 # 初始化 JSON 解析器
 json_init >/dev/null 2>&1 || true
 
 # 默认模板目录
 DEFAULT_TEMPLATE_DIR="${TEMPLATES_DIR}/feishu"
-
-# HTTP 请求超时时间（秒）
-FEISHU_HTTP_TIMEOUT=10
-
-# 回调服务器地址（用于 OpenAPI 发送）
-CALLBACK_SERVER_PORT=$(get_config "CALLBACK_SERVER_PORT" "8080")
-CALLBACK_SERVER_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$CALLBACK_SERVER_PORT")
 
 # =============================================================================
 # 模板验证函数
@@ -391,148 +390,36 @@ render_card_template() {
 # =============================================================================
 
 # ----------------------------------------------------------------------------
-# _get_notify_config - 读取运行时通知配置覆盖
+# _build_at_user_tag - 构建飞书 @ 用户标签
 # ----------------------------------------------------------------------------
-# 功能: 从 runtime/notify_config.json 读取配置
-# 输出: JSON 字符串，文件不存在时输出空
-# ----------------------------------------------------------------------------
-_get_notify_config() {
-    local config_file="${RUNTIME_DIR}/notify_config.json"
-    if [ ! -f "$config_file" ]; then
-        return 0
-    fi
-    cat "$config_file" 2>/dev/null
-}
-
-# ----------------------------------------------------------------------------
-# _is_in_at_time_range - 检查当前时间是否在 @ 时段内
-# ----------------------------------------------------------------------------
-# 参数:
-#   $1 - at_start (HH:MM)
-#   $2 - at_end   (HH:MM)
-# 返回值:
-#   0 = 在时段内，应该 @
-#   1 = 不在时段内，不应该 @
-# ----------------------------------------------------------------------------
-_is_in_at_time_range() {
-    local at_start="$1" at_end="$2"
-    local current
-    current=$(date +%H:%M)
-
-    if ! [ "$at_start" \> "$at_end" ]; then
-        # 不跨午夜：08:00-22:00
-        ! [ "$current" \< "$at_start" ] && ! [ "$current" \> "$at_end" ] && return 0
-        return 1
-    else
-        # 跨午夜：22:00-08:00（current >= start 或 current <= end）
-        ! [ "$current" \< "$at_start" ] && return 0
-        ! [ "$current" \> "$at_end" ] && return 0
-        return 1
-    fi
-}
-
-# ----------------------------------------------------------------------------
-# _build_at_user_tag - 构建 @ 用户标签
-# ----------------------------------------------------------------------------
-# 功能: 根据运行时通知配置 + 可选 sender_id 构建飞书 @ 用户标签
+# 功能: 把 resolve_at_target 判定出的 @ 目标渲染成飞书卡片/富文本的 at 标签
 #
 # 参数:
 #   $1 - sender_id (可选): 本次 prompt 发送者 user_id，由 hook-router.sh 注入
 #
 # 输出:
-#   飞书 @ 用户标签字符串（含尾部空格），或空字符串
+#   飞书 @ 用户标签字符串（含尾部空格），不需要 @ 时输出空字符串
 #
-# 优先级:
-#   1. /notify at off → 空（全局关闭）
-#   2. 不在 at 时段内 → 空（全局关闭）
-#   3. 传入的 sender_id 非空 → at sender（本次提问的人；协作模式下定位提问者）
-#   4. /notify at self/all/<user_id> → 按 config
-#   5. 默认 → @ FEISHU_OWNER_ID
+# 说明:
+#   「该不该 @、@ 谁」的判定在 callback.sh 的 resolve_at_target（平台无关），
+#   本函数只负责飞书侧的标签渲染。at_user 配置为 all 时目标即字面量 all，
+#   飞书用 <at id=all> 表示 @ 所有人。
 # ----------------------------------------------------------------------------
 _build_at_user_tag() {
-    local sender_id="${1:-}"
-    local notify_config_json at_user_config at_start at_end
+    local target
+    target=$(resolve_at_target "${1:-}" "$(get_config "FEISHU_OWNER_ID" "")")
 
-    # 读取运行时通知配置覆盖
-    notify_config_json=$(_get_notify_config)
-    if [ -n "$notify_config_json" ]; then
-        # 一次 json_get_multi 取 3 个字段，减少子进程调用
-        local -a vals=()
-        while IFS= read -r _line; do
-            vals+=("$_line")
-        done <<< "$(json_get_multi "$notify_config_json" at_user at_start at_end)"
-        at_user_config="${vals[0]:-}"
-        at_start="${vals[1]:-}"
-        at_end="${vals[2]:-}"
-    fi
-
-    # 优先级 1: off 全局关闭
-    if [ "$at_user_config" = "off" ]; then
+    if [ -z "$target" ]; then
         echo ""
-        return 0
-    fi
-
-    # 优先级 2: 时间窗口外，全局关闭
-    if [ -n "$at_start" ] && [ -n "$at_end" ]; then
-        if ! _is_in_at_time_range "$at_start" "$at_end"; then
-            echo ""
-            return 0
-        fi
-    fi
-
-    # 优先级 3: sender_id 优先于 config（协作模式下定位提问者）
-    if [ -n "$sender_id" ]; then
-        echo "<at id=${sender_id}></at> "
-        return 0
-    fi
-
-    # 优先级 4: config self/all/<user_id>
-    if [ "$at_user_config" = "self" ]; then
-        local owner_id
-        owner_id=$(get_config "FEISHU_OWNER_ID" "")
-        if [ -n "$owner_id" ]; then
-            echo "<at id=${owner_id}></at> "
-        else
-            echo ""
-        fi
-        return 0
-    fi
-    if [ -n "$at_user_config" ]; then
-        # all 或 user_id
-        echo "<at id=${at_user_config}></at> "
-        return 0
-    fi
-
-    # 优先级 5: 默认 @ FEISHU_OWNER_ID
-    local owner_id
-    owner_id=$(get_config "FEISHU_OWNER_ID" "")
-    if [ -n "$owner_id" ]; then
-        echo "<at id=${owner_id}></at> "
     else
-        echo ""
+        echo "<at id=${target}></at> "
     fi
 }
+
 
 # =============================================================================
 # 卡片构建函数
 # =============================================================================
-
-_agent_display_name() {
-    case "${AGENT_TYPE:-claude}" in
-        claude) echo "Claude Code" ;;
-        codex) echo "Codex" ;;
-        *) echo "${AGENT_TYPE}" ;;
-    esac
-}
-
-_agent_resume_command() {
-    local session_id="$1"
-    case "${AGENT_TYPE:-claude}" in
-        claude) echo "claude --resume $session_id" ;;
-        codex) echo "codex resume $session_id" ;;
-        *) echo "${AGENT_TYPE} --resume $session_id" ;;
-    esac
-}
 
 # ----------------------------------------------------------------------------
 # build_permission_card - 构建权限请求卡片
@@ -679,14 +566,14 @@ build_permission_card() {
     local final_footer_hint="$footer_hint"
     if [ -z "$final_footer_hint" ]; then
         if [ -n "$buttons_json" ]; then
-            final_footer_hint="请尽快操作以避免 $(_agent_display_name) 超时等待"
+            final_footer_hint="请尽快操作以避免 $(agent_display_name) 超时等待"
         else
             final_footer_hint="回调服务未运行，请返回终端操作"
         fi
     fi
 
     local resume_command
-    resume_command=$(_agent_resume_command "$session_id")
+    resume_command=$(agent_resume_command "$session_id")
 
     local card
     if [ -n "$buttons_json" ]; then
@@ -810,6 +697,62 @@ build_notification_card() {
         "timestamp=$timestamp"
 }
 
+# =============================================================================
+# 构建响应元素 JSON 片段（多个 markdown 元素，hr 分隔）
+# 参数:
+#   $1 - response_content  响应正文 {"texts":[...],"truncated":bool}
+#                          由 callback.sh 的 build_response_content 产出
+# 输出:
+#   逗号分隔的 JSON 元素字符串，可直接嵌入飞书卡片 elements 数组
+# 说明:
+#   截断策略在 callback.sh（平台无关），本函数只负责渲染成飞书卡片元素
+# =============================================================================
+build_response_elements() {
+    local response_content="$1"
+
+    if [ "$JSON_HAS_JQ" = "true" ]; then
+        echo "$response_content" | jq -r '
+            (.truncated // false) as $is_truncated | .texts |
+            # 构建 markdown 元素，元素间用 hr 分隔
+            [to_entries[] |
+                (if .key > 0 then
+                    [{tag: "hr", margin: "0px 0px 0px 0px"}]
+                else [] end) +
+                [{
+                    tag: "markdown",
+                    content: (.value | split("\n") | map(
+                        if test("^\\s*```") then sub("^\\s*"; "") else . end
+                    ) | join("\n")),
+                    text_align: "left",
+                    text_size: "normal_v2"
+                }]
+            ] | flatten |
+            # 截断时追加提示元素
+            (if $is_truncated then
+                . + [{tag: "markdown", content: "<font color='"'"'grey'"'"'>⚠️ 内容过长，已截断</font>", text_align: "left", text_size: "notation", margin: "4px 0px 0px 0px"}]
+            else . end) |
+            map(tojson) | join(",")
+        ' 2>/dev/null
+    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
+        echo "$response_content" | "$PYTHON3" -c "
+import sys, json, re
+data = json.load(sys.stdin)
+texts = data.get('texts', [])
+is_truncated = data.get('truncated', False)
+fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
+elements = []
+for i, text in enumerate(texts):
+    text = re.sub(r'^[ \t]*' + fence, fence, text, flags=re.MULTILINE)
+    if i > 0:
+        elements.append(json.dumps({'tag': 'hr', 'margin': '0px 0px 0px 0px'}))
+    elements.append(json.dumps({'tag': 'markdown', 'content': text, 'text_align': 'left', 'text_size': 'normal_v2'}))
+if is_truncated:
+    elements.append(json.dumps({'tag': 'markdown', 'content': \"<font color='grey'>\u26a0\ufe0f 内容过长，已截断</font>\", 'text_align': 'left', 'text_size': 'notation', 'margin': '4px 0px 0px 0px'}))
+print(','.join(elements))
+" 2>/dev/null
+    fi
+}
+
 # ----------------------------------------------------------------------------
 # build_stop_card - 构建 Stop 事件完成卡片
 # ----------------------------------------------------------------------------
@@ -856,10 +799,10 @@ build_stop_card() {
     # 截断 session_id 前 8 字符用于显示
     local session_id_short="${session_id:0:8}"
     local resume_command
-    resume_command=$(_agent_resume_command "$session_id")
+    resume_command=$(agent_resume_command "$session_id")
 
     local agent_display_name
-    agent_display_name="$(_agent_display_name)"
+    agent_display_name="$(agent_display_name)"
 
     render_card_template "stop" \
         "response_elements=$response_elements" \
@@ -876,39 +819,6 @@ build_stop_card() {
 # =============================================================================
 # 消息发送函数
 # =============================================================================
-
-# ----------------------------------------------------------------------------
-# _get_auth_token - 获取存储的 auth_token
-# ----------------------------------------------------------------------------
-# 功能: 从 runtime/auth_token.json 读取存储的 auth_token
-#
-# 输出:
-#   echos 返回: auth_token 字符串，不存在则返回空字符串
-#
-# 说明:
-#   用于飞书网关注册后的双向认证
-# ----------------------------------------------------------------------------
-_get_auth_token() {
-    # AUTH_TOKEN_FILE 由 core.sh 定义，指向 runtime/auth_token.json
-
-    if [ ! -f "$AUTH_TOKEN_FILE" ]; then
-        log "auth_token file not found: $AUTH_TOKEN_FILE"
-        echo ""
-        return 0
-    fi
-
-    # 使用 json_get 读取 auth_token
-    local token_data
-    token_data=$(cat "$AUTH_TOKEN_FILE" 2>/dev/null)
-    if [ -z "$token_data" ]; then
-        echo ""
-        return 0
-    fi
-
-    local token
-    token=$(json_get "$token_data" "auth_token")
-    echo "$token"
-}
 
 # ----------------------------------------------------------------------------
 # _get_bot_open_id - 获取存储的 bot_open_id
@@ -946,73 +856,6 @@ _get_bot_open_id() {
 }
 
 # ----------------------------------------------------------------------------
-# _get_chat_id - 根据 session_id 获取对应的 chat_id
-# ----------------------------------------------------------------------------
-# 功能: 调用 Callback 后端的 /cb/session/get-chat-id 接口查询 session_id 对应的 chat_id
-#
-# 参数:
-#   $1 - session_id  Agent 会话 ID
-#
-# 输出:
-#   echos 返回: chat_id 字符串，查询失败返回空字符串
-#
-# 说明:
-#   用于确定会话消息发送的目标群聊
-#   查询失败时，调用方可使用 FEISHU_CHAT_ID 配置作为兜底
-# ----------------------------------------------------------------------------
-_get_chat_id() {
-    local session_id="$1"
-    local project_dir="${2:-}"
-
-    if [ -z "$session_id" ]; then
-        echo ""
-        return 0
-    fi
-
-    # 传入 project_dir 用于 mute 目录检查（session 不存在时自动继承目录 mute 状态）
-    # 传入 agent_type 用于 auto-mute 创建占位 session 时写入正确的 agent 类型
-    local agent_type="${AGENT_TYPE:-claude}"
-    local request_body
-    if [ -n "$project_dir" ]; then
-        local escaped_dir
-        escaped_dir=$(json_escape "$project_dir")
-        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_dir\"}"
-    else
-        request_body="{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\"}"
-    fi
-
-    local response
-    response=$(_do_callback_post "/cb/session/get-chat-id" "$request_body")
-
-    local http_code
-    http_code=$(echo "$response" | head -n 1)
-    response=$(echo "$response" | sed '1d')
-
-    if [ "$http_code" != "200" ]; then
-        return 0
-    fi
-
-    # 检查 muted 状态：muted 的 session 直接返回哨兵值，跳过后续发送
-    local muted
-    muted=$(json_get "$response" "muted")
-    if [ "$muted" = "true" ]; then
-        echo "$MUTED_SENTINEL"
-        return 0
-    fi
-
-    local chat_id
-    chat_id=$(json_get "$response" "chat_id")
-    # 移除可能的引号
-    chat_id=$(echo "$chat_id" | sed 's/^"//;s/"$//')
-
-    if [ -n "$chat_id" ] && [ "$chat_id" != "null" ] && [ "$chat_id" != "''" ]; then
-        echo "$chat_id"
-    else
-        echo ""
-    fi
-}
-
-# ----------------------------------------------------------------------------
 # _ensure_chat - 确保 session 有对应的 chat_id（group 模式下懒创建群聊）
 # ----------------------------------------------------------------------------
 # 功能: 调用 Callback 后端的 /cb/session/ensure-chat 接口
@@ -1039,7 +882,7 @@ _ensure_chat() {
 
     local response
     local agent_type="${AGENT_TYPE:-claude}"
-    response=$(_do_callback_post "/cb/session/ensure-chat" \
+    response=$(do_callback_post "/cb/session/ensure-chat" \
         "{\"session_id\":\"$session_id\",\"agent_type\":\"$agent_type\",\"project_dir\":\"$escaped_project_dir\"}")
 
     local http_code
@@ -1060,74 +903,6 @@ _ensure_chat() {
     else
         echo ""
     fi
-}
-
-# ----------------------------------------------------------------------------
-# _capture_session_env - 把启动 agent 时的白名单 env 快照上报给 callback
-# ----------------------------------------------------------------------------
-# 功能:
-#   hook 是 agent 的子进程，继承了启动 shell 实际生效的 env。
-#   按 SESSION_ENV_WHITELIST 配置取出匹配的 env，POST 给 /cb/session/set-env，
-#   后端写入 session.env_overrides。续聊时 AgentAdapter 读出作 K=V 前缀注入。
-#
-# 白名单格式（SESSION_ENV_WHITELIST）:
-#   逗号或空格分隔；末尾带 * 视作前缀通配，否则视作精确名。
-#   例: "ANTHROPIC_*, OPENAI_*, API_TIMEOUT_MS"
-#
-# 参数:
-#   $1 - session_id  当前会话 ID（必填，空则跳过）
-#
-# 行为:
-#   - 失败时仅记录日志，不影响主流程（best-effort）
-#   - 每次 hook 触发都调用一次（幂等覆盖）
-# ----------------------------------------------------------------------------
-_capture_session_env() {
-    local session_id="$1"
-    [ -z "$session_id" ] && return 0
-
-    local whitelist
-    whitelist=$(get_config "SESSION_ENV_WHITELIST" "")
-    [ -z "$whitelist" ] && return 0
-    whitelist="${whitelist//,/ }"
-
-    # 单遍遍历 env，逐条匹配白名单规则
-    local json_pairs=""
-    local line var_name val rule match
-    while IFS= read -r line; do
-        var_name="${line%%=*}"
-        val="${line#*=}"
-        [ -z "$var_name" ] && continue
-
-        match=""
-        for rule in $whitelist; do
-            [ -z "$rule" ] && continue
-            if [[ "$rule" == *\* ]]; then
-                [[ "$var_name" == "${rule%\*}"* ]] && match=1 && break
-            else
-                [ "$var_name" = "$rule" ] && match=1 && break
-            fi
-        done
-        [ -z "$match" ] && continue
-
-        [ -n "$json_pairs" ] && json_pairs="${json_pairs},"
-        json_pairs="${json_pairs}\"${var_name}\":\"$(json_escape "$val")\""
-    done < <(env 2>/dev/null)
-
-    if [ -z "$json_pairs" ]; then
-        log "capture_session_env: no whitelisted env vars present, skipping"
-        return 0
-    fi
-
-    local request_body="{\"session_id\":\"$session_id\",\"env\":{${json_pairs}}}"
-
-    local response http_code
-    response=$(_do_callback_post "/cb/session/set-env" "$request_body")
-
-    http_code=$(echo "$response" | head -n 1)
-    if [ "$http_code" != "200" ]; then
-        log "capture_session_env: backend returned $http_code (non-fatal)"
-    fi
-    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -1153,7 +928,7 @@ _resolve_chat_id() {
 
     # 优先通过 session_id 查询已有的 chat_id
     if [ -n "$session_id" ]; then
-        chat_id=$(_get_chat_id "$session_id" "$project_dir")
+        chat_id=$(query_chat_id "$session_id" "$project_dir")
         if [ "$chat_id" = "$MUTED_SENTINEL" ]; then
             log "Session muted, skipping send: $session_id"
             echo "$MUTED_SENTINEL"
@@ -1210,7 +985,7 @@ _get_last_message_id() {
     fi
 
     local response
-    response=$(_do_callback_post "/cb/session/get-last-message-id" \
+    response=$(do_callback_post "/cb/session/get-last-message-id" \
         "{\"session_id\":\"$session_id\"}")
 
     local http_code
@@ -1231,152 +1006,6 @@ _get_last_message_id() {
     else
         echo ""
     fi
-}
-
-# ----------------------------------------------------------------------------
-# _check_skip_user_prompt - 检查是否跳过 UserPromptSubmit
-# ----------------------------------------------------------------------------
-# 功能: 查询 Callback 后端，判断本次 prompt 是否由飞书发起（需要跳过）
-#
-# 参数:
-#   $1 - session_id  Agent 会话 ID
-#
-# 返回:
-#   0 + stdout "true"  - 应跳过
-#   0 + stdout "false" - 不跳过
-# ----------------------------------------------------------------------------
-_check_skip_user_prompt() {
-    local session_id="$1"
-
-    if [ -z "$session_id" ]; then
-        echo "false"
-        return 0
-    fi
-
-    local response
-    response=$(_do_callback_post "/cb/session/check-skip-user-prompt" \
-        "{\"session_id\":\"$session_id\"}")
-
-    local http_code
-    http_code=$(echo "$response" | head -n 1)
-    response=$(echo "$response" | sed '1d')
-
-    if [ "$http_code" != "200" ]; then
-        echo "false"
-        return 0
-    fi
-
-    local skip_flag
-    skip_flag=$(json_get "$response" "skip")
-    if [ "$skip_flag" = "true" ]; then
-        echo "true"
-    else
-        echo "false"
-    fi
-}
-
-# ----------------------------------------------------------------------------
-# _do_callback_post - 向 Callback 后端发送 POST 请求
-# ----------------------------------------------------------------------------
-# 功能: 封装 callback_url 构造和 auth_token，简化 /cb/* 路由的调用
-#
-# 参数:
-#   $1 - path          路由路径（如 /cb/session/set-env）
-#   $2 - request_body  请求 JSON 字符串
-#   $3 - log_prefix    日志前缀 (可选，默认取 path 去掉前导 /)
-#
-# 输出/返回: 同 _do_curl_post
-# ----------------------------------------------------------------------------
-_do_callback_post() {
-    local path="$1"
-    local request_body="$2"
-    local log_prefix="${3:-${path#/}}"
-
-    local callback_url="${CALLBACK_SERVER_URL:-http://localhost:${CALLBACK_SERVER_PORT:-8080}}"
-    callback_url=$(echo "$callback_url" | sed 's:/*$::')
-
-    _do_curl_post "${callback_url}${path}" "$request_body" "$log_prefix" "$(_get_auth_token)"
-}
-
-# _do_curl_post - 执行 POST 请求的通用函数
-# ----------------------------------------------------------------------------
-# 功能: 执行 JSON POST 请求，并解析响应
-#
-# 参数:
-#   $1 - url           请求 URL
-#   $2 - request_body  请求 JSON 字符串
-#   $3 - log_prefix    日志前缀 (可选)
-#   $4 - auth_token    认证令牌 (可选，会添加到 X-Auth-Token header)
-#
-# 输出:
-#   echos 返回: http_code 响应体
-#
-# 返回:
-#   0 - HTTP 请求成功
-#   1 - HTTP 请求失败
-#
-# 说明:
-#   调用方需要根据 http_code 和响应内容判断业务逻辑是否成功
-#   auth_token 用于飞书网关注册后的双向认证
-# ----------------------------------------------------------------------------
-_do_curl_post() {
-    local url="$1"
-    local request_body="$2"
-    local log_prefix="${3:-curl}"
-    local auth_token="${4:-}"
-
-    # 构建 curl 命令用于日志（请求体截断避免过长）
-    local curl_log_cmd
-    local truncated_body="${request_body:0:200}"
-    if [ ${#request_body} -gt 200 ]; then
-        truncated_body="${truncated_body}..."
-    fi
-    curl_log_cmd=$(cat <<EOF
-curl -X POST "$url" \
-    -H "Content-Type: application/json" \
-    -d "$truncated_body" \
-    --max-time "$FEISHU_HTTP_TIMEOUT" \
-    --noproxy "*"
-EOF
-)
-
-    local response
-    local http_code
-
-    # 使用数组构建 headers，避免 shell 解析问题
-    local headers=("-H" "Content-Type: application/json")
-    if [ -n "$auth_token" ]; then
-        headers+=("-H" "X-Auth-Token: $auth_token")
-    fi
-
-    # 执行 curl 请求，"${headers[@]}" 确保每个元素作为独立参数传递
-    response=$(curl -X POST "$url" \
-        "${headers[@]}" \
-        -d "$request_body" \
-        --max-time "$FEISHU_HTTP_TIMEOUT" \
-        --noproxy "*" \
-        --silent \
-        --show-error \
-        -w "\n%{http_code}" 2>&1)
-
-    local curl_exit=$?
-
-    # 分离响应体和状态码（跨平台兼容）
-    http_code=$(echo "$response" | tail -n1)
-    response=$(echo "$response" | sed '$d')
-
-    # 输出 http_code 和 response
-    echo "$http_code"
-    echo "$response"
-
-    if [ $curl_exit -ne 0 ] || [ "$http_code" -ge 400 ]; then
-        log_error "${log_prefix}: curl command failed"
-        log_error "${log_prefix}: $curl_log_cmd"
-        log_error "${log_prefix}: exit=$curl_exit, http_code=$http_code"
-        return 1
-    fi
-
-    return 0
 }
 
 # ----------------------------------------------------------------------------
@@ -1410,7 +1039,7 @@ _send_via_webhook() {
     log "Sending via ${log_prefix}..."
 
     local http_code response
-    response=$(_do_curl_post "$target_url" "$request_body" "$log_prefix")
+    response=$(do_curl_post "$target_url" "$request_body" "$log_prefix")
     local curl_status=$?
     http_code=$(echo "$response" | head -n 1)
     response=$(echo "$response" | sed '1d')
@@ -1496,13 +1125,13 @@ _send_via_http_endpoint() {
 
     # 获取 auth_token（用于双向认证）
     local auth_token
-    auth_token=$(_get_auth_token)
+    auth_token=$(get_auth_token)
     if [ -n "$auth_token" ]; then
         log "Using auth_token for authentication"
     fi
 
     local http_code response
-    response=$(_do_curl_post "$api_url" "$request_body" "$log_prefix" "$auth_token")
+    response=$(do_curl_post "$api_url" "$request_body" "$log_prefix" "$auth_token")
     local curl_status=$?
     http_code=$(echo "$response" | head -n 1)
     response=$(echo "$response" | sed '1d')
@@ -1565,7 +1194,7 @@ _record_dir_usage() {
         return 0
     fi
 
-    _do_callback_post "/cb/directory/record-usage" \
+    do_callback_post "/cb/directory/record-usage" \
         "$(json_build_object "project_dir" "$project_dir")" >/dev/null 2>&1 || true
 }
 
@@ -1836,10 +1465,8 @@ send_feishu_card() {
     if [ "$send_mode" = "openapi" ]; then
         # OpenAPI 模式：通过 /gw/feishu/send 发送
         # 目标：FEISHU_GATEWAY_URL 或 CALLBACK_SERVER_URL
-        local gateway_url
-        gateway_url=$(get_config "FEISHU_GATEWAY_URL" "")
-
-        local target_url="${gateway_url:-$CALLBACK_SERVER_URL}"
+        local target_url
+        target_url=$(get_gateway_url)
 
         # 构建传递给 _send_feishu_card_http_endpoint 的 options
         local http_options=""
@@ -2045,9 +1672,8 @@ send_feishu_text() {
 
     if [ "$send_mode" = "openapi" ]; then
         # OpenAPI 模式：通过 /gw/feishu/send 发送
-        local gateway_url
-        gateway_url=$(get_config "FEISHU_GATEWAY_URL" "")
-        local target_url="${gateway_url:-$CALLBACK_SERVER_URL}"
+        local target_url
+        target_url=$(get_gateway_url)
 
         # 读取 owner_id 配置（作为接收者）
         local owner_id
@@ -2133,9 +1759,8 @@ send_feishu_post() {
     fi
 
     # OpenAPI 模式：通过 /gw/feishu/send 发送富文本消息
-    local gateway_url
-    gateway_url=$(get_config "FEISHU_GATEWAY_URL" "")
-    local target_url="${gateway_url:-$CALLBACK_SERVER_URL}"
+    local target_url
+    target_url=$(get_gateway_url)
 
     # 读取 owner_id 配置（作为接收者）
     local owner_id
@@ -2377,8 +2002,179 @@ PYTHON_SCRIPT
         "owner_id=$owner_id" \
         "ask_question_form_elements=$form_elements" \
         "at_user=$at_user" \
-        "resume_command=$(_agent_resume_command "$session_id")" \
+        "resume_command=$(agent_resume_command "$session_id")" \
         "resume_session_id=$session_id")
 
     echo "$card"
+}
+
+# =============================================================================
+# 平台统一接口实现（由 im.sh 分发调用）
+# =============================================================================
+#
+# 以下 _feishu_* 函数是飞书平台对 im.sh 统一接口的实现。
+# Hook 脚本只调用 im.sh 暴露的平台无关接口，不直接调用这些函数。
+#
+# 调用链（每个实现函数只有一个来源 Hook，依赖的变量即由该 Hook 设置）:
+#   user_prompt.sh → send_user_prompt_notification()   → _feishu_send_user_prompt()
+#   permission.sh  → send_permission_notification()    → _feishu_send_permission_notification()
+#                  → send_ask_question_notification()  → _feishu_send_ask_question()
+#   stop.sh        → send_stop_notification()          → _feishu_send_stop_notification()
+#
+# 这些函数通过 bash 动态作用域读取来源 Hook 的局部变量（如 SESSION_ID /
+# RESOLVED_CHAT_ID），各函数在注释中列出依赖哪些、分别来自何处。
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# _feishu_channel_ready - 飞书发送渠道是否就绪
+# ----------------------------------------------------------------------------
+# 返回:
+#   0 - 就绪（openapi 模式恒真；webhook 模式需已配置 FEISHU_WEBHOOK_URL）
+#   1 - 未就绪
+# ----------------------------------------------------------------------------
+_feishu_channel_ready() {
+    local send_mode
+    send_mode=$(get_config "FEISHU_SEND_MODE" "webhook")
+    if [ "$send_mode" = "openapi" ]; then
+        return 0
+    fi
+
+    local webhook_url
+    webhook_url=$(get_config "FEISHU_WEBHOOK_URL" "")
+    [ -n "$webhook_url" ]
+}
+
+# ----------------------------------------------------------------------------
+# _feishu_send_user_prompt - 同步用户 prompt 到飞书话题
+# ----------------------------------------------------------------------------
+# 参数:
+#   $1 - message_text  prompt 文本（调用方已完成截断）
+#
+# 依赖变量:
+#   SESSION_ID, PROJECT_DIR, RESOLVED_CHAT_ID - 由 user_prompt.sh 设置（动态作用域）
+#   CALLBACK_SERVER_URL                       - 由 callback.sh 加载时定义
+# ----------------------------------------------------------------------------
+_feishu_send_user_prompt() {
+    local message_text="${1:-}"
+
+    # 判断是否为首条消息（没有 last_message_id 说明该 session 尚未在飞书发过消息）
+    # 首条消息加上 /new --dir=... 前缀，与飞书发起的新会话显示风格对齐
+    local last_msg_id
+    last_msg_id=$(_get_last_message_id "$SESSION_ID")
+    if [ -z "$last_msg_id" ]; then
+        message_text="/new --dir=${PROJECT_DIR} ${message_text}"
+    fi
+
+    # 使用 send_feishu_post 发送富文本消息（带 session threading + at）
+    local options
+    options=$(json_build_object "project_dir" "$PROJECT_DIR" "session_id" "$SESSION_ID" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID")
+    send_feishu_post "$message_text" "$options"
+}
+
+# ----------------------------------------------------------------------------
+# _feishu_send_permission_notification - 发送权限审批卡片
+# ----------------------------------------------------------------------------
+# 参数:
+#   $1 - custom_footer_hint  自定义底部提示（可选，空则由卡片模板按有无按钮取默认）
+#   $2 - no_buttons          "true" 表示不生成交互按钮（降级模式）
+#
+# 依赖变量:
+#   TOOL_NAME, PROJECT_NAME, TIMESTAMP, COMMAND_CONTENT, DESCRIPTION,
+#   TEMPLATE_COLOR, SESSION_ID, PROJECT_DIR, REQUEST_ID, OWNER_ID,
+#   RESOLVED_CHAT_ID                     - 由 permission.sh 设置（动态作用域）
+#   CALLBACK_SERVER_URL                  - 由 callback.sh 加载时定义
+#   REPLY_TO_MSG_ID                      - 由 hook-router.sh 导出
+# ----------------------------------------------------------------------------
+_feishu_send_permission_notification() {
+    local custom_footer_hint="${1:-}"
+    local no_buttons="${2:-false}"
+
+    # 构建交互按钮（根据 FEISHU_SEND_MODE 自动选择按钮类型）
+    local buttons=""
+    if [ "$no_buttons" != "true" ]; then
+        buttons=$(build_permission_buttons "$CALLBACK_SERVER_URL" "$REQUEST_ID" "$OWNER_ID")
+    fi
+
+    local card
+    card=$(build_permission_card "$TOOL_NAME" "$PROJECT_NAME" "$TIMESTAMP" "$COMMAND_CONTENT" "$DESCRIPTION" "$TEMPLATE_COLOR" "$buttons" "$SESSION_ID" "$custom_footer_hint")
+
+    # 传递 session_id、project_dir、callback_url、chat_id、reply_to 支持链式回复
+    # webhook_url 不传：send_feishu_card 会自行从 FEISHU_WEBHOOK_URL 读取
+    local options
+    options=$(json_build_object "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
+    send_feishu_card "$card" "$options"
+}
+
+# ----------------------------------------------------------------------------
+# _feishu_send_ask_question - 发送 AskUserQuestion 表单卡片
+# ----------------------------------------------------------------------------
+# 参数:
+#   $1 - questions_json  AskUserQuestion 的 questions 数组 JSON
+#
+# 返回:
+#   0 - 卡片构建成功（已尝试发送；发送失败由 send_feishu_card 内部降级处理）
+#   1 - 卡片构建失败（调用方据此回退终端）
+#
+# 依赖变量:
+#   PROJECT_NAME, TIMESTAMP, SESSION_ID, PROJECT_DIR, REQUEST_ID, OWNER_ID,
+#   RESOLVED_CHAT_ID                     - 由 permission.sh 设置（动态作用域）
+#   CALLBACK_SERVER_URL                  - 由 callback.sh 加载时定义
+#   REPLY_TO_MSG_ID                      - 由 hook-router.sh 导出
+# ----------------------------------------------------------------------------
+_feishu_send_ask_question() {
+    local questions_json="${1:-}"
+
+    local ask_card
+    if ! ask_card=$(build_ask_question_card "$questions_json" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$REQUEST_ID" "$OWNER_ID") || [ -z "$ask_card" ]; then
+        return 1
+    fi
+
+    local ask_options
+    ask_options=$(json_build_object "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
+    send_feishu_card "$ask_card" "$ask_options"
+
+    # 发送失败不上报：send_feishu_card 内部已降级发送文本通知告知用户，
+    # 此处返回 0 让调用方继续等待 socket 决策（与卡片构建失败区分开）
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# _feishu_send_stop_notification - 发送任务完成卡片
+# ----------------------------------------------------------------------------
+# 参数:
+#   $1 - response_content  响应正文 {"texts":[...],"truncated":bool}
+#   $2 - thinking          思考过程文本（另一条内容通道，调用方已完成截断）
+#
+# 依赖变量:
+#   PROJECT_NAME, TIMESTAMP, SESSION_ID, PROJECT_DIR,
+#   RESOLVED_CHAT_ID                     - 由 stop.sh 设置（动态作用域）
+#   CALLBACK_SERVER_URL                  - 由 callback.sh 加载时定义
+#   REPLY_TO_MSG_ID                      - 由 hook-router.sh 导出
+# ----------------------------------------------------------------------------
+_feishu_send_stop_notification() {
+    local response_content="${1:-}"
+    local thinking="${2:-}"
+
+    # 构建响应元素 JSON 片段（含截断和代码块格式化）
+    # 注: Markdown 预处理已下沉到 send_feishu_card() 中统一处理
+    local response_elements
+    response_elements=$(build_response_elements "$response_content")
+    log "Built response elements: ${#response_elements} chars, thinking: ${#thinking} chars"
+
+    # 无响应时使用默认消息
+    if [ -z "$response_elements" ]; then
+        response_elements='{"tag":"markdown","content":"任务已完成，请返回终端查看详细信息。","text_align":"left","text_size":"normal_v2"}'
+        log "Using default response"
+    fi
+
+    local card
+    card=$(build_stop_card "$response_elements" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$thinking" 2>/dev/null)
+
+    if [ -n "$card" ]; then
+        # 传递 session_id, project_dir, callback_url, chat_id, reply_to 支持链式回复
+        # webhook_url 不传：send_feishu_card 会自行从 FEISHU_WEBHOOK_URL 读取
+        local options
+        options=$(json_build_object "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_SERVER_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
+        send_feishu_card "$card" "$options"
+    fi
 }

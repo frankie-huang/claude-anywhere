@@ -11,13 +11,14 @@
 #
 # 适用场景:
 #   - 用户提交 prompt 时触发
-#   - 终端发起的 prompt 同步到飞书话题中
-#   - 飞书发起的 prompt 自动跳过（通过 skip 标志去重）
+#   - 终端发起的 prompt 同步到 IM 会话中
+#   - IM 发起的 prompt 自动跳过（通过 skip 标志去重）
 #
 # 设计原则:
 #   - 快速返回，不阻塞 Agent
 #   - 消息发送在后台异步执行
-#   - 飞书发起的 prompt 通过 skip 标志跳过，避免重复
+#   - IM 发起的 prompt 通过 skip 标志跳过，避免重复
+#   - 只调用 im.sh 的平台无关接口，不感知具体 IM 平台
 # =============================================================================
 
 # =============================================================================
@@ -25,19 +26,16 @@
 # =============================================================================
 send_user_prompt_async() {
     # 捕获当前环境变量供后台使用
-    local SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
-    local WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
-    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
     local SESSION_ID=$(json_get "$INPUT" "session_id")
     local PROMPT_CONTENT=$(json_get "$INPUT" "prompt")
     local PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(json_get "$INPUT" "cwd")}"
 
-    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
-    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
+    # 检查是否有可用的发送渠道
+    if ! im_channel_ready; then
         return 0
     fi
 
-    # 没有 session_id 则无法关联飞书话题，跳过
+    # 没有 session_id 则无法关联 IM 会话，跳过
     if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
         log "UserPromptSubmit: no session_id, skipping"
         return 0
@@ -51,23 +49,22 @@ send_user_prompt_async() {
 
     log "UserPromptSubmit: session=$SESSION_ID, prompt=${PROMPT_CONTENT:0:50}..."
 
-    # 检查 skip 标志（飞书发起的会话会设置此标志）
+    # 检查 skip 标志（IM 发起的会话会设置此标志）
     local skip_flag
-    skip_flag=$(_check_skip_user_prompt "$SESSION_ID")
+    skip_flag=$(check_skip_user_prompt "$SESSION_ID")
     if [ "$skip_flag" = "true" ]; then
-        log "UserPromptSubmit: skipped (feishu-originated)"
+        log "UserPromptSubmit: skipped (IM-originated)"
         return 0
     fi
 
     # 前置解析 chat_id 并检查 mute 状态，muted 时跳过发送
     local RESOLVED_CHAT_ID
-    RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    RESOLVED_CHAT_ID=$(get_chat_id "$SESSION_ID" "$PROJECT_DIR")
     if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
         log "UserPromptSubmit: session muted, skipping: $SESSION_ID"
         return 0
     fi
 
-    # 发送 prompt 文本到飞书话题
     # 截断过长的 prompt（纯文本消息不宜太长）
     local max_prompt_length=10000
     local display_prompt="$PROMPT_CONTENT"
@@ -76,21 +73,7 @@ send_user_prompt_async() {
 ...(已截断)"
     fi
 
-    # 判断是否为首条消息（没有 last_message_id 说明该 session 尚未在飞书发过消息）
-    # 首条消息加上 /new --dir=... 前缀，与飞书发起的新会话显示风格对齐
-    local last_msg_id
-    last_msg_id=$(_get_last_message_id "$SESSION_ID")
-    local message_text
-    if [ -z "$last_msg_id" ]; then
-        message_text="/new --dir=${PROJECT_DIR} ${display_prompt}"
-    else
-        message_text="${display_prompt}"
-    fi
-
-    # 使用 send_feishu_post 发送富文本消息（带 session threading + at）
-    local options
-    options=$(json_build_object "project_dir" "$PROJECT_DIR" "session_id" "$SESSION_ID" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID")
-    send_feishu_post "$message_text" "$options" >/dev/null 2>&1
+    send_user_prompt_notification "$display_prompt" >/dev/null 2>&1
 }
 
 # 后台发送；单独 & 不够——宿主以 pipe 关闭（非 PID 退出）判断 hook 结束，

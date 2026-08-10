@@ -552,85 +552,6 @@ print(json.dumps(data, ensure_ascii=False))
 }
 
 # =============================================================================
-# 构建响应元素 JSON 片段（多个 markdown 元素，hr 分隔）
-# 参数:
-#   $1 - response_json  extract_response 返回的 JSON（含 texts 数组）
-#   $2 - max_length     总文本最大长度
-# 输出:
-#   逗号分隔的 JSON 元素字符串，可直接嵌入飞书卡片 elements 数组
-# =============================================================================
-build_response_elements() {
-    local response_json="$1"
-    local max_length="$2"
-
-    if [ "$JSON_HAS_JQ" = "true" ]; then
-        echo "$response_json" | jq -r --argjson max_len "$max_length" '
-            .texts |
-            # 按总长度截断，同时跟踪是否发生截断
-            reduce .[] as $t (
-                {remaining: $max_len, result: [], truncated: false};
-                if .remaining <= 0 then .truncated = true
-                elif ($t | length) <= .remaining then
-                    .result += [$t] | .remaining -= ($t | length)
-                else
-                    .result += [$t[:.remaining] + "..."] | .remaining = 0 | .truncated = true
-                end
-            ) | .truncated as $is_truncated | .result |
-            # 构建 markdown 元素，元素间用 hr 分隔
-            [to_entries[] |
-                (if .key > 0 then
-                    [{tag: "hr", margin: "0px 0px 0px 0px"}]
-                else [] end) +
-                [{
-                    tag: "markdown",
-                    content: (.value | split("\n") | map(
-                        if test("^\\s*```") then sub("^\\s*"; "") else . end
-                    ) | join("\n")),
-                    text_align: "left",
-                    text_size: "normal_v2"
-                }]
-            ] | flatten |
-            # 截断时追加提示元素
-            (if $is_truncated then
-                . + [{tag: "markdown", content: "<font color='"'"'grey'"'"'>⚠️ 内容过长，已截断</font>", text_align: "left", text_size: "notation", margin: "4px 0px 0px 0px"}]
-            else . end) |
-            map(tojson) | join(",")
-        ' 2>/dev/null
-    elif [ "$JSON_HAS_PYTHON3" = "true" ]; then
-        echo "$response_json" | "$PYTHON3" -c "
-import sys, json, re
-data = json.load(sys.stdin)
-texts = data.get('texts', [])
-max_len = int(sys.argv[1])
-truncated = []
-remaining = max_len
-is_truncated = False
-for text in texts:
-    if remaining <= 0:
-        is_truncated = True
-        break
-    if len(text) <= remaining:
-        truncated.append(text)
-        remaining -= len(text)
-    else:
-        truncated.append(text[:remaining] + '...')
-        is_truncated = True
-        remaining = 0
-fence = chr(96) * 3  # 即 3 个反引号，代码围栏标记
-elements = []
-for i, text in enumerate(truncated):
-    text = re.sub(r'^[ \t]*' + fence, fence, text, flags=re.MULTILINE)
-    if i > 0:
-        elements.append(json.dumps({'tag': 'hr', 'margin': '0px 0px 0px 0px'}))
-    elements.append(json.dumps({'tag': 'markdown', 'content': text, 'text_align': 'left', 'text_size': 'normal_v2'}))
-if is_truncated:
-    elements.append(json.dumps({'tag': 'markdown', 'content': \"<font color='grey'>\u26a0\ufe0f 内容过长，已截断</font>\", 'text_align': 'left', 'text_size': 'notation', 'margin': '4px 0px 0px 0px'}))
-print(','.join(elements))
-" "$max_length" 2>/dev/null
-    fi
-}
-
-# =============================================================================
 # 后台异步发送通知函数
 #
 # 调用链：
@@ -639,27 +560,31 @@ print(','.join(elements))
 #     │    └─ extract_response_from_file(transcript, 5 retries)
 #     │         └─ (fallback) extract_response_from_file(subagent_file, 3 retries)
 #     ├─ supplement_last_message(response_json, hook_input)
-#     ├─ build_response_elements(response_json, max_length)
-#     └─ build_stop_card(elements, project, timestamp, session_id, thinking)
+#     ├─ build_response_content(response_json, max_length)
+#     └─ send_stop_notification(response_content, thinking)  —— 卡片构建与发送由平台承担
 # =============================================================================
 send_stop_notification_async() {
     # 捕获当前环境变量供后台使用
-    local SEND_MODE=$(get_config "FEISHU_SEND_MODE" "webhook")
-    local WEBHOOK_URL=$(get_config "FEISHU_WEBHOOK_URL" "")
     local STOP_MESSAGE_MAX_LENGTH=$(get_config "STOP_MESSAGE_MAX_LENGTH" "10000")
     local STOP_THINKING_MAX_LENGTH=$(get_config "STOP_THINKING_MAX_LENGTH" "10000")
-    local CALLBACK_URL=$(get_config "CALLBACK_SERVER_URL" "http://localhost:$(get_config "CALLBACK_SERVER_PORT" "8080")")
-    local INPUT_SESSION_ID=$(json_get "$INPUT" "session_id")
+    local SESSION_ID=$(json_get "$INPUT" "session_id")
     local INPUT_TURN_ID=$(json_get "$INPUT" "turn_id")
     local TRANSCRIPT_PATH=$(json_get "$INPUT" "transcript_path")
     local LAST_ASSISTANT_MSG=$(json_get "$INPUT" "last_assistant_message")
     local PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(json_get "$INPUT" "cwd")}"
     local PROJECT_NAME=$(basename "${PROJECT_DIR:-$(pwd)}")
-    local SESSION_ID=""
     local TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 
-    # 检查是否有可用的发送渠道（webhook 需要 URL，openapi 模式直接放行）
-    if [ "$SEND_MODE" != "openapi" ] && [ -z "$WEBHOOK_URL" ]; then
+    # 检查是否有可用的发送渠道
+    if ! im_channel_ready; then
+        return 0
+    fi
+
+    # 前置解析 chat_id 并检查 mute 状态，muted 时直接跳过，避免白跑 transcript 提取
+    local RESOLVED_CHAT_ID
+    RESOLVED_CHAT_ID=$(get_chat_id "$SESSION_ID" "$PROJECT_DIR")
+    if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
+        log "Session muted, skipping stop notification: $SESSION_ID"
         return 0
     fi
 
@@ -667,42 +592,21 @@ send_stop_notification_async() {
 
     # 提取响应内容（texts 数组 + thinking）
     local THINKING=""
-    local RESPONSE_ELEMENTS=""
     local response_json=""
+    # 无响应时的默认正文：渲染时落「任务已完成」默认元素
+    # （与 build_response_content 对空输入的产出等价）
+    local RESPONSE_CONTENT='{"texts":[],"truncated":false}'
 
     # 使用 extract_response 函数（支持子代理回退）
     response_json=$(extract_response "$TRANSCRIPT_PATH" "$INPUT_TURN_ID")
 
     # 用 Stop 事件提供的 last_assistant_message 补全竞态缺失的最终答复
-    response_json=$(supplement_last_message "$response_json" "$LAST_ASSISTANT_MSG" "$INPUT_SESSION_ID")
+    response_json=$(supplement_last_message "$response_json" "$LAST_ASSISTANT_MSG" "$SESSION_ID")
 
+    # 有响应时：提取 thinking 与正文
     if [ -n "$response_json" ] && [ "$response_json" != "null" ]; then
-        # 从结果中提取 session_id 和 thinking
-        SESSION_ID=$(json_get "$response_json" "session_id")
-        if [ -z "$SESSION_ID" ]; then
-            SESSION_ID="unknown"
-        fi
-
         THINKING=$(json_get "$response_json" "thinking")
-
-        # 前置解析 chat_id 并检查 mute 状态，muted 时跳过后续所有处理
-        local RESOLVED_CHAT_ID
-        RESOLVED_CHAT_ID=$(_resolve_chat_id "$SESSION_ID" "$PROJECT_DIR")
-        if [ "$RESOLVED_CHAT_ID" = "$MUTED_SENTINEL" ]; then
-            log "Session muted, skipping stop notification: $SESSION_ID"
-            return 0
-        fi
-
-        # 构建响应元素 JSON 片段（含截断和代码块格式化）
-        # 注: Markdown 预处理已下沉到 feishu.sh 的 send_feishu_card() 中统一处理
-        RESPONSE_ELEMENTS=$(build_response_elements "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
-        log "Built response elements: ${#RESPONSE_ELEMENTS} chars, thinking: ${#THINKING} chars"
-    fi
-
-    # 无响应时使用默认消息
-    if [ -z "$RESPONSE_ELEMENTS" ]; then
-        RESPONSE_ELEMENTS='{"tag":"markdown","content":"任务已完成，请返回终端查看详细信息。","text_align":"left","text_size":"normal_v2"}'
-        log "Using default response"
+        RESPONSE_CONTENT=$(build_response_content "$response_json" "$STOP_MESSAGE_MAX_LENGTH")
     fi
 
     # 处理 thinking：STOP_THINKING_MAX_LENGTH=0 时跳过
@@ -714,16 +618,8 @@ send_stop_notification_async() {
         log "Thinking truncated to ${#THINKING} chars"
     fi
 
-    # 构建并发送卡片
-    local CARD
-    CARD=$(build_stop_card "$RESPONSE_ELEMENTS" "$PROJECT_NAME" "$TIMESTAMP" "$SESSION_ID" "$THINKING" 2>/dev/null)
-
-    if [ -n "$CARD" ]; then
-        # 传递 session_id, project_dir, callback_url, reply_to 支持链式回复
-        local options
-        options=$(json_build_object "webhook_url" "$WEBHOOK_URL" "session_id" "$SESSION_ID" "project_dir" "$PROJECT_DIR" "callback_url" "$CALLBACK_URL" "chat_id" "$RESOLVED_CHAT_ID" "reply_to" "$REPLY_TO_MSG_ID")
-        send_feishu_card "$CARD" "$options" >/dev/null 2>&1
-    fi
+    # 发送完成通知
+    send_stop_notification "$RESPONSE_CONTENT" "$THINKING" >/dev/null 2>&1
 }
 
 # 后台发送；单独 & 不够——宿主以 pipe 关闭（非 PID 退出）判断 hook 结束，
